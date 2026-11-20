@@ -2,6 +2,7 @@
  * WebGPU canvas shared by consecutive WebGPU layers (see render/surface.ts).
  */
 import type {FrameState} from 'ol/Map.js';
+import ViewHint from 'ol/ViewHint.js';
 import {Surface} from '../render/surface.js';
 import {flushSubmits, frameEncoder, submitEpoch} from './device.js';
 
@@ -185,10 +186,16 @@ export class WebGPUSurface extends Surface {
   /**
    * A presented WebGPU canvas reads back empty from a later task, so when the
    * app may export (rendercomplete, which ol dispatches from a timeout), the
-   * layers draw the last frame once more, in order.
+   * layers draw the last frame once more, in order. Not while the view is
+   * being dragged or animated: ol fires rendercomplete after every such
+   * frame, and drawing each one twice would halve the frame rate; the frame
+   * after the interaction ends is drawn again as usual.
    */
   redraw(frameState: FrameState | null | undefined) {
     if (!this.preserveDrawingBuffer || !frameState || frameState.index !== this.lastFrame || this.redrawnFrame === frameState.index || !this.device) {
+      return;
+    }
+    if (frameState.viewHints[ViewHint.INTERACTING] || frameState.viewHints[ViewHint.ANIMATING]) {
       return;
     }
     this.redrawnFrame = frameState.index;
