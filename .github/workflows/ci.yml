@@ -52,7 +52,8 @@ jobs:
       - name: Synced rendering cases match upstream
         run: |
           npm run sync-upstream-tests
-          git diff --exit-code -- test/rendering/cases
+          # contents only: upstream has some PNGs marked executable
+          git -c core.fileMode=false diff --exit-code -- test/rendering/cases
 
       - name: Build wasm
         run: npm run build:wasm
