@@ -62,6 +62,14 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
   symbol radius, stroke width and fill evaluated with ol's CPU expression
   evaluator. Unlike ol's GPU picking it honours `hitTolerance`, respects
   `filter`, and can return all features under the cursor.
+- **Same text as ol.** `text-*` styles are drawn by ol's own text overlay
+  worker (`ol/worker/textOverlay.js`, loaded on demand): it turns the render
+  instructions into Canvas 2D label batches and, after each frame, draws them
+  into an image for that frame. The layer composites the image with ol's
+  post-process maths (`src/render/textOverlay.ts`), reprojected to the
+  current view until the next image arrives, so labels follow the map while
+  panning. Unlike ol's layer, `rendercomplete` waits for the labels, so map
+  export includes them.
 - **Fallbacks.** If WebAssembly cannot load, the worker uses ol's JS buffer
   code; if WebGPU is unavailable, `GpuVectorLayer` uses WebGL2.
 
@@ -121,14 +129,26 @@ upstream's `expected.png`:
 | webgl-shapes | 0.00% | 0.00% | 0.00% | 0.00% |
 | webgl-vector | 0.02% | 0.02% | 0.02% | 0.00% |
 | webgl-vector-geographic | 0.00% | 0.00% | 0.00% | 0.00% |
-| webgl-text-style | 1.58% | 2.62% ✗ | 2.62% ✗ | 0.00% |
-| webgl-text-style-linestring | 2.10% ✗ | 2.42% ✗ | 2.42% ✗ | 0.00% |
+| webgl-text-style | 1.58% | 0.00% vs ol | 0.00% vs ol | 0.00% |
+| webgl-text-style-linestring | 2.10% | 0.00% vs ol | 0.00% vs ol | 0.00% |
 
-All 17 non-text cases pass on both backends with exactly ol's own deviation
-from the reference on this machine (the small numbers are driver
-differences against the CI machine that made `expected.png`), and WebGL2 and
-WebGPU produce identical pixels. The two text cases fail by design: text is
-not rendered yet (see Limitations).
+All 19 cases pass on both backends, and WebGL2 and WebGPU produce identical
+pixels. The 17 geometry cases deviate from the reference exactly as much as
+ol's own layer does on this machine (driver differences against the CI
+machine that made `expected.png`).
+
+The two text cases are compared with ol's `WebGLVector` rendered on the same
+machine instead, and match it pixel for pixel. Their `expected.png` cannot
+be reproduced elsewhere. ol's text worker only sees fonts registered inside
+the worker, so upstream's `@font-face` "Ubuntu" never reaches it, and the
+glyphs come from the machine's fallback font. That is why ol itself is off by
+1.6–2.1% here.
+
+**Text while panning.** `test/rendering/text.ts` pans by whole pixels and
+reads the frame in the same task, so it shows the previous text image
+reprojected with the overlay matrix. It must equal the previous frame shifted
+by the same amount. It does, with 0 differing pixels on both backends, with
+and without view rotation.
 
 **Hit detection.** `test/rendering/picking.ts` checks 14 situations (symbol
 radius, stroke width, polygon fill and holes, `hitTolerance`, filtered-out
@@ -139,8 +159,8 @@ because its GPU hit buffer is rendered asynchronously.
 
 **Package.** `npm run test:dist` builds a small app against `dist/` for
 production and checks in Chromium that WebGPU, WebGL2 and the runtime
-WebGPU → WebGL2 fallback of `GpuVectorLayer` render, pick, and can be
-exported with `drawImage` in a `rendercomplete` listener.
+WebGPU → WebGL2 fallback of `GpuVectorLayer` render (including a label),
+pick, and can be exported with `drawImage` in a `rendercomplete` listener.
 
 ## Benchmark
 
@@ -190,8 +210,15 @@ What this shows:
 
 ## Limitations
 
-- **Text styles** (`text-*`) are not rendered yet (ol 10.11 draws them in a
-  separate canvas overlay worker).
+- **Text** has ol's own limitations, because it is drawn by ol's text
+  worker:
+  - Only fonts available inside a worker can be used: system fonts, or fonts
+    the worker loads itself. Web fonts from the page's `@font-face` are not
+    seen (with ol's `WebGLVector` neither).
+  - Labels are drawn at CSS-pixel resolution, ignoring `pixelRatio`, and for
+    the central world copy only.
+  - Labels are not hit-detectable.
+  - Labels appear one worker round-trip after the geometries.
 - Depends on non-API ol modules (`ol/render/webgl/*`, `ol/expr/*`), so the
   peer dependency is pinned to ol 10.11.x; the golden and rendering tests
   catch breaking changes when upgrading.

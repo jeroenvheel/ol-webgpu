@@ -27,9 +27,18 @@ const args = Object.fromEntries(
  * Cases our layers are not expected to pass yet, with the reason. They are
  * still rendered and reported, but do not fail the run.
  */
-const KNOWN = {
-  'webgl-text-style': 'text styles are not supported yet',
-  'webgl-text-style-linestring': 'text styles are not supported yet',
+const KNOWN = {};
+
+/**
+ * Cases whose expected.png cannot be reproduced on another machine, so our
+ * layers are compared with ol's WebGLVector rendered here instead. Text is
+ * drawn by ol's text worker, which only sees fonts registered inside the
+ * worker: upstream's @font-face 'Ubuntu' never reaches it, so the glyphs
+ * come from whatever fallback font the machine has.
+ */
+const COMPARE_WITH_OL = {
+  'webgl-text-style': 'fonts differ per machine',
+  'webgl-text-style-linestring': 'fonts differ per machine',
 };
 
 const casesDir = join(here, 'cases');
@@ -111,13 +120,31 @@ for (const name of cases) {
     } catch {
       errors.push('timed out waiting for ol-gpu renderers');
     }
+    if (name in COMPARE_WITH_OL) {
+      // ol's layer has no readiness signal for its text overlay: give its worker time
+      await page.waitForTimeout(500);
+    }
     // let the map draw the final state
     await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
     const file = join(casesDir, name, `actual-${layer}.png`);
     await page.screenshot({path: file});
     const tolerance = config.tolerance ?? 0.005;
-    const mismatch = compare(readPng(file), expected, join(reportDir, `${name}-${layer}-diff.png`));
-    row[layer] = {mismatch, tolerance, pass: mismatch <= tolerance, errors: [...new Set(errors)].slice(0, 5)};
+    const reference = name in COMPARE_WITH_OL && layer !== 'ol' && row.ol ? readPng(join(casesDir, name, 'actual-ol.png')) : expected;
+    const mismatch = compare(readPng(file), reference, join(reportDir, `${name}-${layer}-diff.png`));
+    row[layer] = {
+      mismatch,
+      tolerance,
+      pass: mismatch <= tolerance,
+      reference: reference === expected ? 'expected' : 'ol',
+      errors: [...new Set(errors)].slice(0, 5),
+    };
+  }
+  if (name in COMPARE_WITH_OL) {
+    if (row.ol) {
+      row.note = `${COMPARE_WITH_OL[name]}: ol vs expected.png is informative, webgl2/webgpu are checked against ol`;
+    } else {
+      row.known = `${COMPARE_WITH_OL[name]}; include --layers=ol to check against ol`;
+    }
   }
   if (layers.includes('webgl2') && layers.includes('webgpu')) {
     row.webgl2VsWebgpu = compare(
@@ -127,11 +154,13 @@ for (const name of cases) {
     );
   }
   results.push(row);
-  const cell = (r) => (r ? `${r.pass ? 'ok  ' : 'FAIL'} ${(r.mismatch * 100).toFixed(2).padStart(6)}%` : '');
+  const cell = (r) =>
+    r ? `${r.pass ? 'ok  ' : 'FAIL'} ${(r.mismatch * 100).toFixed(2).padStart(6)}%${r.reference === 'ol' ? ' vs ol' : ''}` : '';
   console.log(
     `${name.padEnd(46)} ${layers.map((l) => `${l}: ${cell(row[l])}`).join('   ')}` +
       (row.webgl2VsWebgpu !== undefined ? `   gl2↔gpu ${(row.webgl2VsWebgpu * 100).toFixed(2)}%` : '') +
-      (row.known ? `   (known: ${row.known})` : ''),
+      (row.known ? `   (known: ${row.known})` : '') +
+      (row.note ? `   (${row.note})` : ''),
   );
   for (const l of layers) {
     for (const e of row[l].errors) {
@@ -186,12 +215,37 @@ if (args.picking !== 'false' && !args.match) {
   results.push({picking: picks});
 }
 
+// --- text overlay while the view moves -------------------------------------
+let textFailures = 0;
+if (args.text !== 'false' && (!args.match || 'text'.includes(args.match) || args.match.includes('text'))) {
+  console.log('\ntext overlay reprojected while panning (text.ts):');
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    for (const rotation of [0, 0.5]) {
+      errors.length = 0;
+      await page.goto(`${base}text.html?layer=${layer}&rotation=${rotation}`);
+      let r = null;
+      try {
+        await page.waitForFunction(() => window.__textPan, null, {timeout: 30_000, polling: 50});
+        r = await page.evaluate(() => window.__textPan);
+      } catch {
+        // reported below
+      }
+      // a few edge pixels may differ (linear filtering at the image border)
+      const ok = r && r.textPixels > 500 && r.differing <= r.compared * 0.001;
+      textFailures += ok ? 0 : 1;
+      console.log(
+        `  ${`${layer}, rotation ${rotation}`.padEnd(24)} ${ok ? 'ok  ' : 'FAIL'} ${r ? `${r.differing} of ${r.compared} pixels differ (${r.textPixels} drawn)` : `timed out ${errors.join(' | ').slice(0, 200)}`}`,
+      );
+    }
+  }
+}
+
 await browser.close();
 await server.close();
 writeFileSync(join(reportDir, 'results.json'), JSON.stringify(results, null, 2));
 
 const failures = results.filter((r) => r.case && !r.known && ['webgl2', 'webgpu'].some((l) => r[l] && !r[l].pass));
 console.log(
-  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures (report: ${reportDir})`,
+  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures, ${textFailures} text overlay failures (report: ${reportDir})`,
 );
-process.exitCode = failures.length || pickFailures ? 1 : 0;
+process.exitCode = failures.length || pickFailures || textFailures ? 1 : 0;

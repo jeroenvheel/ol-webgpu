@@ -46,6 +46,7 @@ for (const [name, expectedBackend] of cases) {
     result.pixel[0] > 200 &&
     result.pixel[1] < 50 &&
     result.picked?.[0] === 'dot' &&
+    result.labelPixels > 20 &&
     errors.length === 0;
   failures += ok ? 0 : 1;
   if (!ok) {

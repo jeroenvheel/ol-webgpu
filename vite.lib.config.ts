@@ -3,10 +3,12 @@ import {defineConfig} from 'vite';
 
 // Library build: dist/index.js + a worker chunk + the two .wasm files as
 // separate assets, referenced with `new URL(..., import.meta.url)` so the
-// consumer's bundler (Vite, webpack 5, ...) copies them. Vite's `build.lib`
-// mode is not used because it always inlines assets as base64 (that would
-// put the 1.3 MB shader translator into index.js, even for WebGL2 users).
-// `ol` stays external.
+// consumer's bundler (Vite, webpack 5, ...) copies them. `ol` stays external.
+//
+// Library mode is needed: an app-mode build wraps dynamic imports (ol's text
+// worker) in Vite's `__vitePreload` helper, which then clashes with the
+// consumer's own Vite build. Library mode inlines assets as base64 though,
+// so the wasm URLs in src/wasm carry `?no-inline`.
 export default defineConfig({
   publicDir: false,
   base: './', // asset URLs relative to the module, not the site root
@@ -16,16 +18,14 @@ export default defineConfig({
     target: 'es2022',
     minify: false,
     sourcemap: true,
-    assetsInlineLimit: 0,
-    modulePreload: false,
+    lib: {
+      entry: resolve(import.meta.dirname, 'src/index.ts'),
+      formats: ['es'],
+      fileName: 'index',
+    },
     rollupOptions: {
-      input: {index: resolve(import.meta.dirname, 'src/index.ts')},
-      preserveEntrySignatures: 'strict',
       external: (id) => id === 'ol' || id.startsWith('ol/'),
       output: {
-        format: 'es',
-        entryFileNames: '[name].js',
-        chunkFileNames: '[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
       },
     },

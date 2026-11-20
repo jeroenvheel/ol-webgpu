@@ -6,7 +6,7 @@ import type {FlatStyleLike, StyleVariables} from 'ol/style/flat.js';
 import type BaseGpuVectorRenderer from '../renderer/BaseGpuVectorRenderer.js';
 
 export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> extends Omit<LayerOptions<S>, 'render'> {
-  /** Flat style, same syntax as `ol/layer/WebGLVector` (text is not supported yet). */
+  /** Flat style, same syntax as `ol/layer/WebGLVector`, including `text-*` (drawn by ol's text worker). */
   style: FlatStyleLike;
   /** Style variables, used with `['var', name]`; update with `updateStyleVariables`. */
   variables?: StyleVariables;

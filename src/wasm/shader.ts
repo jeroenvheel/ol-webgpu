@@ -104,8 +104,9 @@ export class ShaderTranslator {
   }
 }
 
+/** See `defaultWasmUrl` in core.ts for `?no-inline`. */
 export function defaultShaderWasmUrl(): URL {
-  return new URL('./ol_gpu_shader.wasm', import.meta.url);
+  return new URL('./ol_gpu_shader.wasm?no-inline', import.meta.url);
 }
 
 let shared: Promise<ShaderTranslator> | null = null;

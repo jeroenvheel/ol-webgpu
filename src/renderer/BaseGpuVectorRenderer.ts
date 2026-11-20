@@ -29,7 +29,10 @@ import VectorEventType from 'ol/source/VectorEventType.js';
 import type {FlatStyleLike} from 'ol/style/flat.js';
 import {type Transform, apply as applyTransform, create as createTransform, makeInverse, translate} from 'ol/transform.js';
 import LabelsArray from 'ol/webgl/LabelsArray.js';
+import {toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
+import {create as createMat4} from 'ol/vec/mat4.js';
 import {Picker} from '../render/picking.js';
+import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
 import {type StylePasses, buildStylePasses} from '../render/stylePasses.js';
 import {UniformState, makeProjectionTransform} from '../render/uniforms.js';
 import {type Core, loadCore} from '../wasm/core.js';
@@ -60,6 +63,8 @@ export interface Uploaded<B> {
   lines: UploadedSet<B> | null;
   points: UploadedSet<B> | null;
   invertVerticesTransform: Transform;
+  /** Text instructions set in ol's text worker (null: no text to draw). */
+  textKey: string | null;
 }
 
 /** Statistics of the last rebuild, exposed for benchmarks and debugging. */
@@ -101,7 +106,12 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
   private pendingIndex: {data: Float32Array; center: number[]; resolution: number; frameState: FrameState} | null = null;
   private readonly worker: WorkerClient;
   private lastWorlds: number[] = [0];
-  private warnedText = false;
+  /** ol's text overlay worker client, when the style has text. */
+  private textOverlay: TextOverlay | null = null;
+  /** Same render-loop guard as ol's WebGLVectorLayerRenderer (`skipNextTextRender_`). */
+  private skipNextTextRender = false;
+  private layerRevision = -1;
+  private readonly textMatrix = createMat4();
 
   constructor(layer: Layer<VectorSource>, options: GpuVectorRendererOptions) {
     super(layer);
@@ -113,6 +123,7 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
     this.passes = buildStylePasses(this.style, this.variables);
     this.uniformState = new UniformState(this.passes.uniforms);
     this.worker = WorkerClient.shared(options);
+    this.textOverlay = this.passes.hasText ? new TextOverlay() : null;
     this.ready = false;
     liveRenderers.add(this as BaseGpuVectorRenderer<unknown>);
 
@@ -157,6 +168,12 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
     this.picker?.setStyle(style, variables);
     this.applyPasses();
     this.disposeBuffers();
+    if (this.passes.hasText && !this.textOverlay) {
+      this.textOverlay = new TextOverlay();
+    } else if (!this.passes.hasText && this.textOverlay) {
+      this.textOverlay.terminate();
+      this.textOverlay = null;
+    }
     this.previousExtent = createEmpty(); // force a rebuild: the attribute layout changed
   }
 
@@ -196,14 +213,15 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
     if (!source || !frameExtent) {
       return true;
     }
-    if (this.passes.hasText && !this.warnedText) {
-      this.warnedText = true;
-      console.warn('ol-gpu: text styles are not supported yet and are ignored');
-    }
     const viewNotMoving = !frameState.viewHints[ViewHint.ANIMATING] && !frameState.viewHints[ViewHint.INTERACTING];
     const extentChanged = !extentEquals(this.previousExtent, frameExtent);
     const sourceChanged = this.sourceRevision < source.getRevision();
+    const layerChanged = this.layerRevision < layer.getRevision();
     this.sourceRevision = source.getRevision();
+    this.layerRevision = layer.getRevision();
+    if (layerChanged || extentChanged || sourceChanged) {
+      this.skipNextTextRender = false; // as in ol: these changes need a fresh text image
+    }
 
     if (viewNotMoving && (extentChanged || sourceChanged)) {
       const resolution = frameState.viewState.resolution;
@@ -232,28 +250,39 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
     const labels = new LabelsArray();
     const custom = p.customAttributes as any;
     const empty = this.batch.isEmpty();
-    const polygons = p.hasFill && !empty ? generatePolygonRenderInstructions(this.batch.polygonBatch, new Float32Array(0), labels, custom, transform) : null;
-    const lines = p.hasStroke && !empty ? generateLineStringRenderInstructions(this.batch.lineStringBatch, new Float32Array(0), labels, custom, transform) : null;
-    const points = p.hasSymbol && !empty ? generatePointRenderInstructions(this.batch.pointBatch, new Float32Array(0), labels, custom, transform) : null;
+    // like ol: text needs the instructions of every geometry type
+    const text = this.textOverlay;
+    const polygons = (p.hasFill || text) && !empty ? generatePolygonRenderInstructions(this.batch.polygonBatch, new Float32Array(0), labels, custom, transform) : null;
+    const lines = (p.hasStroke || text) && !empty ? generateLineStringRenderInstructions(this.batch.lineStringBatch, new Float32Array(0), labels, custom, transform) : null;
+    const points = (p.hasSymbol || text) && !empty ? generatePointRenderInstructions(this.batch.pointBatch, new Float32Array(0), labels, custom, transform) : null;
     const instructionsTime = performance.now() - t0;
     const invert = makeInverse(createTransform(), transform);
     const size = frameState.size;
     const center = frameState.viewState.center.slice();
     const resolution = frameState.viewState.resolution;
 
-    this.worker
-      .build({
-        points: (points?.buffer as ArrayBuffer) ?? null,
-        lines: (lines?.buffer as ArrayBuffer) ?? null,
-        polygons: (polygons?.buffer as ArrayBuffer) ?? null,
-        customSize: p.customSize,
-        refOffset: p.refOffset,
-        invert: Array.from(invert),
-        // instruction space (clip, unrotated) → pixels at build time: isotropic for picking
-        indexTransform: this.hitDetection ? [size[0] / 2, 0, 0, size[1] / 2, 0, 0] : null,
-      })
-      .then((response: BuildResponse) => {
+    // the text worker gets copies, before the buffers are transferred below
+    const textKey =
+      text && !empty
+        ? text.build({polygons, lines, points, labels: labels.getArray()}, toFlatStyleLike(this.style as any) as FlatStyleLike, p.customAttributes, transform, resolution)
+        : Promise.resolve(null);
+    const geometry = this.worker.build({
+      points: p.hasSymbol ? ((points?.buffer as ArrayBuffer) ?? null) : null,
+      lines: p.hasStroke ? ((lines?.buffer as ArrayBuffer) ?? null) : null,
+      polygons: p.hasFill ? ((polygons?.buffer as ArrayBuffer) ?? null) : null,
+      customSize: p.customSize,
+      refOffset: p.refOffset,
+      invert: Array.from(invert),
+      // instruction space (clip, unrotated) → pixels at build time: isotropic for picking
+      indexTransform: this.hitDetection ? [size[0] / 2, 0, 0, size[1] / 2, 0, 0] : null,
+    });
+
+    Promise.all([geometry, textKey])
+      .then(([response, key]: [BuildResponse, string | null]) => {
         if (generation !== this.generation || this.disposed) {
+          if (key) {
+            text?.dispose(key);
+          }
           return;
         }
         this.disposeBuffers();
@@ -263,6 +292,7 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
           lines: up(response.lines),
           points: up(response.points),
           invertVerticesTransform: invert,
+          textKey: key,
         };
         if (response.index) {
           if (this.picker) {
@@ -273,13 +303,55 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
           }
         }
         this.stats = {engine: response.engine, instructions: instructionsTime, worker: response.timings, total: performance.now() - t0};
-        this.ready = true;
+        // with labels, stay not-ready (no rendercomplete) until the first
+        // text image for these instructions has arrived (see requestText)
+        this.ready = !key;
         this.getLayer()?.changed();
       })
       .catch((e) => {
         console.error('ol-gpu: buffer generation failed', e);
         this.ready = true;
       });
+  }
+
+  /**
+   * After each frame, asks ol's text worker for a text image of this frame;
+   * when it arrives, the layer re-renders once to composite it. Mirrors
+   * ol's WebGLVectorLayerRenderer, including its guard against an endless
+   * render loop (`skipNextTextRender`).
+   */
+  private requestText(frameState: FrameState) {
+    const text = this.textOverlay;
+    if (!text) {
+      return;
+    }
+    const key = this.buffers?.textKey ?? null;
+    const generation = this.generation;
+    text.render(frameState, key ? [key] : []).then((updated) => {
+      if (!updated || this.disposed || text !== this.textOverlay) {
+        return;
+      }
+      const firstImage = !this.ready && generation === this.generation && key !== null && key === this.buffers?.textKey;
+      if (firstImage) {
+        this.ready = true;
+        this.framesSinceReady = 0;
+      } else if (this.skipNextTextRender) {
+        this.skipNextTextRender = false;
+        return;
+      }
+      this.skipNextTextRender = true;
+      this.layerRevision++; // anticipates the revision after changed(), as ol does
+      this.getLayer()?.changed();
+    });
+  }
+
+  /** Latest text image and the matrix that maps it onto this frame (null: none). */
+  protected textImage(frameState: FrameState): {image: TextImage; matrix: Float32Array | number[]} | null {
+    const image = this.textOverlay?.image;
+    if (!image) {
+      return null;
+    }
+    return {image, matrix: overlayMatrix(image, frameState, this.textMatrix)};
   }
 
   override renderFrame(frameState: FrameState, _target: HTMLElement | null): HTMLElement {
@@ -307,6 +379,7 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
 
     this.dispatch('prerender', frameState, null);
     const context = this.draw(frameState, worlds, worldWidth);
+    this.requestText(frameState);
     this.dispatch('postrender', frameState, context);
     if (this.ready) {
       this.framesSinceReady++;
@@ -398,6 +471,9 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
           this.release(set.gpu);
         }
       }
+      if (b.textKey) {
+        this.textOverlay?.dispose(b.textKey);
+      }
     }
     this.buffers = null;
     this.picker?.clear();
@@ -419,6 +495,8 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
   override disposeInternal() {
     liveRenderers.delete(this as BaseGpuVectorRenderer<unknown>);
     this.disposeBuffers();
+    this.textOverlay?.terminate();
+    this.textOverlay = null;
     this.sourceKeys?.forEach(unlistenByKey);
     this.sourceKeys = null;
     super.disposeInternal();

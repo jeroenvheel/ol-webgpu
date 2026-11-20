@@ -8,6 +8,7 @@ import type Layer from 'ol/layer/Layer.js';
 import type VectorSource from 'ol/source/Vector.js';
 import {create as createTransform} from 'ol/transform.js';
 import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js';
+import {TEXT_OVERLAY_WGSL} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
 import {type ShaderTranslator, type WgslProgram, loadShaderTranslator} from '../wasm/shader.js';
 import {getDevice, onDeviceLost, preferredFormat} from '../webgpu/device.js';
@@ -61,6 +62,15 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   /** Copy of the last frame (preserveDrawingBuffer), re-presented on rendercomplete. */
   private kept: GPUTexture | null = null;
   private keptFrameIndex = -1;
+  /** Text compositing pipeline and the texture of the current text image. */
+  private text: {
+    layout: GPUBindGroupLayout;
+    pipeline: GPURenderPipeline;
+    uniforms: GPUBuffer;
+    texture: GPUTexture | null;
+    group: GPUBindGroup | null;
+    version: number;
+  } | null = null;
   private uniformBuffer: GPUBuffer | null = null;
   private uniformStaging = new ArrayBuffer(0);
   private zeroBuffer: GPUBuffer | null = null;
@@ -97,6 +107,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     this.msaa = null;
     this.kept = null;
     this.keptFrameIndex = -1;
+    this.text = null;
     this.uniformBuffer = null;
     this.zeroBuffer = null;
     this.sampler = null;
@@ -379,6 +390,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
           : {view: target, clearValue: [0, 0, 0, 0], loadOp: 'clear', storeOp: 'store'},
       ],
     });
+    const text = this.prepareText(frameState);
     for (const call of calls) {
       const g = call.set.gpu;
       pass.setPipeline(call.pipe.pipeline);
@@ -395,6 +407,11 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       if (instances > 0) {
         pass.drawIndexed(g.indexCount, instances);
       }
+    }
+    if (text) {
+      pass.setPipeline(text.pipeline);
+      pass.setBindGroup(0, text.group);
+      pass.draw(3);
     }
     pass.end();
     if (this.preserveDrawingBuffer) {
@@ -414,6 +431,82 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     }
     device.queue.submit([encoder.finish()]);
     return context;
+  }
+
+  /**
+   * Resources to composite the text image (ol's text post-process, see
+   * render/textOverlay.ts) at the end of the frame's render pass.
+   */
+  private prepareText(frameState: FrameState): {pipeline: GPURenderPipeline; group: GPUBindGroup} | null {
+    const text = this.textImage(frameState);
+    if (!text) {
+      return null;
+    }
+    const device = this.device!;
+    if (!this.text) {
+      const module = device.createShaderModule({code: TEXT_OVERLAY_WGSL, label: 'ol-gpu text'});
+      const layout = device.createBindGroupLayout({
+        entries: [
+          {binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {type: 'uniform'}},
+          {binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
+          {binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {type: 'filtering'}},
+        ],
+      });
+      this.text = {
+        layout,
+        pipeline: device.createRenderPipeline({
+          label: 'ol-gpu text',
+          layout: device.createPipelineLayout({bindGroupLayouts: [layout]}),
+          vertex: {module, entryPoint: 'vs'},
+          fragment: {
+            module,
+            entryPoint: 'fs',
+            targets: [
+              {
+                format: this.format,
+                // colour: a * text + (1 - a) * layer; alpha: a * a + (1 - a) * layer.a (as ol)
+                blend: {
+                  color: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
+                  alpha: {srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add'},
+                },
+              },
+            ],
+          },
+          primitive: {topology: 'triangle-list'},
+          multisample: {count: this.sampleCount},
+        }),
+        uniforms: device.createBuffer({size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-gpu text matrix'}),
+        texture: null,
+        group: null,
+        version: -1,
+      };
+    }
+    const t = this.text;
+    const canvas = text.image.canvas;
+    if (t.version !== text.image.version || !t.texture || !t.group) {
+      t.version = text.image.version;
+      if (!t.texture || t.texture.width !== canvas.width || t.texture.height !== canvas.height) {
+        t.texture?.destroy();
+        t.texture = device.createTexture({
+          size: [canvas.width, canvas.height],
+          format: 'rgba8unorm',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+          label: 'ol-gpu text image',
+        });
+        t.group = device.createBindGroup({
+          layout: t.layout,
+          entries: [
+            {binding: 0, resource: {buffer: t.uniforms}},
+            {binding: 1, resource: t.texture.createView()},
+            {binding: 2, resource: this.sampler!},
+          ],
+        });
+      }
+      // straight alpha, no flip: like ol's texture upload of its overlay canvas
+      device.queue.copyExternalImageToTexture({source: canvas}, {texture: t.texture, premultipliedAlpha: false}, [canvas.width, canvas.height]);
+    }
+    device.queue.writeBuffer(t.uniforms, 0, new Float32Array(text.matrix));
+    return {pipeline: t.pipeline, group: t.group!};
   }
 
   override onRenderComplete(frameState: FrameState | null | undefined) {
@@ -437,6 +530,8 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     this.unlistenLost();
     this.msaa?.destroy();
     this.kept?.destroy();
+    this.text?.texture?.destroy();
+    this.text?.uniforms.destroy();
     this.uniformBuffer?.destroy();
     this.zeroBuffer?.destroy();
     this.placeholder?.destroy();

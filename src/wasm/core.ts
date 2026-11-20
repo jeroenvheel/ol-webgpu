@@ -181,9 +181,13 @@ export class Core {
   }
 }
 
-/** Default location of the wasm binary, resolved by bundlers (Vite, webpack 5). */
+/**
+ * Default location of the wasm binary, resolved by bundlers (Vite, webpack 5).
+ * `?no-inline` keeps it a separate file in the library build (Vite's library
+ * mode inlines assets otherwise); the query is not part of the emitted URL.
+ */
 export function defaultWasmUrl(): URL {
-  return new URL('./ol_gpu_core.wasm', import.meta.url);
+  return new URL('./ol_gpu_core.wasm?no-inline', import.meta.url);
 }
 
 export async function loadCore(source: WasmSource = defaultWasmUrl()): Promise<Core> {

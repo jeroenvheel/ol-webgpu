@@ -8,6 +8,7 @@ import type Layer from 'ol/layer/Layer.js';
 import type VectorSource from 'ol/source/Vector.js';
 import {create as createTransform} from 'ol/transform.js';
 import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js';
+import {TEXT_OVERLAY_GLSL} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
 import type {BufferSet} from '../worker/protocol.js';
 import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
@@ -40,6 +41,8 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   private textures = new Map<string, {texture: WebGLTexture; source: TexImageSource | null}>();
   private contextLost = false;
   private readonly transform = createTransform();
+  /** Text compositing program and the texture of the current text image. */
+  private text: {program: WebGLProgram; texture: WebGLTexture; version: number; sampler: WebGLUniformLocation; matrix: WebGLUniformLocation} | null = null;
 
   constructor(layer: Layer<VectorSource>, options: GpuVectorRendererOptions) {
     super(layer, options);
@@ -56,6 +59,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     this.contextLost = false;
     this.programs = [];
     this.textures.clear();
+    this.text = null;
     this.applyPasses();
     this.reuploadBuffers();
     this.getLayer()?.changed();
@@ -107,7 +111,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     }));
   }
 
-  private compile(pass: SubPass): Program {
+  private link(vertexShader: string, fragmentShader: string): WebGLProgram {
     const gl = this.gl!;
     const shader = (type: number, src: string) => {
       const s = gl.createShader(type)!;
@@ -118,8 +122,8 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       }
       return s;
     };
-    const vs = shader(gl.VERTEX_SHADER, pass.vertexShader);
-    const fs = shader(gl.FRAGMENT_SHADER, pass.fragmentShader);
+    const vs = shader(gl.VERTEX_SHADER, vertexShader);
+    const fs = shader(gl.FRAGMENT_SHADER, fragmentShader);
     const program = gl.createProgram()!;
     gl.attachShader(program, vs);
     gl.attachShader(program, fs);
@@ -129,6 +133,12 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     if (!gl.getProgramParameter(program, gl.LINK_STATUS) && !gl.isContextLost()) {
       throw new Error(`ol-gpu: program link failed: ${gl.getProgramInfoLog(program)}`);
     }
+    return program;
+  }
+
+  private compile(pass: SubPass): Program {
+    const gl = this.gl!;
+    const program = this.link(pass.vertexShader, pass.fragmentShader);
     const uniforms = new Map<string, UniformInfo>();
     const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) as number;
     let unit = 0;
@@ -308,7 +318,47 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       }
     }
     gl.bindVertexArray(null);
+    this.drawText(frameState);
     return gl;
+  }
+
+  /** Composites the text image over the layer, like ol's text post-process. */
+  private drawText(frameState: FrameState) {
+    const text = this.textImage(frameState);
+    if (!text) {
+      return;
+    }
+    const gl = this.gl!;
+    if (!this.text) {
+      const program = this.link(TEXT_OVERLAY_GLSL.vertex, TEXT_OVERLAY_GLSL.fragment);
+      this.text = {
+        program,
+        texture: gl.createTexture()!,
+        version: -1,
+        sampler: gl.getUniformLocation(program, 'u_textOverlay')!,
+        matrix: gl.getUniformLocation(program, 'u_textOverlayMatrix')!,
+      };
+    }
+    const t = this.text;
+    gl.useProgram(t.program);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, t.texture);
+    if (t.version !== text.image.version) {
+      t.version = text.image.version;
+      // straight alpha, no flip: like ol's texture upload of its overlay canvas
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, text.image.canvas);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+    gl.uniform1i(t.sampler, 0);
+    gl.uniformMatrix4fv(t.matrix, false, text.matrix);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   }
 
   override disposeInternal() {
@@ -317,6 +367,10 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     if (gl) {
       this.programs.forEach((p) => [p.fill, p.stroke, p.symbol].forEach((x) => x && gl.deleteProgram(x.program)));
       this.textures.forEach((t) => gl.deleteTexture(t.texture));
+      if (this.text) {
+        gl.deleteProgram(this.text.program);
+        gl.deleteTexture(this.text.texture);
+      }
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     }
     this.gl = null;
