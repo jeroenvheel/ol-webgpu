@@ -11,7 +11,7 @@ import Map from 'ol/Map.js';
 import View from 'ol/View.js';
 import Polygon from 'ol/geom/Polygon.js';
 import VectorSource from 'ol/source/Vector.js';
-import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
+import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 
@@ -40,8 +40,7 @@ function drawnPixels(className: string): number {
   return n;
 }
 
-const settled = () => [...liveRenderers].every((r) => r.ready && r.framesSinceReady >= 1);
-const frame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+const settled = () => renderersSettled();
 const renderComplete = () => new Promise((r) => map.once('rendercomplete', () => r({drawn: drawnPixels('drawn'), empty: drawnPixels('empty')})));
 
 (async () => {

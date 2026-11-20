@@ -16,6 +16,7 @@ import {
   setFromArray,
 } from 'ol/transform.js';
 import {create as createMat4, fromTransform as mat4FromTransform} from 'ol/vec/mat4.js';
+import {FB_HEIGHT_UNIFORM} from '../style/glsl.js';
 import type {UniformValue} from './stylePasses.js';
 
 /** A resolved uniform: scalar, vector, 4x4 matrix (16 floats) or texture source. */
@@ -89,7 +90,7 @@ export class UniformState {
     out.set('u_one', 1);
     out.set('u_depth', 0);
     out.set('u_hitDetection', 0);
-    out.set('u_ol_fbHeight', framebufferHeight);
+    out.set(FB_HEIGHT_UNIFORM, framebufferHeight);
 
     // style uniforms (Helper.applyUniforms)
     for (const name in this.styleUniforms) {

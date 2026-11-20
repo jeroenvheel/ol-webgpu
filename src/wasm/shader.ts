@@ -2,7 +2,7 @@
  * Wrapper around the ol_gpu_shader wasm module (naga GLSL -> WGSL).
  */
 import {toVulkanGlsl, type VulkanShaders} from '../style/glsl.js';
-import type {WasmSource} from './core.js';
+import {type WasmSource, instantiateWasm} from './core.js';
 
 interface ShaderExports {
   memory: WebAssembly.Memory;
@@ -112,22 +112,8 @@ export function defaultShaderWasmUrl(): URL {
 let shared: Promise<ShaderTranslator> | null = null;
 
 export function loadShaderTranslator(source: WasmSource = defaultShaderWasmUrl()): Promise<ShaderTranslator> {
-  const load = async () => {
-    let module: WebAssembly.Module;
-    if (source instanceof WebAssembly.Module) {
-      module = source;
-    } else if (source instanceof URL || typeof source === 'string') {
-      const response = await fetch(source);
-      if (!response.ok) {
-        throw new Error(`ol-webgpu: could not load shader wasm from ${source} (${response.status})`);
-      }
-      module = await WebAssembly.compile(await response.arrayBuffer());
-    } else {
-      module = await WebAssembly.compile(source);
-    }
-    return new ShaderTranslator(await WebAssembly.instantiate(module, {}));
-  };
-  if (source === undefined || (source instanceof URL && source.href === defaultShaderWasmUrl().href)) {
+  const load = async () => new ShaderTranslator(await instantiateWasm(source, 'shader wasm'));
+  if (source instanceof URL && source.href === defaultShaderWasmUrl().href) {
     shared ??= load();
     return shared;
   }

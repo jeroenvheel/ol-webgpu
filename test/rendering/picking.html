@@ -20,8 +20,8 @@
   <body>
     <div id="map"></div>
     <script type="module">
-      import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.ts';
-      window.__olgpuSettled = () => [...liveRenderers].every((r) => r.ready && r.framesSinceReady >= 1);
+      import {renderersSettled} from './settled.ts';
+      window.__olgpuSettled = () => renderersSettled();
       import('./picking.ts');
     </script>
   </body>

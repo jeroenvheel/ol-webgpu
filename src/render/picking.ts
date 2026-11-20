@@ -221,6 +221,9 @@ export class Picker {
   private measuring: string | null = null;
   private measureToken = 0;
   private batch: MeasurableBatch | null = null;
+  /** Revision of the source the sizes were (or are being) measured for. */
+  private measuredRevision = -1;
+  private styles: CompiledStyle[];
 
   constructor(
     private readonly core: Core,
@@ -228,18 +231,16 @@ export class Picker {
     private variables: Record<string, any>,
   ) {
     this.rules = compileRules(style);
+    this.styles = this.rules.flatMap((r) => r.styles);
   }
 
   setStyle(style: FlatStyleLike, variables: Record<string, any>) {
     this.variables = variables;
     this.rules = compileRules(style);
+    this.styles = this.rules.flatMap((r) => r.styles);
     this.measured = null;
     this.measuring = null;
     this.measureToken++;
-  }
-
-  private get styles(): CompiledStyle[] {
-    return this.rules.flatMap((r) => r.styles);
   }
 
   /** Variables as seen by the evaluator, including the zoom/time stand-ins. */
@@ -257,9 +258,16 @@ export class Picker {
    * Measures, in idle time and in chunks, the largest symbol radius and
    * stroke width over all features when sizes depend on feature data. Until
    * it finishes, picking searches the conservative MAX_PICK_RADIUS_PX.
+   * The sizes do not depend on the extent that is rendered: they are kept
+   * while the features (`revision` of the source) stay the same.
    */
-  measure(batch: MeasurableBatch, frameState: FrameState) {
+  measure(batch: MeasurableBatch, frameState: FrameState, revision: number) {
+    const key = this.viewKey(frameState);
+    if (batch === this.batch && revision === this.measuredRevision && (this.measured?.key === key || this.measuring === key)) {
+      return;
+    }
     this.batch = batch;
+    this.measuredRevision = revision;
     this.measured = null;
     this.startMeasure(frameState);
   }

@@ -1,4 +1,4 @@
-// Builds crates/core to wasm32 and copies the module to src/wasm/ol_gpu_core.wasm.
+// Builds crates/core and crates/shader to wasm32 and copies the modules to src/wasm/.
 import {execFileSync} from 'node:child_process';
 import {copyFileSync, mkdirSync, statSync} from 'node:fs';
 import {homedir} from 'node:os';

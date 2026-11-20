@@ -17,15 +17,13 @@
  */
 import type {FrameState} from 'ol/Map.js';
 import type {FlatStyleLike} from 'ol/style/flat.js';
+import {TextOverlayWorkerMessageType} from 'ol/render/webgl/constants.js';
 import {serializeFrameState} from 'ol/render/webgl/serialize.js';
 import type {Transform} from 'ol/transform.js';
 import {type Mat4, create as createMat4, reset, rotate, scale, translate} from 'ol/vec/mat4.js';
 import type {AttributeDefinition} from './stylePasses.js';
 
-/** Message types of ol's text overlay worker (`TextOverlayWorkerMessageType`). */
-const BUILD_INSTRUCTIONS = 'BUILD_INSTRUCTIONS';
-const DISPOSE_INSTRUCTIONS = 'DISPOSE_INSTRUCTIONS';
-const RENDER = 'RENDER';
+const {BUILD_INSTRUCTIONS, DISPOSE_INSTRUCTIONS, RENDER} = TextOverlayWorkerMessageType;
 
 export interface TextInstructions {
   polygons: Float32Array | null;

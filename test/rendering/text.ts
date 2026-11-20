@@ -12,7 +12,7 @@ import Map from 'ol/Map.js';
 import View from 'ol/View.js';
 import Point from 'ol/geom/Point.js';
 import VectorSource from 'ol/source/Vector.js';
-import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
+import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 
@@ -50,8 +50,7 @@ function readLayer(): ImageData {
   return probe.getImageData(0, 0, canvas.width, canvas.height);
 }
 
-const settled = () => [...liveRenderers].every((r) => r.ready && r.framesSinceReady >= 2);
-const frame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+const settled = () => renderersSettled(2);
 
 (async () => {
   while (!settled()) {

@@ -26,6 +26,12 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 }
 `;
 
+/** Blending of premultiplied colours over what was drawn before. */
+export const PREMULTIPLIED_BLEND: GPUBlendState = {
+  color: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
+  alpha: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
+};
+
 export interface Composite {
   pipeline: GPURenderPipeline;
   layout: GPUBindGroupLayout;
@@ -59,10 +65,7 @@ export function compositePipeline(device: GPUDevice, format: GPUTextureFormat, s
         fragment: {
           module,
           entryPoint: 'fs',
-          targets: [{format, blend: {
-            color: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
-            alpha: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
-          }}],
+          targets: [{format, blend: PREMULTIPLIED_BLEND}],
         },
         primitive: {topology: 'triangle-list'},
         multisample: {count: sampleCount},

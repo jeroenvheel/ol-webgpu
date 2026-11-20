@@ -3,6 +3,7 @@
  * whose box collides with one that was placed before is hidden. The same
  * greedy rule as ol's Canvas renderer, on a uniform grid.
  */
+import {compose as composeTransform, create as createTransform} from 'ol/transform.js';
 import {type LabelSet, MODE_DECLUTTER, MODE_NONE, MODE_OBSTACLE, partBox} from './layout.js';
 
 /** Boxes that are taken, in CSS pixels. */
@@ -66,7 +67,7 @@ export function selectCandidates(set: LabelSet): Set<number> {
   const sin = Math.sin(set.rotation);
   const r = set.resolution;
   // coordinate to pixel, as the view's transform but around the set's origin
-  const transform = [cos / r, sin / r, sin / r, -cos / r, (-set.origin[0] * cos - set.origin[1] * sin) / r, (-set.origin[0] * sin + set.origin[1] * cos) / r];
+  const transform = composeTransform(createTransform(), 0, 0, 1 / r, -1 / r, -set.rotation, -set.origin[0], -set.origin[1]);
   const taken = new Uint8Array(set.count);
   const candidates = new Set<number>();
   const boxes: number[] = [];

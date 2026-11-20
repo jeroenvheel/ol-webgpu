@@ -1,4 +1,5 @@
 /** Messages between the main thread and the ol-webgpu worker. */
+import type {GeneratedBuffers} from '../wasm/core.js';
 
 export interface BuildRequest {
   type: 'build';
@@ -13,17 +14,10 @@ export interface BuildRequest {
   invert: number[];
   /** Instruction space → hit index space (isotropic pixels at build time); null = no index. */
   indexTransform: number[] | null;
-  /** Geometry used for the index, which may include kinds without a pass (picking only). */
-  indexPoints?: ArrayBuffer | null;
-  indexLines?: ArrayBuffer | null;
-  indexPolygons?: ArrayBuffer | null;
 }
 
-export interface BufferSet {
-  indices: Uint32Array;
-  vertices: Float32Array;
-  instances: Float32Array;
-}
+/** The buffers of one geometry kind. */
+export type BufferSet = GeneratedBuffers;
 
 export interface BuildResponse {
   type: 'build';

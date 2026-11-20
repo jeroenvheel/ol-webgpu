@@ -10,16 +10,15 @@ import {type LabelSet, MODE_DECLUTTER, MODE_NONE, MODE_OBSTACLE, PART_DOUBLES} f
 function labels(list: Array<[number, number, number, number, number?]>, resolution = 1, rotation = 0): LabelSet {
   const count = list.length;
   const parts = new Float64Array(count * PART_DOUBLES);
-  list.forEach(([x, y, w, h], i) => parts.set([x, y, 0, 0, 0, 0, -w, -h, w, h], i * PART_DOUBLES));
+  list.forEach(([x, y, w, h], i) => parts.set([x, y, 0, 0, 0, 0, -w, -h, w, h, 1, 0], i * PART_DOUBLES));
   const range = (offset: number) => Uint32Array.from(list, (_l, i) => i + offset);
   return {
     id: 1,
     origin: [0, 0],
     resolution,
     rotation,
-    pixelRatio: 1,
-    coverage: [-1e9, -1e9, 1e9, 1e9],
     generation: 1,
+    atlasVersion: 0,
     instances: new Float32Array(0),
     glyphCount: 0,
     count,

@@ -190,19 +190,23 @@ export function defaultWasmUrl(): URL {
   return new URL('./ol_gpu_core.wasm?no-inline', import.meta.url);
 }
 
-export async function loadCore(source: WasmSource = defaultWasmUrl()): Promise<Core> {
+/** Fetches (for a URL), compiles and instantiates a wasm module without imports. */
+export async function instantiateWasm(source: WasmSource, what = 'wasm'): Promise<WebAssembly.Instance> {
   let module: WebAssembly.Module;
   if (source instanceof WebAssembly.Module) {
     module = source;
   } else if (source instanceof URL || typeof source === 'string') {
     const response = await fetch(source);
     if (!response.ok) {
-      throw new Error(`ol-webgpu: could not load wasm from ${source} (${response.status})`);
+      throw new Error(`ol-webgpu: could not load ${what} from ${source} (${response.status})`);
     }
     module = await WebAssembly.compile(await response.arrayBuffer());
   } else {
     module = await WebAssembly.compile(source);
   }
-  const instance = await WebAssembly.instantiate(module, {});
-  return new Core(instance);
+  return WebAssembly.instantiate(module, {});
+}
+
+export async function loadCore(source: WasmSource = defaultWasmUrl()): Promise<Core> {
+  return new Core(await instantiateWasm(source));
 }

@@ -12,7 +12,7 @@ import Point from 'ol/geom/Point.js';
 import Polygon from 'ol/geom/Polygon.js';
 import VectorLayer from 'ol/layer/Vector.js';
 import VectorSource from 'ol/source/Vector.js';
-import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
+import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 
@@ -245,8 +245,7 @@ const map = new Map({
 });
 (window as any).map = map;
 
-const frame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
-const settled = () => map.isRendered() && [...liveRenderers].every((r) => r.ready && r.framesSinceReady >= 1 && !r.labelsBusy);
+const settled = () => map.isRendered() && renderersSettled();
 
 (async () => {
   await Promise.all((s.fonts ?? []).map((font) => document.fonts.load(font)));

@@ -7,7 +7,7 @@
 import type {FeatureLike} from 'ol/Feature.js';
 import type {FrameState} from 'ol/Map.js';
 import ViewHint from 'ol/ViewHint.js';
-import {buffer as bufferExtent, containsExtent, getHeight, getWidth} from 'ol/extent.js';
+import {applyTransform, buffer as bufferExtent, containsExtent, getHeight, getWidth} from 'ol/extent.js';
 import {inView} from 'ol/layer/Layer.js';
 import {getTransformFromProjections, getUserProjection} from 'ol/proj.js';
 import {getWorldParameters} from 'ol/renderer/webgl/worldUtil.js';
@@ -114,7 +114,6 @@ export default class GpuText {
   private job: {
     builder: LabelBuilder;
     key: LayoutKey;
-    options: LayoutOptions;
     /** The builder only measures: the labels that can win a place are laid out after it. */
     measuring: boolean;
     features: number;
@@ -166,7 +165,7 @@ export default class GpuText {
   // --- layout --------------------------------------------------------------
 
   /** Whether a layout made for `have` can be shown for `want` as it is. */
-  private fits(have: LayoutKey | null | undefined, hasLine: boolean, want: LayoutKey, frameState: FrameState, moving: boolean): boolean {
+  private fits(have: LayoutKey | null | undefined, hasLine: boolean, want: LayoutKey, moving: boolean): boolean {
     if (
       !have ||
       have.revision !== want.revision ||
@@ -175,7 +174,7 @@ export default class GpuText {
       have.projection !== want.projection ||
       have.pixelRatio !== want.pixelRatio ||
       have.generation !== want.generation ||
-      !containsExtent(have.coverage, frameState.extent!)
+      !containsExtent(have.coverage, want.coverage)
     ) {
       return false;
     }
@@ -210,9 +209,9 @@ export default class GpuText {
       coverage: frameState.extent,
     };
     const latest = this.next ?? (this.set && this.setKey ? {set: this.set, key: this.setKey} : null);
-    if (this.fits(latest?.key, latest?.set.hasLine ?? false, want, frameState, moving)) {
+    if (this.fits(latest?.key, latest?.set.hasLine ?? false, want, moving)) {
       this.job = null;
-    } else if (!this.fits(this.job?.key, true, want, frameState, moving)) {
+    } else if (!this.fits(this.job?.key, true, want, moving)) {
       this.job = this.start(frameState, source, want);
     }
     const job = this.job;
@@ -234,7 +233,7 @@ export default class GpuText {
       }
       job.measuring = false;
       job.measured = measured.count;
-      job.builder = new LabelBuilder([...features], this.evaluator, this.atlas, {...job.options, boxesOnly: false, accept});
+      job.builder = new LabelBuilder([...features], this.evaluator, this.atlas, {...job.builder.options, boxesOnly: false, accept});
       done = job.builder.run(t0 + budget);
     }
     job.time += performance.now() - t0;
@@ -284,7 +283,7 @@ export default class GpuText {
     const toView = userProjection ? getTransformFromProjections(userProjection, projection) : null;
     const features = new Set<FeatureLike>();
     const collect = (e: number[]) => {
-      source.forEachFeatureInExtent(toUser ? transformExtent(e, toUser) : e, (f) => {
+      source.forEachFeatureInExtent(toUser ? applyTransform(e, toUser) : e, (f) => {
         features.add(f);
       });
     };
@@ -317,7 +316,6 @@ export default class GpuText {
       rotation: viewState.rotation,
       pixelRatio: frameState.pixelRatio,
       extent,
-      coverage,
       toView: toView
         ? (geometry: any) => {
             const clone = geometry.clone();
@@ -328,7 +326,7 @@ export default class GpuText {
       boxesOnly: measuring,
     };
     const builder = new LabelBuilder(list, this.evaluator!, this.atlas, options);
-    return {builder, key: {...want, coverage}, options, measuring, features: list.length, measured: 0, time: performance.now() - t0, frames: 0};
+    return {builder, key: {...want, coverage}, measuring, features: list.length, measured: 0, time: performance.now() - t0, frames: 0};
   }
 
   // --- frame ---------------------------------------------------------------
@@ -339,12 +337,10 @@ export default class GpuText {
    */
   begin(layer: unknown, frameState: FrameState) {
     let carried: Map<number, Map<number, number>> | null = null;
-    let first = false;
     const next = this.next;
     if (next) {
       this.next = null;
       const previous = this.set;
-      first = !previous;
       carried = new Map();
       if (previous) {
         for (const w of this.worlds) {
@@ -391,7 +387,7 @@ export default class GpuText {
           target: new Uint8Array(set.count).fill(this.declutter ? 0 : 1),
           fading: false,
           // the first labels, and a world copy that scrolls into view, do not fade in
-          snap: first || !from,
+          snap: !from,
         };
         this.writeOpacity(w);
       }
@@ -452,16 +448,11 @@ export default class GpuText {
             continue;
           }
           boxes.length = 0;
-          let visible = true;
           let onScreen = false;
           for (let part = partStart[i]; part < partEnd[i]; part++) {
             partBox(set.parts, part, frameState.coordinateToPixelTransform, worldOffset, viewCos, viewSin, tmp);
             if (tmp[2] >= 0 && tmp[0] <= width && tmp[3] >= 0 && tmp[1] <= height) {
               onScreen = true;
-            }
-            if (mode[i] === MODE_DECLUTTER && occupancy.collides(tmp[0], tmp[1], tmp[2], tmp[3])) {
-              visible = false;
-              break;
             }
             boxes.push(tmp[0], tmp[1], tmp[2], tmp[3]);
           }
@@ -469,6 +460,15 @@ export default class GpuText {
             // off screen labels take no space; they are placed when they scroll in
             target[i] = 0;
             continue;
+          }
+          let visible = true;
+          if (mode[i] === MODE_DECLUTTER) {
+            for (let b = 0; b < boxes.length; b += 4) {
+              if (occupancy.collides(boxes[b], boxes[b + 1], boxes[b + 2], boxes[b + 3])) {
+                visible = false;
+                break;
+              }
+            }
           }
           target[i] = visible ? 1 : 0;
           if (visible && mode[i] !== MODE_NONE) {
@@ -606,11 +606,6 @@ function sortByUid(features: FeatureLike[]): FeatureLike[] {
     sorted[i] = features[order[i]];
   }
   return sorted;
-}
-
-function transformExtent(extent: number[], transform: (input: number[], output?: number[], dimension?: number) => number[]): number[] {
-  const c = transform([extent[0], extent[1], extent[0], extent[3], extent[2], extent[1], extent[2], extent[3]], undefined, 2);
-  return [Math.min(c[0], c[2], c[4], c[6]), Math.min(c[1], c[3], c[5], c[7]), Math.max(c[0], c[2], c[4], c[6]), Math.max(c[1], c[3], c[5], c[7])];
 }
 
 /** Per map: when decluttering last ran and for what, to pace it while the view moves. */

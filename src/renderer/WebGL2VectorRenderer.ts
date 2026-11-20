@@ -1,22 +1,21 @@
 /**
  * WebGL2 backend. Runs ol's ShaderBuilder shaders unchanged (WebGL2 accepts
  * GLSL ES 1.00) with WebGL2-native vertex array objects, instancing and
- * 32-bit indices, on its own canvas.
+ * 32-bit indices, on a canvas shared with the layers next to it.
  */
 import type {FrameState} from 'ol/Map.js';
-import type Layer from 'ol/layer/Layer.js';
-import type VectorSource from 'ol/source/Vector.js';
 import {create as createTransform} from 'ol/transform.js';
 import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js';
 import {TEXT_OVERLAY_GLSL, type TextImage} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
 import type {GlyphAtlas} from '../text/atlas.js';
-import {INSTANCE_FLOATS} from '../text/layout.js';
-import {LABEL_GLSL, LABEL_UNIFORM_FLOATS, QUAD, writeLabelUniforms} from '../text/shaders.js';
+import {INSTANCE_ATTRIBUTES, INSTANCE_FLOATS, type LabelSet} from '../text/layout.js';
+import {LABEL_GLSL, LABEL_UNIFORMS, LABEL_UNIFORM_FLOATS, QUAD, writeLabelUniforms} from '../text/shaders.js';
 import type {BufferSet} from '../worker/protocol.js';
 import {surfaceType} from '../render/surface.js';
+import {linkProgram, uploadCanvas} from '../webgl2/program.js';
 import {WebGL2Surface} from '../webgl2/surface.js';
-import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
+import BaseGpuVectorRenderer, {type UploadedSet} from './BaseGpuVectorRenderer.js';
 
 interface GLBuffers {
   index: WebGLBuffer;
@@ -31,7 +30,7 @@ interface GLBuffers {
 /** Glyph atlas texture, one per context (the atlas is shared by all layers). */
 const atlasTextures = new WeakMap<WebGL2RenderingContext, {texture: WebGLTexture; canvas: HTMLCanvasElement; version: number}>();
 
-function bindAtlas(gl: WebGL2RenderingContext, atlas: GlyphAtlas) {
+function bindAtlas(gl: WebGL2RenderingContext, atlas: GlyphAtlas, set: LabelSet) {
   let entry = atlasTextures.get(gl);
   if (!entry) {
     entry = {texture: gl.createTexture()!, canvas: atlas.canvas, version: -1};
@@ -39,16 +38,11 @@ function bindAtlas(gl: WebGL2RenderingContext, atlas: GlyphAtlas) {
   }
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, entry.texture);
-  if (entry.version !== atlas.version || entry.canvas !== atlas.canvas) {
+  // cells drawn since for a layout in progress are uploaded when a set needs them
+  if (entry.version < set.atlasVersion || entry.canvas !== atlas.canvas) {
     entry.version = atlas.version;
     entry.canvas = atlas.canvas;
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas.canvas);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    uploadCanvas(gl, atlas.canvas);
   }
 }
 
@@ -98,10 +92,6 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     msaa: {renderbuffer: WebGLRenderbuffer; framebuffer: WebGLFramebuffer} | null;
   } | null = null;
 
-  constructor(layer: Layer<VectorSource>, options: GpuVectorRendererOptions) {
-    super(layer, options);
-  }
-
   /** @internal Called by the shared surface. */
   onContextLost() {
     this.contextLost = true;
@@ -134,7 +124,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     if (!gl) {
       return;
     }
-    this.programs.forEach((p) => [p.fill, p.stroke, p.symbol].forEach((x) => x && gl.deleteProgram(x.program)));
+    this.deletePrograms();
     this.textures.forEach((t) => gl.deleteTexture(t.texture));
     if (this.text) {
       gl.deleteProgram(this.text.program);
@@ -186,12 +176,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   protected surfaceChanged(previous: WebGL2Surface | null) {
     if (previous) {
       // move to the new context: free everything in the old one, upload again below
-      const b = this.buffers;
-      for (const set of b ? [b.polygons, b.lines, b.points] : []) {
-        if (set) {
-          this.release(set.gpu);
-        }
-      }
+      this.releaseBuffers();
       this.deleteGLResources();
       previous.members.delete(this);
     }
@@ -217,13 +202,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     if (!gl) {
       return;
     }
-    for (const p of this.programs) {
-      for (const prog of [p.fill, p.stroke, p.symbol]) {
-        if (prog) {
-          gl.deleteProgram(prog.program);
-        }
-      }
-    }
+    this.deletePrograms();
     this.programs = this.passes.passes.map((pass) => ({
       fill: pass.fill && this.compile(pass.fill),
       stroke: pass.stroke && this.compile(pass.stroke),
@@ -231,34 +210,21 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     }));
   }
 
-  private link(vertexShader: string, fragmentShader: string): WebGLProgram {
+  private deletePrograms() {
     const gl = this.gl!;
-    const shader = (type: number, src: string) => {
-      const s = gl.createShader(type)!;
-      gl.shaderSource(s, src);
-      gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost()) {
-        throw new Error(`ol-webgpu: ${type === gl.VERTEX_SHADER ? 'vertex' : 'fragment'} shader compilation failed: ${gl.getShaderInfoLog(s)}`);
+    for (const p of this.programs) {
+      for (const prog of [p.fill, p.stroke, p.symbol]) {
+        if (prog) {
+          gl.deleteProgram(prog.program);
+        }
       }
-      return s;
-    };
-    const vs = shader(gl.VERTEX_SHADER, vertexShader);
-    const fs = shader(gl.FRAGMENT_SHADER, fragmentShader);
-    const program = gl.createProgram()!;
-    gl.attachShader(program, vs);
-    gl.attachShader(program, fs);
-    gl.linkProgram(program);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS) && !gl.isContextLost()) {
-      throw new Error(`ol-webgpu: program link failed: ${gl.getProgramInfoLog(program)}`);
     }
-    return program;
+    this.programs = [];
   }
 
   private compile(pass: SubPass): Program {
     const gl = this.gl!;
-    const program = this.link(pass.vertexShader, pass.fragmentShader);
+    const program = linkProgram(gl, pass.vertexShader, pass.fragmentShader);
     const uniforms = new Map<string, UniformInfo>();
     const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) as number;
     let unit = 0;
@@ -341,12 +307,14 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     if (!entry) {
       entry = {texture: gl.createTexture()!, source: null};
       this.textures.set(name, entry);
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, entry.texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     }
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D, entry.texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     const ready = !(source instanceof HTMLImageElement) || source.complete;
     if (ready && entry.source !== source) {
       entry.source = source;
@@ -508,9 +476,9 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     const frame = this.labelFrame!;
     const {set, worlds} = frame;
     if (!this.labels) {
-      const program = this.link(LABEL_GLSL.vertex, LABEL_GLSL.fragment);
+      const program = linkProgram(gl, LABEL_GLSL.vertex, LABEL_GLSL.fragment);
       const uniforms: Record<string, WebGLUniformLocation | null> = {};
-      for (const name of ['u_matrix', 'u_translate', 'u_viewport', 'u_atlasSize', 'u_rotation', 'u_opacity', 'u_pixelRatio', 'u_atlas']) {
+      for (const name of [...LABEL_UNIFORMS.map((u) => u[0]), 'u_atlas']) {
         uniforms[name] = gl.getUniformLocation(program, name);
       }
       const quad = gl.createBuffer()!;
@@ -527,7 +495,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       r.set = set.id;
     }
     gl.useProgram(r.program);
-    bindAtlas(gl, frame.atlas);
+    bindAtlas(gl, frame.atlas, set);
     gl.uniform1i(r.uniforms.u_atlas, 0);
     const u = this.labelUniforms;
     const used = new Set<number>();
@@ -547,12 +515,12 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
         attribute(0, 2, 8, 0, 0);
         gl.bindBuffer(gl.ARRAY_BUFFER, r.instances);
         let offset = 0;
-        [2, 2, 2, 2, 4, 4, 3].forEach((size, i) => {
+        INSTANCE_ATTRIBUTES.forEach((size, i) => {
           attribute(i + 1, size, INSTANCE_FLOATS * 4, offset, 1);
           offset += size * 4;
         });
         gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-        attribute(8, 1, 4, 0, 1);
+        attribute(INSTANCE_ATTRIBUTES.length + 1, 1, 4, 0, 1);
         gl.bindVertexArray(null);
         o = {buffer, vao, version: -1, set: -1};
         r.opacity.set(w.world, o);
@@ -563,15 +531,19 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
         gl.bindBuffer(gl.ARRAY_BUFFER, o.buffer);
         gl.bufferData(gl.ARRAY_BUFFER, w.opacity, gl.DYNAMIC_DRAW);
       }
-      // the layer opacity is applied when the layer image is composited
-      writeLabelUniforms(u, 0, frameState, set, w.world * frame.worldWidth, frame.atlas.canvas.width, frame.atlas.canvas.height, 1);
-      gl.uniform4f(r.uniforms.u_matrix, u[0], u[1], u[2], u[3]);
-      gl.uniform2f(r.uniforms.u_translate, u[4], u[5]);
-      gl.uniform2f(r.uniforms.u_viewport, u[6], u[7]);
-      gl.uniform2f(r.uniforms.u_atlasSize, u[8], u[9]);
-      gl.uniform1f(r.uniforms.u_rotation, u[10]);
-      gl.uniform1f(r.uniforms.u_opacity, u[11]);
-      gl.uniform1f(r.uniforms.u_pixelRatio, u[12]);
+      writeLabelUniforms(u, 0, frameState, set, w.world * frame.worldWidth, frame.atlas.canvas.width, frame.atlas.canvas.height);
+      let at = 0;
+      for (const [name, size] of LABEL_UNIFORMS) {
+        const location = r.uniforms[name];
+        if (size === 4) {
+          gl.uniform4f(location, u[at], u[at + 1], u[at + 2], u[at + 3]);
+        } else if (size === 2) {
+          gl.uniform2f(location, u[at], u[at + 1]);
+        } else {
+          gl.uniform1f(location, u[at]);
+        }
+        at += size;
+      }
       gl.bindVertexArray(o.vao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, set.glyphCount);
     }
@@ -589,7 +561,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   private drawText(text: {image: TextImage; matrix: Float32Array | number[]}) {
     const gl = this.gl!;
     if (!this.text) {
-      const program = this.link(TEXT_OVERLAY_GLSL.vertex, TEXT_OVERLAY_GLSL.fragment);
+      const program = linkProgram(gl, TEXT_OVERLAY_GLSL.vertex, TEXT_OVERLAY_GLSL.fragment);
       this.text = {
         program,
         texture: gl.createTexture()!,
@@ -604,14 +576,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     gl.bindTexture(gl.TEXTURE_2D, t.texture);
     if (t.version !== text.image.version) {
       t.version = text.image.version;
-      // straight alpha, no flip: like ol's texture upload of its overlay canvas
-      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, text.image.canvas);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      uploadCanvas(gl, text.image.canvas);
     }
     gl.uniform1i(t.sampler, 0);
     gl.uniformMatrix4fv(t.matrix, false, text.matrix);

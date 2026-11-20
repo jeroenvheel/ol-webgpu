@@ -16,7 +16,7 @@ import WebGLVectorLayer from 'ol/layer/WebGLVector.js';
 import VectorSource from 'ol/source/Vector.js';
 import Fill from 'ol/style/Fill.js';
 import Style from 'ol/style/Style.js';
-import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
+import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 
@@ -38,11 +38,10 @@ const layers = [
 ];
 const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers, view: new View({center: [0, 0], resolution: 1})});
 
-const frame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
 (async () => {
   // rendercomplete waits for every layer to be ready (renderers only exist after the first frame)
   await new Promise((r) => map.once('rendercomplete', r));
-  while (kind !== 'ol' && ![...liveRenderers].every((r) => r.ready && r.framesSinceReady >= 1)) {
+  while (kind !== 'ol' && !renderersSettled()) {
     await frame();
   }
   await frame();

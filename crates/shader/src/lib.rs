@@ -1,7 +1,8 @@
 //! GLSL (Vulkan flavour, produced by `src/style/glsl.ts` from ol's GLSL ES
 //! 1.00 shaders) to WGSL, using naga. Returns the WGSL source plus the
-//! reflection the WebGPU renderer needs: uniform block member offsets,
-//! vertex input locations and texture/sampler bindings.
+//! reflection the WebGPU renderer needs: uniform block member offsets and
+//! vertex input locations. (Texture and sampler bindings are assigned by
+//! `src/style/glsl.ts`, which writes them into the GLSL.)
 
 use naga::{AddressSpace, Binding, ScalarKind, ShaderStage, TypeInner};
 use std::cell::RefCell;
@@ -10,17 +11,9 @@ use std::fmt::Write;
 pub struct UniformMember {
     pub name: String,
     pub offset: u32,
-    /// "f32", "i32", "u32", "vec2", "vec3", "vec4", "mat4", ...
+    /// "f32", "i32", "u32", "vec2<f32>", "vec4<f32>", "mat4x4", ...
     pub ty: String,
     pub size: u32,
-}
-
-pub struct Resource {
-    pub name: String,
-    pub group: u32,
-    pub binding: u32,
-    /// "uniform", "texture", "sampler"
-    pub kind: &'static str,
 }
 
 pub struct Translation {
@@ -28,7 +21,6 @@ pub struct Translation {
     pub uniforms: Vec<UniformMember>,
     pub uniform_block_size: u32,
     pub inputs: Vec<(String, u32)>,
-    pub resources: Vec<Resource>,
 }
 
 fn type_name(module: &naga::Module, ty: naga::Handle<naga::Type>) -> String {
@@ -72,33 +64,20 @@ pub fn translate(src: &str, stage: ShaderStage) -> Result<Translation, String> {
 
     let mut uniforms = Vec::new();
     let mut uniform_block_size = 0;
-    let mut resources = Vec::new();
     for (_, var) in module.global_variables.iter() {
-        let Some(binding) = &var.binding else { continue };
-        let name = var.name.clone().unwrap_or_default();
-        match var.space {
-            AddressSpace::Uniform => {
-                if let TypeInner::Struct { members, span } = &module.types[var.ty].inner {
-                    uniform_block_size = *span;
-                    for m in members {
-                        uniforms.push(UniformMember {
-                            name: m.name.clone().unwrap_or_default(),
-                            offset: m.offset,
-                            ty: type_name(&module, m.ty),
-                            size: module.types[m.ty].inner.size(module.to_ctx()),
-                        });
-                    }
-                }
-                resources.push(Resource { name, group: binding.group, binding: binding.binding, kind: "uniform" });
+        if var.binding.is_none() || var.space != AddressSpace::Uniform {
+            continue;
+        }
+        if let TypeInner::Struct { members, span } = &module.types[var.ty].inner {
+            uniform_block_size = *span;
+            for m in members {
+                uniforms.push(UniformMember {
+                    name: m.name.clone().unwrap_or_default(),
+                    offset: m.offset,
+                    ty: type_name(&module, m.ty),
+                    size: module.types[m.ty].inner.size(module.to_ctx()),
+                });
             }
-            AddressSpace::Handle => {
-                let kind = match module.types[var.ty].inner {
-                    TypeInner::Sampler { .. } => "sampler",
-                    _ => "texture",
-                };
-                resources.push(Resource { name, group: binding.group, binding: binding.binding, kind });
-            }
-            _ => {}
         }
     }
 
@@ -119,7 +98,7 @@ pub fn translate(src: &str, stage: ShaderStage) -> Result<Translation, String> {
         }
     }
 
-    Ok(Translation { wgsl, uniforms, uniform_block_size, inputs, resources })
+    Ok(Translation { wgsl, uniforms, uniform_block_size, inputs })
 }
 
 fn json_str(out: &mut String, s: &str) {
@@ -170,15 +149,6 @@ pub fn translate_json(src: &str, stage: ShaderStage) -> String {
                 o.push_str("{\"name\":");
                 json_str(&mut o, name);
                 let _ = write!(o, ",\"location\":{loc}}}");
-            }
-            o.push_str("],\"resources\":[");
-            for (i, r) in t.resources.iter().enumerate() {
-                if i > 0 {
-                    o.push(',');
-                }
-                o.push_str("{\"name\":");
-                json_str(&mut o, &r.name);
-                let _ = write!(o, ",\"group\":{},\"binding\":{},\"kind\":\"{}\"}}", r.group, r.binding, r.kind);
             }
             o.push_str("]}");
         }

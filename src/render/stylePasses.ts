@@ -5,23 +5,9 @@
  * so buffers and shaders are laid out exactly as ol lays them out.
  */
 import type {FlatStyleLike} from 'ol/style/flat.js';
-import {convertStyleToShaders, toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
+import {Attributes, convertStyleToShaders, toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
 import {getCustomAttributesSize} from 'ol/render/webgl/renderinstructions.js';
 import {hasTextStyle} from 'ol/render/webgl/textUtil.js';
-
-/** Same names as `Attributes` in VectorStyleRenderer.js. */
-export const Attributes = {
-  POSITION: 'a_position',
-  LOCAL_POSITION: 'a_localPosition',
-  SEGMENT_START: 'a_segmentStart',
-  SEGMENT_END: 'a_segmentEnd',
-  MEASURE_START: 'a_measureStart',
-  MEASURE_END: 'a_measureEnd',
-  ANGLE_TANGENT_SUM: 'a_angleTangentSum',
-  JOIN_ANGLES: 'a_joinAngles',
-  DISTANCE_LOW: 'a_distanceLow',
-  DISTANCE_HIGH: 'a_distanceHigh',
-} as const;
 
 /** One float attribute in an interleaved buffer; `name: null` is padding. */
 export interface AttributeDesc {

@@ -4,6 +4,7 @@
  * shared context; context loss and restore are passed on to all of them.
  */
 import {Surface} from '../render/surface.js';
+import {linkProgram} from './program.js';
 
 export interface WebGL2SurfaceUser {
   onContextLost(): void;
@@ -80,23 +81,7 @@ export class WebGL2Surface extends Surface {
   compositeImage(texture: WebGLTexture, opacity: number) {
     const gl = this.gl;
     if (!this.composite) {
-      const shader = (type: number, src: string) => {
-        const s = gl.createShader(type)!;
-        gl.shaderSource(s, src);
-        gl.compileShader(s);
-        return s;
-      };
-      const program = gl.createProgram()!;
-      const vs = shader(gl.VERTEX_SHADER, COMPOSITE_GLSL.vertex);
-      const fs = shader(gl.FRAGMENT_SHADER, COMPOSITE_GLSL.fragment);
-      gl.attachShader(program, vs);
-      gl.attachShader(program, fs);
-      gl.linkProgram(program);
-      gl.deleteShader(vs);
-      gl.deleteShader(fs);
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS) && !gl.isContextLost()) {
-        throw new Error(`ol-webgpu: composite program link failed: ${gl.getProgramInfoLog(program)}`);
-      }
+      const program = linkProgram(gl, COMPOSITE_GLSL.vertex, COMPOSITE_GLSL.fragment);
       this.composite = {program, image: gl.getUniformLocation(program, 'u_image')!, opacity: gl.getUniformLocation(program, 'u_opacity')!};
     }
     this.bind();

@@ -8,7 +8,7 @@ import Map from 'ol/Map.js';
 import View from 'ol/View.js';
 import Point from 'ol/geom/Point.js';
 import VectorSource from 'ol/source/Vector.js';
-import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
+import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 
@@ -58,8 +58,7 @@ function drawn(x0 = 0, y0 = 0, x1 = 256, y1 = 256): {count: number; alpha: numbe
   return {count, alpha, red};
 }
 
-const frame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
-const quiet = () => map.isRendered() && [...liveRenderers].every((r) => r.ready && r.framesSinceReady >= 1 && !r.labelsBusy);
+const quiet = () => map.isRendered() && renderersSettled();
 async function settle() {
   map.render();
   for (let i = 0; i < 3 || !quiet(); i++) {

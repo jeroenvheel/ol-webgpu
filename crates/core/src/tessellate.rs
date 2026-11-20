@@ -6,6 +6,7 @@
 //! All arithmetic is done in f64 (like JS) and rounded to f32 on output
 //! (like `Float32Array.from`).
 
+use crate::instructions::{self, LINE_VERTEX_SIZE};
 use std::f64::consts::PI;
 
 /// Same constant as `LINESTRING_ANGLE_COSINE_CUTOFF` in bufferUtil.js.
@@ -87,42 +88,24 @@ pub fn build_lines(instructions: &[f32], custom_size: usize, to_world: &Transfor
     out.clear();
     out.set_quad();
 
-    const PER_VERTEX: usize = 3;
-    let n = instructions.len();
-    let instr = |i: usize| instructions[i] as f64;
+    const PER_VERTEX: usize = LINE_VERTEX_SIZE;
 
     // first pass: count segments to allocate once
-    let mut segments = 0usize;
-    let mut i = 0usize;
-    while i < n {
-        i += custom_size;
-        if i >= n {
-            break;
-        }
-        let vc = instructions[i] as usize;
-        i += 1;
-        segments += vc.saturating_sub(1);
-        i += vc * PER_VERTEX;
-    }
+    let segments: usize = instructions::lines(instructions, custom_size)
+        .map(|line| (line.vertices.len() / PER_VERTEX).saturating_sub(1))
+        .sum();
     out.instances.reserve(segments * (LINE_SEGMENT_BASE_SIZE + custom_size));
 
     let max_precision = 2f64.powi(24);
-    let mut i = 0usize;
-    while i < n {
-        let custom_start = i;
-        i += custom_size;
-        if i >= n {
-            break;
-        }
-        let vc = instructions[i] as usize;
-        i += 1;
-        if i + vc * PER_VERTEX > n {
-            break; // malformed input: never read out of bounds
-        }
+    for line in instructions::lines(instructions, custom_size) {
+        let vertices = line.vertices;
+        let instr = |i: usize| vertices[i] as f64;
+        let vc = vertices.len() / PER_VERTEX;
+        let i = 0usize;
         let first = i;
         let is_loop = vc >= 2 && {
             let last = i + (vc - 1) * PER_VERTEX;
-            instructions[first] == instructions[last] && instructions[first + 1] == instructions[last + 1]
+            vertices[first] == vertices[last] && vertices[first + 1] == vertices[last + 1]
         };
         let last = if vc >= 1 { i + (vc - 1) * PER_VERTEX } else { i };
 
@@ -149,8 +132,8 @@ pub fn build_lines(instructions: &[f32], custom_size: usize, to_world: &Transfor
 
             let p0 = (instr(s), instr(s + 1));
             let p1 = (instr(e), instr(e + 1));
-            let m0 = instructions[s + 2];
-            let m1 = instructions[e + 2];
+            let m0 = vertices[s + 2];
+            let m1 = vertices[e + 2];
             let p0w = apply(to_world, p0.0, p0.1);
             let p1w = apply(to_world, p1.0, p1.1);
 
@@ -189,15 +172,13 @@ pub fn build_lines(instructions: &[f32], custom_size: usize, to_world: &Transfor
                 distance_high as f32,
                 tangent_sum as f32,
             ]);
-            out.instances
-                .extend_from_slice(&instructions[custom_start..custom_start + custom_size]);
+            out.instances.extend_from_slice(line.custom);
 
             let dx = p1w.0 - p0w.0;
             let dy = p1w.1 - p0w.1;
             current_length += (dx * dx + dy * dy).sqrt();
             tangent_sum = new_sum;
         }
-        i += vc * PER_VERTEX;
     }
 }
 
@@ -211,54 +192,42 @@ pub fn build_polygons(
 ) {
     out.clear();
     let attrs_per_vertex = 2 + custom_size;
-    let n = instructions.len();
     let mut coords: Vec<[f64; 2]> = Vec::new();
     let mut holes: Vec<u32> = Vec::new();
     let mut triangles: Vec<u32> = Vec::new();
 
-    let mut i = 0usize;
-    while i < n {
-        let custom_start = i;
-        i += custom_size;
-        if i >= n {
-            break;
-        }
-        let rings = instructions[i] as usize;
-        i += 1;
-        if i + rings > n {
-            break;
-        }
+    // first pass: count vertices to allocate once (a polygon of v vertices
+    // and h holes has at most v + 2h - 2 triangles)
+    let (mut vertices, mut triangles_max) = (0usize, 0usize);
+    for polygon in instructions::polygons(instructions, custom_size) {
+        let count = polygon.coords.len() / 2;
+        vertices += count;
+        triangles_max += count + 2 * polygon.ring_counts.len().saturating_sub(1);
+    }
+    out.vertices.reserve(vertices * attrs_per_vertex);
+    out.indices.reserve(triangles_max * 3);
+
+    for polygon in instructions::polygons(instructions, custom_size) {
         holes.clear();
         let mut vertices_count = 0usize;
-        for r in 0..rings {
-            vertices_count += instructions[i] as usize;
-            i += 1;
-            if r + 1 < rings {
+        for (r, count) in polygon.ring_counts.iter().enumerate() {
+            vertices_count += *count as usize;
+            if r + 1 < polygon.ring_counts.len() {
                 holes.push(vertices_count as u32);
             }
         }
-        if i + vertices_count * 2 > n {
-            break;
-        }
         coords.clear();
-        coords.extend(
-            instructions[i..i + vertices_count * 2]
-                .chunks_exact(2)
-                .map(|c| [c[0] as f64, c[1] as f64]),
-        );
+        coords.extend(polygon.coords.chunks_exact(2).map(|c| [c[0] as f64, c[1] as f64]));
 
         let base = (out.vertices.len() / attrs_per_vertex) as u32;
         earcut.earcut_slice(&coords, &holes, &mut triangles);
         out.indices.extend(triangles.iter().map(|t| t + base));
 
-        let custom = &instructions[custom_start..custom_start + custom_size];
-        out.vertices.reserve(vertices_count * attrs_per_vertex);
-        for c in instructions[i..i + vertices_count * 2].chunks_exact(2) {
+        for c in polygon.coords.chunks_exact(2) {
             out.vertices.push(c[0]);
             out.vertices.push(c[1]);
-            out.vertices.extend_from_slice(custom);
+            out.vertices.extend_from_slice(polygon.custom);
         }
-        i += vertices_count * 2;
     }
 }
 

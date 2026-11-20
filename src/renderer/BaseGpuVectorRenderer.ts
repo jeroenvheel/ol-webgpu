@@ -189,14 +189,14 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     liveRenderers.add(this as BaseGpuVectorRenderer<unknown>);
 
     if (this.hitDetection) {
-      mainThreadCore ??= loadCore(options.wasmUrl ?? undefined);
+      mainThreadCore ??= loadCore(options.wasmUrl);
       mainThreadCore.then(
         (core) => {
           this.picker = new Picker(core, this.style, this.variables);
           if (this.pendingIndex) {
             const {data, center, resolution, frameState} = this.pendingIndex;
             this.picker.load(data, {center, resolution});
-            this.picker.measure(this.batch as any, frameState);
+            this.picker.measure(this.batch as any, frameState, this.getLayer().getSource()?.getRevision() ?? 0);
             this.pendingIndex = null;
           }
         },
@@ -427,7 +427,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         if (response.index) {
           if (this.picker) {
             this.picker.load(response.index, {center, resolution});
-            this.picker.measure(this.batch as any, frameState);
+            this.picker.measure(this.batch as any, frameState, this.getLayer().getSource()?.getRevision() ?? 0);
           } else {
             this.pendingIndex = {data: response.index, center, resolution, frameState};
           }
@@ -557,9 +557,6 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   }
 
   private pickFeatures(coordinate: Coordinate, frameState: FrameState, hitTolerance: number): FeatureLike[] {
-    if (!this.hitDetection) {
-      throw new Error('`forEachFeatureAtCoordinate` cannot be used on an ol-webgpu layer with `disableHitDetection: true`.');
-    }
     return [...this.iteratePicks(coordinate, frameState, hitTolerance)];
   }
 
@@ -606,17 +603,20 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   // --- cleanup ---------------------------------------------------------
 
-  protected disposeBuffers() {
+  /** Frees the GPU buffers; the CPU copies stay for `reuploadBuffers`. */
+  protected releaseBuffers() {
     const b = this.buffers;
-    if (b) {
-      for (const set of [b.polygons, b.lines, b.points]) {
-        if (set) {
-          this.release(set.gpu);
-        }
+    for (const set of b ? [b.polygons, b.lines, b.points] : []) {
+      if (set) {
+        this.release(set.gpu);
       }
-      if (b.textKey) {
-        this.textOverlay?.dispose(b.textKey);
-      }
+    }
+  }
+
+  protected disposeBuffers() {
+    this.releaseBuffers();
+    if (this.buffers?.textKey) {
+      this.textOverlay?.dispose(this.buffers.textKey);
     }
     this.buffers = null;
     this.picker?.clear();

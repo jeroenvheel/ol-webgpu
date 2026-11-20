@@ -7,6 +7,7 @@
 //! so the global state is single-threaded.
 
 pub mod index;
+pub mod instructions;
 pub mod tessellate;
 
 use std::cell::RefCell;
@@ -108,7 +109,8 @@ pub extern "C" fn olgpu_out_ptr(kind: u32) -> *const u8 {
         1 => s.out.vertices.as_ptr() as *const u8,
         2 => s.out.instances.as_ptr() as *const u8,
         3 => s.hits.as_ptr() as *const u8,
-        _ => s.index.data().as_ptr() as *const u8,
+        4 => s.index.data().as_ptr() as *const u8,
+        _ => std::ptr::null(),
     })
 }
 
@@ -120,7 +122,8 @@ pub extern "C" fn olgpu_out_len(kind: u32) -> usize {
         1 => s.out.vertices.len(),
         2 => s.out.instances.len(),
         3 => s.hits.len(),
-        _ => s.index.data().len(),
+        4 => s.index.data().len(),
+        _ => 0,
     })
 }
 
@@ -132,7 +135,8 @@ pub extern "C" fn olgpu_out_reset() {
 
 /// Builds the spatial index from the three instruction arrays (same layouts
 /// as the `build_*` functions). `ref_offset` is the position of the feature
-/// ref inside the custom attributes; 	0..t5 maps instruction coordinates\n/// to index space. The serialized index is then available
+/// ref inside the custom attributes; `t0..t5` maps instruction
+/// coordinates to index space. The serialized index is then available
 /// through `olgpu_out_ptr(4)`.
 ///
 /// # Safety
@@ -159,6 +163,8 @@ pub unsafe extern "C" fn olgpu_index_build(
     let lines = unsafe { slice_f32(lines_ptr, lines_len) };
     let polygons = unsafe { slice_f32(polygons_ptr, polygons_len) };
     STATE.with_borrow_mut(|s| {
+        // the previous index goes first, so the two are not in memory together
+        s.index = index::PackedIndex::default();
         s.index = index::PackedIndex::build(points, lines, polygons, custom_size, ref_offset, &[t0, t1, t2, t3, t4, t5])
     });
 }

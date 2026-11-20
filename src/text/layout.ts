@@ -24,7 +24,8 @@ import {DROP_BINS, type GlyphAtlas, SUBPIXEL_BINS, segments} from './atlas.js';
 import type {TextEvaluator} from './style.js';
 
 /**
- * Floats per instance: anchor (2, map units relative to the set's origin),
+ * Sizes of the attributes of an instance, in shader location order after
+ * the quad corner: anchor (2, map units relative to the set's origin),
  * part offset (2, pixels), glyph offset (2), size (2), atlas cell (4,
  * texels), colour (4), angle, rotate with view, and what to draw: the
  * `HALO` or `FILL` channel of the cell, or a `SOLID` rectangle.
@@ -33,7 +34,8 @@ import type {TextEvaluator} from './style.js';
  * of all its glyphs, then their fills: a halo never covers a letter of its
  * own label, and a label covers the labels drawn before it, as on a Canvas.
  */
-export const INSTANCE_FLOATS = 19;
+export const INSTANCE_ATTRIBUTES = [2, 2, 2, 2, 4, 4, 3];
+export const INSTANCE_FLOATS = INSTANCE_ATTRIBUTES.reduce((sum, size) => sum + size, 0);
 
 /** Channels of an atlas cell: the halo in red, the fill in green. */
 const HALO = 0;
@@ -44,9 +46,9 @@ const SOLID = 2;
 /**
  * Doubles per part: anchor x, y (map units, absolute), part offset x, y
  * (pixels), angle, rotate with view, box min x, min y, max x, max y (pixels,
- * before the angle is applied).
+ * before the angle is applied), cosine and sine of the angle.
  */
-export const PART_DOUBLES = 10;
+export const PART_DOUBLES = 12;
 
 export const MODE_DECLUTTER = 0;
 export const MODE_OBSTACLE = 1;
@@ -79,11 +81,10 @@ export interface LabelSet {
   origin: [number, number];
   resolution: number;
   rotation: number;
-  pixelRatio: number;
-  /** While the view stays inside this extent, the set covers it. */
-  coverage: Extent;
   /** Atlas generation the glyph cells belong to. */
   generation: number;
+  /** Atlas version that has all the cells of the set. */
+  atlasVersion: number;
   instances: Float32Array;
   glyphCount: number;
   count: number;
@@ -108,8 +109,6 @@ export interface LayoutOptions {
   rotation: number;
   pixelRatio: number;
   extent: Extent;
-  /** The view extent the layout is for, see `LabelSet.coverage`. */
-  coverage: Extent;
   /** Transforms a geometry to the view projection (when a user projection is set). */
   toView?: (geometry: any) => any;
   /** Only measure the labels (parts and boxes), without glyphs: the first pass when decluttering. */
@@ -147,8 +146,8 @@ export function partBox(parts: Float64Array, part: number, transform: number[], 
     out[3] = sy + y1;
     return;
   }
-  const ac = Math.cos(angle);
-  const as = Math.sin(angle);
+  const ac = parts[at + 10];
+  const as = parts[at + 11];
   // the view's rotation (when rotating with it) after the part's own angle
   const c = vc * ac - vs * as;
   const s = vs * ac + vc * as;
@@ -195,8 +194,6 @@ function isLight(color: number[] | null): boolean {
 interface Chunk {
   text: string;
   font: string;
-  width: number;
-  height: number;
 }
 
 interface Line {
@@ -225,7 +222,6 @@ export class LabelBuilder {
   private parts: number[] = [];
   private hasLine = false;
   private readonly generation: number;
-  private readonly widthCaches: Record<string, Record<string, number>> = {};
   private current: FeatureLike | null = null;
   private currentUid = 0;
   private currentIndex = 0;
@@ -296,9 +292,8 @@ export class LabelBuilder {
       origin: o.origin,
       resolution: o.resolution,
       rotation: o.rotation,
-      pixelRatio: o.pixelRatio,
-      coverage: o.coverage,
       generation: this.generation,
+      atlasVersion: this.atlas.version,
       instances: this.instances.subarray(0, this.glyphCount * INSTANCE_FLOATS),
       glyphCount: this.glyphCount,
       count,
@@ -559,7 +554,7 @@ export class LabelBuilder {
       const width = atlas.metrics(font).advance(chunkText);
       const height = measureTextHeight(font);
       const line = lines[lines.length - 1];
-      line.chunks.push({text: chunkText, font, width, height});
+      line.chunks.push({text: chunkText, font});
       line.width += width;
       line.height = Math.max(line.height, height);
     }
@@ -684,7 +679,7 @@ export class LabelBuilder {
         this.instance(x, y, corner[0], corner[1], quads[i], quads[i + 1], quads[i + 2], quads[i + 3], quads[i + 4], quads[i + 5], quads[i + 6], quads[i + 7], color, rotation, rotateWithView, channel);
       }
     }
-    this.parts.push(x, y, 0, 0, rotation, rotateWithView, x0, y0, x1, y1);
+    this.parts.push(x, y, 0, 0, rotation, rotateWithView, x0, y0, x1, y1, Math.cos(rotation), Math.sin(rotation));
     this.endLabel();
   }
 
@@ -757,7 +752,7 @@ export class LabelBuilder {
     const sx = Math.abs(style.scale[0]);
     const sy = style.scale[1];
     const pathLength = lineStringLength(pixels, 0, pixels.length, 2);
-    const cache = (this.widthCaches[font] ??= {});
+    const cache = (this.atlas.widthCaches[font] ??= {});
     const textLength = sx * measureAndCacheTextWidth(font, plain, cache);
     if (!text.getOverflow() && textLength > pathLength) {
       return;
@@ -799,7 +794,7 @@ export class LabelBuilder {
         pen += metrics.advance(segs[k]) + (k + 1 < segs.length ? metrics.kerning(segs[k], segs[k + 1]) : 0);
       }
       const h = (Math.abs(height * sy) + s) / 2;
-      this.parts.push(ax, ay, px, py, angle, 1, -half + offsetX - s / 2, cy - h, half + offsetX + s / 2, cy + h);
+      this.parts.push(ax, ay, px, py, angle, 1, -half + offsetX - s / 2, cy - h, half + offsetX + s / 2, cy + h, Math.cos(angle), Math.sin(angle));
     }
     // all halos of the label, then all fills
     for (let channel = HALO; channel <= FILL; channel++) {

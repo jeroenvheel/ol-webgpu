@@ -11,12 +11,12 @@ import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js
 import {TEXT_OVERLAY_WGSL} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
 import type {GlyphAtlas} from '../text/atlas.js';
-import {INSTANCE_FLOATS} from '../text/layout.js';
+import {INSTANCE_ATTRIBUTES, INSTANCE_FLOATS, type LabelSet} from '../text/layout.js';
 import {LABEL_UNIFORM_FLOATS, LABEL_WGSL, QUAD, writeLabelUniforms} from '../text/shaders.js';
 import {type ShaderTranslator, type WgslProgram, loadShaderTranslator} from '../wasm/shader.js';
 import {flushSubmits, frameEncoder, getDevice, onDeviceLost, preferredFormat} from '../webgpu/device.js';
 import {surfaceType} from '../render/surface.js';
-import {WebGPUSurface, compositePipeline} from '../webgpu/surface.js';
+import {PREMULTIPLIED_BLEND, WebGPUSurface, compositePipeline} from '../webgpu/surface.js';
 import type {BufferSet} from '../worker/protocol.js';
 import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
 
@@ -34,8 +34,6 @@ interface Pipeline {
   program: WgslProgram;
   pipeline: GPURenderPipeline;
   layout: GPUBindGroupLayout;
-  /** Number of zero-filled attribute slots in vertex buffer 2. */
-  zeroSlots: number;
   /** Bind group of the last frame and the resources it was made from. */
   group: GPUBindGroup | null;
   groupResources: unknown[];
@@ -56,7 +54,7 @@ interface AtlasTexture {
 }
 const atlasTextures = new WeakMap<GPUDevice, AtlasTexture>();
 
-function atlasTexture(device: GPUDevice, atlas: GlyphAtlas): AtlasTexture {
+function atlasTexture(device: GPUDevice, atlas: GlyphAtlas, set: LabelSet): AtlasTexture {
   let entry = atlasTextures.get(device);
   const canvas = atlas.canvas;
   if (!entry || entry.canvas !== canvas) {
@@ -73,7 +71,8 @@ function atlasTexture(device: GPUDevice, atlas: GlyphAtlas): AtlasTexture {
     entry = {texture, view: texture.createView(), canvas, version: -1};
     atlasTextures.set(device, entry);
   }
-  if (entry.version !== atlas.version) {
+  // cells drawn since for a layout in progress are uploaded when a set needs them
+  if (entry.version < set.atlasVersion) {
     entry.version = atlas.version;
     device.queue.copyExternalImageToTexture({source: canvas}, {texture: entry.texture}, [canvas.width, canvas.height]);
   }
@@ -208,7 +207,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       try {
         const [device, translator] = await Promise.all([
           getDevice(),
-          loadShaderTranslator(this.shaderWasmUrl ?? undefined),
+          loadShaderTranslator(this.shaderWasmUrl),
         ]);
         this.device = device;
         this.translator = translator;
@@ -283,10 +282,6 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       entries.push({binding: 2 + 2 * k, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: {type: 'filtering'}});
     });
     const layout = device.createBindGroupLayout({entries});
-    const blend: GPUBlendState = {
-      color: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
-      alpha: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
-    };
     const pipeline = device.createRenderPipeline({
       label: `ol-webgpu ${pass.kind}`,
       layout: device.createPipelineLayout({bindGroupLayouts: [layout]}),
@@ -294,12 +289,12 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       fragment: {
         module: device.createShaderModule({code: program.fragment, label: `ol-webgpu ${pass.kind} fs`}),
         entryPoint: 'main',
-        targets: [{format: this.format, blend}],
+        targets: [{format: this.format, blend: PREMULTIPLIED_BLEND}],
       },
       primitive: {topology: 'triangle-list', cullMode: 'none'},
       multisample: {count: this.sampleCount},
     });
-    return {pass, program, pipeline, layout, zeroSlots: zeros.length, group: null, groupResources: []};
+    return {pass, program, pipeline, layout, group: null, groupResources: []};
   }
 
   protected upload(set: BufferSet): GPUBuffers {
@@ -583,17 +578,16 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         {binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {type: 'filtering'}},
       ],
     });
-    const formats: GPUVertexFormat[] = ['float32x2', 'float32x2', 'float32x2', 'float32x2', 'float32x4', 'float32x4', 'float32x3'];
     let offset = 0;
-    const attributes: GPUVertexAttribute[] = formats.map((format, i) => {
-      const attribute = {shaderLocation: i + 1, offset, format};
-      offset += format === 'float32x4' ? 16 : format === 'float32x3' ? 12 : 8;
+    const attributes: GPUVertexAttribute[] = INSTANCE_ATTRIBUTES.map((size, i) => {
+      const attribute = {shaderLocation: i + 1, offset, format: vertexFormat(size)};
+      offset += size * 4;
       return attribute;
     });
     const buffers: GPUVertexBufferLayout[] = [
       {arrayStride: 8, stepMode: 'vertex', attributes: [{shaderLocation: 0, offset: 0, format: 'float32x2'}]},
       {arrayStride: INSTANCE_FLOATS * 4, stepMode: 'instance', attributes},
-      {arrayStride: 4, stepMode: 'instance', attributes: [{shaderLocation: 8, offset: 0, format: 'float32'}]},
+      {arrayStride: 4, stepMode: 'instance', attributes: [{shaderLocation: INSTANCE_ATTRIBUTES.length + 1, offset: 0, format: 'float32'}]},
     ];
     const pipeline = device.createRenderPipeline({
         label: 'ol-webgpu labels',
@@ -602,15 +596,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         fragment: {
           module,
           entryPoint: 'fs',
-          targets: [
-            {
-              format: this.format,
-              blend: {
-                color: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
-                alpha: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
-              },
-            },
-          ],
+          targets: [{format: this.format, blend: PREMULTIPLIED_BLEND}],
         },
         primitive: {topology: 'triangle-strip'},
         multisample: {count: this.sampleCount},
@@ -647,7 +633,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     const device = this.device!;
     const r = this.labelResources();
     const {set, worlds} = frame;
-    const atlas = atlasTexture(device, frame.atlas);
+    const atlas = atlasTexture(device, frame.atlas, set);
     if (r.set !== set.id || !r.instances) {
       if (r.instances) {
         flushSubmits();
@@ -700,8 +686,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       r.uniforms = device.createBuffer({size: Math.max(4, worlds.length) * r.slotSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-webgpu label uniforms'});
     }
     worlds.forEach((w, i) => {
-      // the layer opacity is applied when the layer image is composited
-      writeLabelUniforms(r.uniformData, i * floatsPerSlot, frameState, set, w.world * frame.worldWidth, atlas.canvas.width, atlas.canvas.height, 1);
+      writeLabelUniforms(r.uniformData, i * floatsPerSlot, frameState, set, w.world * frame.worldWidth, atlas.canvas.width, atlas.canvas.height);
     });
     device.queue.writeBuffer(r.uniforms, 0, r.uniformData, 0, worlds.length * floatsPerSlot);
     if (!r.group || r.groupResources[0] !== r.uniforms || r.groupResources[1] !== atlas.view) {

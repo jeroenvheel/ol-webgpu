@@ -4,12 +4,12 @@
  * have built their buffers and drawn them.
  */
 import 'ol/ol.css';
-import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
+import {renderersSettled} from './settled.js';
 
 const params = new URLSearchParams(location.search);
 const name = params.get('case');
 
-(window as any).__olgpuSettled = () => [...liveRenderers].every((r) => r.ready && r.framesSinceReady >= 1 && !r.labelsBusy);
+(window as any).__olgpuSettled = () => renderersSettled();
 
 if (!(window as any).render) {
   // opened manually in a browser: no runner

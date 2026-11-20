@@ -4,10 +4,24 @@
 //! Items: one per point, one per chunk of up to `LINE_CHUNK` line segments,
 //! one per polygon. Coordinates are in instruction space; the caller converts
 //! the query position and radius into that space.
+//!
+//! The index is one array of 32-bit words (integers stored as the bits of an
+//! f32), which is also what goes from the worker to the main thread:
+//!
+//! - header: magic, items, levels, nodes, geometry length, 0
+//! - level bounds: end node position (exclusive) of each level, leaves first
+//! - boxes: 4 floats per node (minX, minY, maxX, maxY), leaves first, root last
+//! - indices: per node, the item index (leaves) or the first child node position
+//! - meta: 4 words per item: kind, seq, ref, geometry offset
+//! - geometry: point `[x, y]`; line `[n, x0, y0, ...]`;
+//!   polygon `[rings, count0.., x0, y0, ...]`
+
+use crate::instructions::{self, LINE_VERTEX_SIZE};
 
 const NODE_SIZE: usize = 16;
 const LINE_CHUNK: usize = 32;
 const MAGIC: u32 = 0x4F4C_4731; // "OLG1"
+const HEADER: usize = 6;
 
 pub const KIND_POLYGON: u32 = 0;
 pub const KIND_LINE: u32 = 1;
@@ -16,18 +30,14 @@ pub const KIND_POINT: u32 = 2;
 #[derive(Default, Debug, Clone)]
 pub struct PackedIndex {
     num_items: usize,
-    /// 4 floats per node (minX, minY, maxX, maxY), leaves first, root last.
-    boxes: Vec<f32>,
-    /// Per node: item index (leaves) or first child node position.
-    indices: Vec<u32>,
-    /// End node position (exclusive) of each level, leaves first.
-    level_bounds: Vec<u32>,
-    /// 4 words per item: kind, seq, ref, geometry offset.
-    meta: Vec<u32>,
-    /// Geometry: point `[x, y]`; line `[n, x0, y0, ...]`;
-    /// polygon `[rings, count0.., x0, y0, ...]`.
-    geom: Vec<f32>,
-    serialized: Vec<f32>,
+    levels: usize,
+    num_nodes: usize,
+    /// Positions of the sections in `data`.
+    boxes: usize,
+    indices: usize,
+    meta: usize,
+    geom: usize,
+    data: Vec<f32>,
 }
 
 struct Item {
@@ -60,139 +70,125 @@ impl PackedIndex {
         ref_offset: usize,
         t: &[f64; 6],
     ) -> Self {
-        let mut items: Vec<Item> = Vec::new();
-        let mut geom: Vec<f32> = Vec::new();
+        let stride = 2 + custom_size;
+        let point_count = points.len() / stride;
+        let mut items: Vec<Item> = Vec::with_capacity(point_count);
+        // the geometry is at most as long as the instructions it comes from
+        let mut geom: Vec<f32> = Vec::with_capacity(polygons.len() + lines.len() + point_count * 2);
         let tx = |x: f32, y: f32| -> [f32; 2] {
             let (x, y) = (x as f64, y as f64);
             [(t[0] * x + t[2] * y + t[4]) as f32, (t[1] * x + t[3] * y + t[5]) as f32]
         };
-        let mut scratch: Vec<f32> = Vec::new();
-        let ref_at = |instr: &[f32], start: usize| -> u32 {
-            if ref_offset < custom_size { instr[start + ref_offset] as u32 } else { 0 }
-        };
+        let ref_of = |custom: &[f32]| -> u32 { custom.get(ref_offset).map_or(0, |r| *r as u32) };
 
-        // polygons: [custom.., rings, counts.., coords..]
-        let mut i = 0usize;
-        let mut seq = 0u32;
-        while i < polygons.len() {
-            let custom_start = i;
-            i += custom_size;
-            if i >= polygons.len() {
-                break;
+        for (seq, polygon) in instructions::polygons(polygons, custom_size).enumerate() {
+            let offset = geom.len();
+            geom.push(polygon.ring_counts.len() as f32);
+            geom.extend_from_slice(polygon.ring_counts);
+            let coords = geom.len();
+            for c in polygon.coords.chunks_exact(2) {
+                geom.extend_from_slice(&tx(c[0], c[1]));
             }
-            let rings = polygons[i] as usize;
-            i += 1;
-            if i + rings > polygons.len() {
-                break;
-            }
-            let counts = &polygons[i..i + rings];
-            let total: usize = counts.iter().map(|c| *c as usize).sum();
-            i += rings;
-            if i + total * 2 > polygons.len() {
-                break;
-            }
-            scratch.clear();
-            for c in polygons[i..i + total * 2].chunks_exact(2) {
-                scratch.extend_from_slice(&tx(c[0], c[1]));
-            }
-            let coords = &scratch[..];
             items.push(Item {
-                bbox: bbox_of(coords),
+                bbox: bbox_of(&geom[coords..]),
                 kind: KIND_POLYGON,
-                seq,
-                r#ref: ref_at(polygons, custom_start),
-                geom: geom.len() as u32,
+                seq: seq as u32,
+                r#ref: ref_of(polygon.custom),
+                geom: offset as u32,
             });
-            geom.push(rings as f32);
-            geom.extend_from_slice(counts);
-            geom.extend_from_slice(coords);
-            i += total * 2;
-            seq += 1;
         }
 
-        // lines: [custom.., n, (x, y, m) * n]
-        let mut i = 0usize;
-        let mut seq = 0u32;
-        while i < lines.len() {
-            let custom_start = i;
-            i += custom_size;
-            if i >= lines.len() {
-                break;
-            }
-            let vc = lines[i] as usize;
-            i += 1;
-            if i + vc * 3 > lines.len() {
-                break;
-            }
-            let r = ref_at(lines, custom_start);
+        for (seq, line) in instructions::lines(lines, custom_size).enumerate() {
+            let vc = line.vertices.len() / LINE_VERTEX_SIZE;
+            let r = ref_of(line.custom);
             let mut start = 0usize;
             while start + 1 < vc {
                 let end = (start + LINE_CHUNK).min(vc - 1);
-                let offset = geom.len() as u32;
+                let offset = geom.len();
                 geom.push((end - start + 1) as f32);
                 for v in start..=end {
-                    geom.extend_from_slice(&tx(lines[i + v * 3], lines[i + v * 3 + 1]));
+                    geom.extend_from_slice(&tx(line.vertices[v * LINE_VERTEX_SIZE], line.vertices[v * LINE_VERTEX_SIZE + 1]));
                 }
                 items.push(Item {
-                    bbox: bbox_of(&geom[offset as usize + 1..]),
+                    bbox: bbox_of(&geom[offset + 1..]),
                     kind: KIND_LINE,
-                    seq,
+                    seq: seq as u32,
                     r#ref: r,
-                    geom: offset,
+                    geom: offset as u32,
                 });
                 start = end;
             }
-            i += vc * 3;
-            seq += 1;
         }
 
         // points: [x, y, custom..]
-        let stride = 2 + custom_size;
         for (seq, p) in points.chunks_exact(stride).enumerate() {
             let [x, y] = tx(p[0], p[1]);
             items.push(Item {
                 bbox: [x, y, x, y],
                 kind: KIND_POINT,
                 seq: seq as u32,
-                r#ref: if ref_offset < custom_size { p[2 + ref_offset] as u32 } else { 0 },
+                r#ref: ref_of(&p[2..]),
                 geom: geom.len() as u32,
             });
             geom.push(x);
             geom.push(y);
         }
 
-        let mut idx = Self::pack(items, geom);
-        idx.serialize();
-        idx
+        Self::pack(&items, &geom)
     }
 
-    fn pack(items: Vec<Item>, geom: Vec<f32>) -> Self {
+    fn pack(items: &[Item], geom: &[f32]) -> Self {
         let n = items.len();
-        let mut idx = PackedIndex { num_items: n, geom, ..Default::default() };
-        idx.meta.reserve(n * 4);
-        for it in &items {
-            idx.meta.extend_from_slice(&[it.kind, it.seq, it.r#ref, it.geom]);
+        let u = f32::from_bits;
+
+        // level bounds
+        let mut level_bounds: Vec<u32> = Vec::new();
+        let mut num_nodes = 0usize;
+        if n > 0 {
+            num_nodes = n;
+            let mut nn = n;
+            level_bounds.push(n as u32);
+            loop {
+                nn = nn.div_ceil(NODE_SIZE);
+                num_nodes += nn;
+                level_bounds.push(num_nodes as u32);
+                if nn == 1 {
+                    break;
+                }
+            }
         }
+
+        let levels = level_bounds.len();
+        let boxes = HEADER + levels;
+        let indices = boxes + num_nodes * 4;
+        let meta = indices + num_nodes;
+        let geom_at = meta + n * 4;
+        let mut data = vec![0.0f32; geom_at];
+        data.reserve_exact(geom.len());
+        data[0] = u(MAGIC);
+        data[1] = u(n as u32);
+        data[2] = u(levels as u32);
+        data[3] = u(num_nodes as u32);
+        data[4] = u(geom.len() as u32);
+        for (l, bound) in level_bounds.iter().enumerate() {
+            data[HEADER + l] = u(*bound);
+        }
+        for (k, it) in items.iter().enumerate() {
+            let m = meta + k * 4;
+            data[m] = u(it.kind);
+            data[m + 1] = u(it.seq);
+            data[m + 2] = u(it.r#ref);
+            data[m + 3] = u(it.geom);
+        }
+        data.extend_from_slice(geom);
+        let mut idx = PackedIndex { num_items: n, levels, num_nodes, boxes, indices, meta, geom: geom_at, data };
         if n == 0 {
             return idx;
         }
 
-        // level bounds
-        let mut num_nodes = n;
-        let mut nn = n;
-        idx.level_bounds.push(n as u32);
-        loop {
-            nn = nn.div_ceil(NODE_SIZE);
-            num_nodes += nn;
-            idx.level_bounds.push(num_nodes as u32);
-            if nn == 1 {
-                break;
-            }
-        }
-
         // hilbert sort of item centers
         let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
-        for it in &items {
+        for it in items {
             bounds[0] = bounds[0].min(it.bbox[0]);
             bounds[1] = bounds[1].min(it.bbox[1]);
             bounds[2] = bounds[2].max(it.bbox[2]);
@@ -214,102 +210,65 @@ impl PackedIndex {
             .collect();
         order.sort_unstable();
 
-        idx.boxes = vec![0.0; num_nodes * 4];
-        idx.indices = vec![0; num_nodes];
+        let data = &mut idx.data;
         for (pos, (_, k)) in order.iter().enumerate() {
-            idx.boxes[pos * 4..pos * 4 + 4].copy_from_slice(&items[*k as usize].bbox);
-            idx.indices[pos] = *k;
+            data[boxes + pos * 4..boxes + pos * 4 + 4].copy_from_slice(&items[*k as usize].bbox);
+            data[indices + pos] = u(*k);
         }
 
         // upper levels
         let mut pos = 0usize;
         let mut out = n;
-        for l in 0..idx.level_bounds.len() - 1 {
-            let end = idx.level_bounds[l] as usize;
+        for bound in &level_bounds[..levels - 1] {
+            let end = *bound as usize;
             while pos < end {
                 let first = pos;
                 let mut b = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
                 let mut k = 0;
                 while k < NODE_SIZE && pos < end {
-                    b[0] = b[0].min(idx.boxes[pos * 4]);
-                    b[1] = b[1].min(idx.boxes[pos * 4 + 1]);
-                    b[2] = b[2].max(idx.boxes[pos * 4 + 2]);
-                    b[3] = b[3].max(idx.boxes[pos * 4 + 3]);
+                    let node = boxes + pos * 4;
+                    b[0] = b[0].min(data[node]);
+                    b[1] = b[1].min(data[node + 1]);
+                    b[2] = b[2].max(data[node + 2]);
+                    b[3] = b[3].max(data[node + 3]);
                     pos += 1;
                     k += 1;
                 }
-                idx.boxes[out * 4..out * 4 + 4].copy_from_slice(&b);
-                idx.indices[out] = first as u32;
+                data[boxes + out * 4..boxes + out * 4 + 4].copy_from_slice(&b);
+                data[indices + out] = u(first as u32);
                 out += 1;
             }
         }
         idx
     }
 
+    /// The index as one array, for `from_data` in another instance.
     pub fn data(&self) -> &[f32] {
-        &self.serialized
-    }
-
-    fn serialize(&mut self) {
-        let mut s: Vec<f32> = Vec::with_capacity(
-            6 + self.level_bounds.len() + self.boxes.len() + self.indices.len() + self.meta.len() + self.geom.len(),
-        );
-        let u = f32::from_bits;
-        s.push(u(MAGIC));
-        s.push(u(self.num_items as u32));
-        s.push(u(self.level_bounds.len() as u32));
-        s.push(u(self.indices.len() as u32));
-        s.push(u(self.geom.len() as u32));
-        s.push(0.0);
-        s.extend(self.level_bounds.iter().map(|v| u(*v)));
-        s.extend_from_slice(&self.boxes);
-        s.extend(self.indices.iter().map(|v| u(*v)));
-        s.extend(self.meta.iter().map(|v| u(*v)));
-        s.extend_from_slice(&self.geom);
-        self.serialized = s;
+        &self.data
     }
 
     pub fn from_data(data: &[f32]) -> Option<Self> {
-        let w = |i: usize| data.get(i).map(|v| v.to_bits());
-        if w(0)? != MAGIC {
+        let w = |i: usize| data.get(i).map(|v| v.to_bits() as usize);
+        if w(0)? != MAGIC as usize {
             return None;
         }
-        let num_items = w(1)? as usize;
-        let levels = w(2)? as usize;
-        let num_nodes = w(3)? as usize;
-        let geom_len = w(4)? as usize;
-        let mut p = 6usize;
-        let total = p + levels + num_nodes * 4 + num_nodes + num_items * 4 + geom_len;
-        if data.len() < total {
+        let num_items = w(1)?;
+        let levels = w(2)?;
+        let num_nodes = w(3)?;
+        let geom_len = w(4)?;
+        let boxes = HEADER.checked_add(levels)?;
+        let indices = boxes.checked_add(num_nodes.checked_mul(4)?)?;
+        let meta = indices.checked_add(num_nodes)?;
+        let geom = meta.checked_add(num_items.checked_mul(4)?)?;
+        let total = geom.checked_add(geom_len)?;
+        if data.len() < total || (num_items > 0 && (levels == 0 || num_nodes == 0)) {
             return None;
         }
-        let take = |p: &mut usize, n: usize| {
-            let r = &data[*p..*p + n];
-            *p += n;
-            r
-        };
-        let level_bounds = take(&mut p, levels).iter().map(|v| v.to_bits()).collect();
-        let boxes = take(&mut p, num_nodes * 4).to_vec();
-        let indices = take(&mut p, num_nodes).iter().map(|v| v.to_bits()).collect();
-        let meta = take(&mut p, num_items * 4).iter().map(|v| v.to_bits()).collect();
-        let geom = take(&mut p, geom_len).to_vec();
-        Some(PackedIndex {
-            num_items,
-            boxes,
-            indices,
-            level_bounds,
-            meta,
-            geom,
-            serialized: Vec::new(),
-        })
+        Some(PackedIndex { num_items, levels, num_nodes, boxes, indices, meta, geom, data: data[..total].to_vec() })
     }
 
-    pub fn len(&self) -> usize {
-        self.num_items
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.num_items == 0
+    fn word(&self, at: usize) -> u32 {
+        self.data[at].to_bits()
     }
 
     /// Appends `[ref, kind, seq, distance bits]` for each item within `radius`,
@@ -321,14 +280,13 @@ impl PackedIndex {
         }
         let mut found: Vec<(u32, u32, u32, f64)> = Vec::new(); // kind, seq, ref, distance
         let n = self.num_items;
-        let levels = self.level_bounds.len();
-        let root = self.indices.len() - 1;
-        let mut stack: Vec<(usize, usize)> = vec![(root, levels - 1)];
+        let root = self.num_nodes - 1;
+        let mut stack: Vec<(usize, usize)> = vec![(root, self.levels - 1)];
 
         while let Some((node, level)) = stack.pop() {
-            let end = (node + NODE_SIZE).min(self.level_bounds[level] as usize);
+            let end = (node + NODE_SIZE).min(self.word(HEADER + level) as usize);
             for pos in node..end {
-                let b = &self.boxes[pos * 4..pos * 4 + 4];
+                let b = &self.data[self.boxes + pos * 4..self.boxes + pos * 4 + 4];
                 if x < b[0] as f64 - radius
                     || y < b[1] as f64 - radius
                     || x > b[2] as f64 + radius
@@ -336,13 +294,13 @@ impl PackedIndex {
                 {
                     continue;
                 }
-                let target = self.indices[pos] as usize;
+                let target = self.word(self.indices + pos) as usize;
                 if pos < n {
                     if let Some(d) = self.distance(target, x, y)
                         && d <= radius
                     {
-                        let m = &self.meta[target * 4..target * 4 + 4];
-                        found.push((m[0], m[1], m[2], d));
+                        let m = self.meta + target * 4;
+                        found.push((self.word(m), self.word(m + 1), self.word(m + 2), d));
                     }
                 } else {
                     stack.push((target, level - 1));
@@ -365,9 +323,9 @@ impl PackedIndex {
     }
 
     fn distance(&self, item: usize, x: f64, y: f64) -> Option<f64> {
-        let kind = self.meta[item * 4];
-        let g = self.meta[item * 4 + 3] as usize;
-        let geom = &self.geom;
+        let kind = self.word(self.meta + item * 4);
+        let g = self.word(self.meta + item * 4 + 3) as usize;
+        let geom = &self.data[self.geom..];
         match kind {
             KIND_POINT => {
                 let dx = x - geom[g] as f64;

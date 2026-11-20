@@ -158,6 +158,8 @@ export class GlyphAtlas {
   private shelfHeight = 0;
   private readonly faces = new Map<string, Face>();
   private readonly fonts = new Map<string, FontMetrics>();
+  /** Widths of whole texts per font, for labels along lines (ol's `measureAndCacheTextWidth`). */
+  widthCaches: Record<string, Record<string, number>> = {};
   private readonly listeners = new Set<() => void>();
   /** A cell did not fit: the atlas starts over when the layout that found out is done. */
   private full = false;
@@ -197,6 +199,7 @@ export class GlyphAtlas {
     this.init(INITIAL_HEIGHT);
     this.faces.clear();
     this.fonts.clear();
+    this.widthCaches = {};
     this.measureFont = '';
     // line heights ol measured before a web font arrived are stale too
     for (const font in textHeights) {

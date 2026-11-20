@@ -11,14 +11,24 @@ import {create as createTransform} from 'ol/transform.js';
 import {makeProjectionTransform} from '../render/uniforms.js';
 import type {LabelSet} from './layout.js';
 
-/** Floats of the uniform block (64 bytes). */
-export const LABEL_UNIFORM_FLOATS = 16;
+/** The uniforms and their sizes, in the order `writeLabelUniforms` writes them. */
+export const LABEL_UNIFORMS: ReadonlyArray<readonly [string, number]> = [
+  ['u_matrix', 4],
+  ['u_translate', 2],
+  ['u_viewport', 2],
+  ['u_atlasSize', 2],
+  ['u_rotation', 1],
+  ['u_pixelRatio', 1],
+];
+/** Floats of the uniform block (48 bytes). */
+export const LABEL_UNIFORM_FLOATS = 12;
 
 const projection = createTransform();
 
 /**
  * Uniforms for one world copy: matrix (4), translate (2), viewport in CSS
- * pixels (2), atlas size (2), view rotation, opacity, pixel ratio.
+ * pixels (2), atlas size (2), view rotation, pixel ratio. The layer
+ * opacity is not in here: it is applied when the layer image is composited.
  * The anchors are relative to the set's origin; the origin is projected
  * here with double precision, so labels stay exact at any zoom.
  */
@@ -30,7 +40,6 @@ export function writeLabelUniforms(
   worldOffset: number,
   atlasWidth: number,
   atlasHeight: number,
-  opacity: number,
 ) {
   const p = makeProjectionTransform(frameState, projection);
   const x = set.origin[0] + worldOffset;
@@ -46,11 +55,7 @@ export function writeLabelUniforms(
   out[at + 8] = atlasWidth;
   out[at + 9] = atlasHeight;
   out[at + 10] = frameState.viewState.rotation;
-  out[at + 11] = opacity;
-  out[at + 12] = frameState.pixelRatio;
-  out[at + 13] = 0;
-  out[at + 14] = 0;
-  out[at + 15] = 0;
+  out[at + 11] = frameState.pixelRatio;
 }
 
 /** Corners of the unit quad, as a triangle strip. */
@@ -73,7 +78,6 @@ uniform vec2 u_translate;
 uniform vec2 u_viewport;
 uniform vec2 u_atlasSize;
 uniform float u_rotation;
-uniform float u_opacity;
 uniform float u_pixelRatio;
 out vec4 v_color;
 out vec2 v_texCoord;
@@ -88,7 +92,7 @@ vec2 rotate(vec2 v, float angle) {
 }
 
 void main() {
-  float alpha = a_color.a * a_opacity * u_opacity;
+  float alpha = a_color.a * a_opacity;
   v_channel = a_angle.z;
   if (alpha <= 0.0) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -148,7 +152,6 @@ struct Uniforms {
   viewport: vec2<f32>,
   atlasSize: vec2<f32>,
   rotation: f32,
-  opacity: f32,
   pixelRatio: f32,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -183,7 +186,7 @@ fn vs(
   @location(8) opacity: f32,
 ) -> VertexOut {
   var out: VertexOut;
-  let alpha = color.a * opacity * u.opacity;
+  let alpha = color.a * opacity;
   out.channel = angle.z;
   if (alpha <= 0.0) {
     out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
