@@ -1,0 +1,212 @@
+# ol-gpu
+
+WebGL2 and WebGPU vector layers for [OpenLayers](https://openlayers.org), with
+a Rust/WebAssembly geometry core.
+
+```js
+import {GpuVectorLayer} from 'ol-gpu';
+
+const layer = new GpuVectorLayer({
+  source: vectorSource, // any ol/source/Vector
+  style: {
+    'circle-radius': ['get', 'size'],
+    'circle-fill-color': ['match', ['get', 'kind'], 0, '#1b9e77', '#d95f02'],
+    'stroke-color': '#333',
+    'stroke-width': 1.5,
+    'fill-color': '#4a90d955',
+  },
+  variables: {minSize: 2},
+});
+map.addLayer(layer);
+```
+
+- `GpuVectorLayer` uses WebGPU where available and falls back to WebGL2 (also
+  at runtime, if no WebGPU device can be created).
+- `WebGL2VectorLayer` and `WebGPUVectorLayer` force one backend.
+- Options and methods mirror `ol/layer/WebGLVector`: `style` (flat style,
+  rules with `filter`/`else`, expressions), `variables`,
+  `updateStyleVariables()`, `setStyle()`, `disableHitDetection`.
+  Extra options: `antialias` (default `false`), `wasmUrl`, `shaderWasmUrl`.
+- Like `WebGLVector`, dispose layers you no longer use.
+
+## How it works
+
+```
+ol/source/Vector ──► MixedGeometryBatch ──► render instructions      (main thread, ol code)
+                                              │
+                                              ▼  transferred
+                              worker: Rust/WASM (crates/core)
+                              ├─ point / line / polygon buffers (earcut)
+                              └─ packed Hilbert R-tree for hit detection
+                                              │
+              ┌───────────────────────────────┴─────────────────────────┐
+              ▼                                                         ▼
+   WebGL2VectorRenderer                                     WebGPUVectorRenderer
+   ol's GLSL shaders as-is                     ol's GLSL ─► naga (Rust/WASM, crates/shader) ─► WGSL
+   VAOs, instancing, u32 indices                          one pipeline per pass, MSAA optional
+```
+
+- **Same shaders as ol.** Styles are compiled by ol's own `ShaderBuilder`
+  (`convertStyleToShaders`). WebGL2 runs the GLSL ES 1.00 output directly;
+  WebGPU gets it translated to WGSL by [naga](https://github.com/gfx-rs/wgpu/tree/trunk/naga)
+  (after a small pre-pass in `src/style/glsl.ts`: uniform block, split
+  samplers, explicit locations, `gl_FragCoord` origin, clip-space z). Every
+  style feature ol supports therefore renders the same on both backends, and
+  follows ol when it is upgraded.
+- **Same buffers as ol.** `crates/core/src/tessellate.rs` is a port of
+  `ol/worker/webgl.js` + `bufferUtil.js`; golden tests check it against ol's
+  JS for synthetic data and for `countries.json`.
+- **CPU hit detection.** WebGPU readback is asynchronous, but OpenLayers asks
+  for hits synchronously, so picking uses a spatial index (built in Rust in the
+  worker, queried by a main-thread wasm instance) plus the style's filter,
+  symbol radius, stroke width and fill evaluated with ol's CPU expression
+  evaluator. Unlike ol's GPU picking it honours `hitTolerance`, respects
+  `filter`, and can return all features under the cursor.
+- **Fallbacks.** If WebAssembly cannot load, the worker uses ol's JS buffer
+  code; if WebGPU is unavailable, `GpuVectorLayer` uses WebGL2.
+
+## Development
+
+Requirements: Node 20+, Rust (stable, `rustup target add wasm32-unknown-unknown`).
+On Windows without Visual Studio, the GNU host toolchain works
+(`rustup-init --default-host x86_64-pc-windows-gnu`).
+
+```sh
+npm install
+npm run build:wasm            # crates/* → src/wasm/*.wasm
+npm run dev                   # examples on http://localhost:5180 (compare.html, bench.html)
+npm test                      # unit tests (vitest): golden buffers, shader translation
+npm run test:rust             # cargo tests of both crates
+npm run sync-upstream-tests   # copy ol's WebGLVector rendering cases + data (see below)
+npm run test:rendering        # screenshot + hit detection tests in Chromium (real GPU)
+npm run bench                 # benchmark, see bench/run.js for options
+npm run build                 # dist/ (ES module + worker + wasm + .d.ts)
+npm run test:dist             # production app build against dist/, checked in Chromium
+```
+
+`.upstream/openlayers` is a sparse clone of the ol tag matching the installed
+version (`git clone --depth 1 --filter=blob:none --sparse --branch v10.11.0 …`),
+used for the rendering cases and test data.
+
+Playwright's bundled Chromium on Windows lacks `dxcompiler.dll`; the runners
+pass `--disable-dawn-features=use_dxc` so WebGPU still works, or use
+`--channel=msedge`.
+
+## Tests
+
+**Rendering.** All 19 upstream `WebGLVector` rendering cases from ol 10.11 are
+synced (`main.js` with the layer class swapped, and ol's own `expected.png`),
+and each is rendered with ol's `WebGLVector`, `WebGL2VectorLayer` and
+`WebGPUVectorLayer`:
+
+Results on Chromium / Intel Iris Xe (D3D11), share of pixels differing from
+upstream's `expected.png`:
+
+| Case | ol WebGLVector | WebGL2 | WebGPU | WebGL2 ↔ WebGPU |
+|---|---|---|---|---|
+| webgl-circles | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-fill-pattern | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-fill-pattern-zoomed-in | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-holes | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-icons | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-layer-canvas-group-changes-for-points | 0.18% | 0.18% | 0.18% | 0.00% |
+| webgl-line | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-line-metric | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-line-pattern | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-line-zoomed-in | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-multiple-layers | 0.32% | 0.32% | 0.32% | 0.00% |
+| webgl-points | 0.19% | 0.19% | 0.19% | 0.00% |
+| webgl-points-geographic | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-points-rotation | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-shapes | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-vector | 0.02% | 0.02% | 0.02% | 0.00% |
+| webgl-vector-geographic | 0.00% | 0.00% | 0.00% | 0.00% |
+| webgl-text-style | 1.58% | 2.62% ✗ | 2.62% ✗ | 0.00% |
+| webgl-text-style-linestring | 2.10% ✗ | 2.42% ✗ | 2.42% ✗ | 0.00% |
+
+All 17 non-text cases pass on both backends with exactly ol's own deviation
+from the reference on this machine (the small numbers are driver
+differences against the CI machine that made `expected.png`), and WebGL2 and
+WebGPU produce identical pixels. The two text cases fail by design: text is
+not rendered yet (see Limitations).
+
+**Hit detection.** `test/rendering/picking.ts` checks 14 situations (symbol
+radius, stroke width, polygon fill and holes, `hitTolerance`, filtered-out
+features, rotation, panning). WebGL2 and WebGPU pass all 14. ol's
+`WebGLVector` fails two by design (it ignores `hitTolerance` and returns
+features hidden by a style `filter`), and is flaky right after a rebuild
+because its GPU hit buffer is rendered asynchronously.
+
+**Package.** `npm run test:dist` builds a small app against `dist/` for
+production and checks in Chromium that WebGPU, WebGL2 and the runtime
+WebGPU → WebGL2 fallback of `GpuVectorLayer` render, pick, and can be
+exported with `drawImage` in a `rendercomplete` listener.
+
+## Benchmark
+
+`npm run bench` (examples/bench.html in Playwright Chromium, Intel Iris Xe
+laptop GPU, D3D11, 1100×900 map, all features in view). Milliseconds, lower
+is better.
+
+**End to end per layer**
+
+| Data set | | ol WebGLVector | WebGL2 | WebGPU |
+|---|---|---|---|---|
+| 1M points | ready (add layer → rendercomplete) | 982 | 1132 | 1029 |
+| | frame (pan, no rebuild) | 137 | 89 | **25** |
+| | pick (`forEachFeatureAtPixel`) | 0.00 | 0.09 | 0.06 |
+| 200k lines | ready | 1922 | **793** | 862 |
+| | frame | 424 | 46 | **37** |
+| | pick | 0.00 | 0.03 | 0.04 |
+| 100k polygons | ready | 1588 | 738 | **625** |
+| | frame | 290 | 36 | **22** |
+| | pick | 0.00 | 0.02 | 0.02 |
+
+**Buffer generation (worker), ol's JS vs Rust/WASM**
+
+| | ol JS | Rust/WASM |
+|---|---|---|
+| 1M points | 7 | 11 |
+| 200k lines | 860 | **246** (3.5×) |
+| 100k polygons (earcut) | 385 | **42** (9×) |
+| hit index build, 1M points / 200k lines / 100k polygons | – | 167 / 52 / 26 |
+
+What this shows:
+
+- **Frames** are 4–13× faster than ol's layer for lines and polygons and
+  5× faster for points on WebGPU, with the same shaders and buffers. The
+  gap is in how frames are drawn (ol renders into an offscreen framebuffer
+  and copies it, among other things); it has not been profiled further.
+- **Time to first render** halves for lines and polygons, where the
+  tessellation is Rust's. For points it is on par: there the time goes into
+  ol's main-thread steps (`MixedGeometryBatch` ≈ 0.4 s and render
+  instructions ≈ 0.12 s for 1M points), which this package reuses and which
+  cannot move to WASM while the input is `ol/Feature` objects.
+- **Picking** costs well under 0.1 ms, like ol's GPU readback, but works on
+  WebGPU and is correct in the two cases where ol's is not. The first pick
+  after a rebuild can take 1–3 ms while feature-dependent sizes are still
+  being measured.
+- Point buffers are a plain copy, so WASM gains nothing there.
+
+## Limitations
+
+- **Text styles** (`text-*`) are not rendered yet (ol 10.11 draws them in a
+  separate canvas overlay worker).
+- Depends on non-API ol modules (`ol/render/webgl/*`, `ol/expr/*`), so the
+  peer dependency is pinned to ol 10.11.x; the golden and rendering tests
+  catch breaking changes when upgrading.
+- `antialias: true` gives smoother edges than ol (which draws into a
+  non-multisampled framebuffer); the default `false` matches ol exactly.
+- Map export (`drawImage` of the layer canvas in `rendercomplete`, as in
+  ol's export examples) needs `preserveDrawingBuffer` (default `true`). On
+  WebGPU this keeps a GPU copy of each frame and re-presents it on
+  `rendercomplete`; set it to `false` to save that copy if you never export.
+- Hit detection is geometric: dash gaps and transparent icon pixels still
+  count as hits. When symbol or stroke sizes depend on feature properties,
+  the largest size is measured in idle time after each rebuild; until then
+  (and for sizes that change with `time`) picks search a 128 px radius,
+  which is correct but slower on dense data.
+- Vite apps: if the dev server's dependency pre-bundling breaks the wasm
+  URLs, add `optimizeDeps: {exclude: ['ol-gpu']}`.
+- The naga shader translator is ~1.3 MB of wasm (loaded once, only by the
+  WebGPU layer).

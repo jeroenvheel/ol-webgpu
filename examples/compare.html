@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ol-gpu side by side</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <h1>Side by side: ol WebGLVector · WebGL2 · WebGPU</h1>
+    <p>
+      Same source, same flat style, synchronized views. Hover to pick (result per layer below each map).
+      <label>Minimum size <input id="min" type="range" min="0" max="7" value="0" /></label>
+      <label><input id="aa" type="checkbox" /> antialias (ol-gpu layers)</label>
+      <label>Points <input id="count" type="number" value="200000" step="50000" min="0" /></label>
+    </p>
+    <div class="maps">
+      <div><strong>ol WebGLVector</strong><div id="map-ol" class="map"></div><pre id="pick-ol"></pre></div>
+      <div><strong>WebGL2VectorLayer</strong><div id="map-webgl2" class="map"></div><pre id="pick-webgl2"></pre></div>
+      <div><strong>WebGPUVectorLayer</strong><div id="map-webgpu" class="map"></div><pre id="pick-webgpu"></pre></div>
+    </div>
+    <script type="module" src="./compare.ts"></script>
+  </body>
+</html>

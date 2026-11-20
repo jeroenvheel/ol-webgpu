@@ -1,0 +1,19 @@
+[package]
+name = "ol_gpu_shader"
+version = "0.1.0"
+edition = "2024"
+description = "Translates OpenLayers' generated GLSL shaders to WGSL with naga, compiled to WebAssembly"
+license = "BSD-2-Clause"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+naga = { version = "30", default-features = false, features = ["glsl-in", "wgsl-out"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

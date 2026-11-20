@@ -1,0 +1,48 @@
+{
+  "name": "ol-gpu",
+  "version": "0.1.0-dev",
+  "description": "WebGL2 and WebGPU vector layers for OpenLayers, with a Rust/WebAssembly geometry core",
+  "type": "module",
+  "private": true,
+  "license": "BSD-2-Clause",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "dev": "vite",
+    "build:wasm": "node tasks/build-wasm.js",
+    "build": "npm run build:wasm && vite build -c vite.lib.config.ts && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:rust": "cargo test --manifest-path crates/core/Cargo.toml && cargo test --manifest-path crates/shader/Cargo.toml",
+    "test:rendering": "node test/rendering/run.js",
+    "test:dist": "node test/consumer/run.js",
+    "bench": "node bench/run.js",
+    "sync-upstream-tests": "node tasks/sync-upstream-tests.js",
+    "build:examples": "vite build"
+  },
+  "peerDependencies": {
+    "ol": ">=10.11.0 <10.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/pngjs": "6.0.5",
+    "@webgpu/types": "0.1.74",
+    "ol": "10.11.0",
+    "pixelmatch": "8.0.0",
+    "playwright": "1.65.1",
+    "pngjs": "7.0.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
+    "vitest": "5.1.1"
+  }
+}

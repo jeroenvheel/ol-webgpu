@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ol-gpu benchmark</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <h1>ol-gpu benchmark</h1>
+    <p>
+      Synthetic data, sizes from the URL (<code>?points=…&amp;lines=…&amp;polygons=…&amp;layers=ol,webgl2,webgpu</code>).
+      Times in milliseconds.
+    </p>
+    <div id="map" class="map"></div>
+    <pre id="log">running…</pre>
+    <script type="module" src="./bench.ts"></script>
+  </body>
+</html>

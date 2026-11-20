@@ -1,0 +1,11 @@
+node_modules/
+dist/
+crates/*/target/
+src/wasm/*.wasm
+test/rendering/cases/*/actual*.png
+test/rendering/report/
+bench/results-*.json
+_artifact-*/
+.upstream/
+test/rendering/data/
+test/consumer/dist/
