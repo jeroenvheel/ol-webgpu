@@ -1,5 +1,5 @@
 /**
- * Text overlay while the view moves (`?layer=webgl2|webgpu&rotation=0.5`).
+ * Text overlay (`text: 'canvas'`) while the view moves (`?layer=webgl2|webgpu&rotation=0.5`).
  * Labels are drawn by ol's text worker for one frame state; until a new
  * image arrives, frames reproject the last one (ol's overlay matrix). The
  * check pans by whole pixels, reads the canvas in the same task as the
@@ -26,6 +26,7 @@ for (let i = 0; i < 12; i++) {
 }
 const layer = new Layer({
   source,
+  text: 'canvas', // this checks the text worker's image; GPU text is checked in gputext.ts and labels.ts
   style: {
     'circle-radius': 3,
     'circle-fill-color': '#2c5e91',

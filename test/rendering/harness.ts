@@ -9,7 +9,7 @@ import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
 const params = new URLSearchParams(location.search);
 const name = params.get('case');
 
-(window as any).__olgpuSettled = () => [...liveRenderers].every((r) => r.ready && r.framesSinceReady >= 1);
+(window as any).__olgpuSettled = () => [...liveRenderers].every((r) => r.ready && r.framesSinceReady >= 1 && !r.labelsBusy);
 
 if (!(window as any).render) {
   // opened manually in a browser: no runner

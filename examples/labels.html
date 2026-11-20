@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ol-webgpu labels</title>
+    <link rel="stylesheet" href="./style.css" />
+    <style>
+      #map { width: 100%; height: 70vh; background: #dbe9f4; }
+    </style>
+  </head>
+  <body>
+    <h1>Labels drawn on the GPU</h1>
+    <p>
+      Country and place names with decluttering; hover a label to pick its feature. Try
+      <a href="?declutter=0&amp;points=2000">without decluttering</a>,
+      <a href="?text=canvas&amp;points=2000">ol's text worker</a>,
+      <a href="?layer=canvas">ol's Canvas layer</a> or
+      <a href="?points=200000">200 000 places</a>.
+    </p>
+    <div id="map"></div>
+    <pre id="info">&nbsp;</pre>
+    <pre id="stats"></pre>
+    <script type="module" src="./labels.ts"></script>
+  </body>
+</html>

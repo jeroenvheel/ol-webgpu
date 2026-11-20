@@ -37,7 +37,9 @@ const KNOWN = {};
  * layers are compared with ol's WebGLVector rendered here instead. Text is
  * drawn by ol's text worker, which only sees fonts registered inside the
  * worker: upstream's @font-face 'Ubuntu' never reaches it, so the glyphs
- * come from whatever fallback font the machine has.
+ * come from whatever fallback font the machine has. Our layers run these
+ * cases with `text: 'canvas'`, the same text worker; GPU text has its own
+ * checks below.
  */
 const COMPARE_WITH_OL = {
   'webgl-text-style': 'fonts differ per machine',
@@ -61,7 +63,7 @@ const server = await createServer({
   root: here,
   logLevel: 'warn',
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
-  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js']},
+  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts']},
   worker: {format: 'es'},
 });
 await server.listen();
@@ -116,7 +118,7 @@ for (const name of cases) {
   for (const layer of layers) {
     errors.length = 0;
     const rendered = new Promise((resolve) => (onRender = resolve));
-    await page.goto(`${base}index.html?case=${name}&layer=${layer}`, {waitUntil: 'networkidle'});
+    await page.goto(`${base}index.html?case=${name}&layer=${layer}${name in COMPARE_WITH_OL ? '&text=canvas' : ''}`, {waitUntil: 'networkidle'});
     const config = await Promise.race([rendered, new Promise((r) => setTimeout(() => r({timeout: true}), 30_000))]);
     try {
       await page.waitForFunction(() => window.__olgpuSettled?.(), null, {timeout: 30_000, polling: 50});
@@ -313,12 +315,94 @@ if (args.shared !== 'false' && (!args.match || 'shared'.includes(args.match) || 
   }
 }
 
+// --- GPU text against ol's Canvas vector layer --------------------------------
+/**
+ * Scenarios of gputext.ts with the share of pixels that may differ from the
+ * Canvas layer. Upright text is placed and drawn like Canvas does, pixel
+ * for pixel; rotated text and text along lines is resampled a little
+ * differently, and Canvas resamples upright labels in a rotated view
+ * ('styles') where GPU text keeps them sharp.
+ */
+const GPU_TEXT = {
+  styles: 0.035,
+  multiline: 0.002,
+  line: 0.025,
+  lineRotated: 0.025,
+  polygon: 0.002,
+  declutter: 0.002,
+  wrap: 0.002,
+  webfont: 0.002,
+  scripts: 0.002,
+};
+let gpuTextFailures = 0;
+if (args.gputext !== 'false' && (!args.match || 'gputext'.includes(args.match) || args.match.includes('gputext'))) {
+  console.log('\nGPU text (gputext.ts), compared with ol/layer/Vector (Canvas):');
+  for (const pixelRatio of [1, 2]) {
+    const textPage = pixelRatio === 1 ? page : await browser.newPage({viewport: {width: 256, height: 256}, deviceScaleFactor: pixelRatio});
+    const pageErrors = [];
+    if (textPage !== page) {
+      textPage.on('pageerror', (e) => pageErrors.push(String(e)));
+    }
+    for (const [name, tolerance] of Object.entries(GPU_TEXT)) {
+      const shots = {};
+      const problems = {};
+      for (const layer of ['canvas', ...layers.filter((l) => l !== 'ol')]) {
+        errors.length = 0;
+        pageErrors.length = 0;
+        await textPage.goto(`${base}gputext.html?layer=${layer}&scenario=${name}`);
+        try {
+          await textPage.waitForFunction(() => window.__gpuText, null, {timeout: 30_000, polling: 50});
+          shots[layer] = PNG.sync.read(await textPage.screenshot({path: join(reportDir, `gputext-${name}-${pixelRatio}x-${layer}.png`)}));
+        } catch {
+          // reported below
+        }
+        problems[layer] = [...errors, ...pageErrors].filter((e) => !e.includes('powerPreference')).join(' | ').slice(0, 200);
+      }
+      const cells = layers
+        .filter((l) => l !== 'ol')
+        .map((layer) => {
+          const mismatch = shots.canvas && shots[layer] ? compare(shots[layer], shots.canvas, join(reportDir, `gputext-${name}-${pixelRatio}x-${layer}-diff.png`)) : 1;
+          const ok = mismatch <= tolerance && !problems[layer];
+          gpuTextFailures += ok ? 0 : 1;
+          return `${layer}: ${ok ? 'ok  ' : 'FAIL'} ${(mismatch * 100).toFixed(2).padStart(6)}% ${problems[layer]}`;
+        });
+      console.log(`  ${`${name}, ${pixelRatio}x`.padEnd(24)} ${cells.join('   ')}`);
+    }
+    if (textPage !== page) {
+      await textPage.close();
+    }
+  }
+
+  console.log('\nGPU text when the view, style and data change (labels.ts):');
+  const checks = {};
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    errors.length = 0;
+    await page.goto(`${base}labels.html?layer=${layer}`);
+    try {
+      await page.waitForFunction(() => window.__labels, null, {timeout: 60_000, polling: 50});
+      checks[layer] = await page.evaluate(() => window.__labels);
+    } catch {
+      checks[layer] = {'page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
+    }
+  }
+  const checkNames = [...new Set(Object.values(checks).flatMap((c) => Object.keys(c)))];
+  for (const name of checkNames) {
+    const cells = Object.entries(checks).map(([layer, c]) => {
+      const r = c[name];
+      gpuTextFailures += r?.ok ? 0 : 1;
+      return `${layer}: ${r?.ok ? 'ok' : `FAIL ${r?.detail ?? 'missing'}`}`;
+    });
+    console.log(`  ${name.padEnd(40)} ${cells.join('   ')}`);
+  }
+  results.push({gpuText: checks});
+}
+
 await browser.close();
 await server.close();
 writeFileSync(join(reportDir, 'results.json'), JSON.stringify(results, null, 2));
 
 const failures = results.filter((r) => r.case && !r.known && ['webgl2', 'webgpu'].some((l) => r[l] && !r[l].pass));
 console.log(
-  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures, ${textFailures} text overlay failures, ${exportFailures} export failures, ${sharedFailures} shared canvas failures (report: ${reportDir})`,
+  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures, ${textFailures} text overlay failures, ${exportFailures} export failures, ${sharedFailures} shared canvas failures, ${gpuTextFailures} GPU text failures (report: ${reportDir})`,
 );
-process.exitCode = failures.length || pickFailures || textFailures || exportFailures || sharedFailures ? 1 : 0;
+process.exitCode = failures.length || pickFailures || textFailures || exportFailures || sharedFailures || gpuTextFailures ? 1 : 0;

@@ -31,6 +31,11 @@ map.addLayer(layer);
   Extra options: `antialias` (default `false`), `preserveDrawingBuffer`
   (default `true`, needed for map export), `wasmUrl`, `shaderWasmUrl`, and on
   `GpuVectorLayer` `backend` (`'auto'` (default), `'webgpu'` or `'webgl2'`).
+- `text-*` styles are drawn on the GPU from a glyph atlas (`text: 'gpu'`, the
+  default): with the page's web fonts, at the device pixel ratio, in every
+  world copy, hit-detectable, and with `declutter: true` (or a group name)
+  without overlapping. `text: 'canvas'` draws them with ol's text worker
+  instead, exactly as `ol/layer/WebGLVector` does. See [Labels](#labels).
 - Like `WebGLVector`, dispose layers you no longer use.
 
 ## Installation
@@ -72,8 +77,8 @@ to an `assets/` folder next to the app's JavaScript.
   loaded from `assets/` next to the module.
 
 **Content Security Policy.** Compiling WebAssembly needs `'wasm-unsafe-eval'`
-in `script-src`, and labels use ol's text worker, which starts from a
-`blob:` URL (as with ol's own `WebGLVector`):
+in `script-src`. With `text: 'canvas'`, labels use ol's text worker, which
+starts from a `blob:` URL (as with ol's own `WebGLVector`):
 
 ```
 script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:
@@ -134,8 +139,9 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
   symbol radius, stroke width and fill evaluated with ol's CPU expression
   evaluator. Unlike ol's GPU picking it honours `hitTolerance`, respects
   `filter`, and can return all features under the cursor.
-- **Same text as ol.** `text-*` styles are drawn by ol's own text overlay
-  worker (`ol/worker/textOverlay.js`, loaded on demand): it turns the render
+- **Text on the GPU.** See [Labels](#labels). With `text: 'canvas'`,
+  `text-*` styles are drawn by ol's own text overlay worker instead
+  (`ol/worker/textOverlay.js`, loaded on demand): it turns the render
   instructions into Canvas 2D label batches and, after each frame, draws them
   into an image for that frame. The layer composites the image with ol's
   post-process maths (`src/render/textOverlay.ts`), reprojected to the
@@ -145,11 +151,74 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
 - **Shared canvases, like ol.** Consecutive layers of one backend with the
   same `className` draw into one canvas (one WebGL context, or for WebGPU
   one canvas texture and render pass per frame). Layers with an opacity
-  below 1 or with labels are drawn into an offscreen image first and
-  composited with the layer opacity. WebGPU layers record into one command
+  below 1, or with labels from the text worker, are drawn into an offscreen
+  image first and composited with the layer opacity. WebGPU layers record into one command
   encoder that is submitted once per map frame.
 - **Fallbacks.** If WebAssembly cannot load, the worker uses ol's JS buffer
   code; if WebGPU is unavailable, `GpuVectorLayer` uses WebGL2.
+
+## Labels
+
+```js
+new GpuVectorLayer({
+  source,
+  style: {
+    'circle-radius': 4,
+    'circle-fill-color': '#b03a2e',
+    'text-value': ['get', 'name'],
+    'text-font': 'bold 13px "Open Sans", sans-serif', // fonts of the page work
+    'text-fill-color': '#1c2833',
+    'text-stroke-color': '#ffffff',
+    'text-stroke-width': 3,
+    'text-offset-y': -12,
+  },
+  declutter: true, // or a group name shared by several layers
+});
+```
+
+With `text: 'gpu'` (the default) the layer draws its labels itself
+(`src/text`). The approach follows the `webgpu-renderer` branch of
+OpenLayers (font atlas with separate halo and fill coverage, instanced glyph
+quads, greedy decluttering); the code here is written for this package's
+two backends and GPU-evaluated styles.
+
+- **Style.** Only the `text-*` properties (and `filter`, `else`, `z-index`)
+  are evaluated per feature on the CPU, with ol's flat style compiler
+  (`ol/render/canvas/style.js`). Fills, strokes and symbols stay on the GPU.
+- **Atlas.** Each grapheme is drawn once with Canvas 2D on the main thread,
+  so the page's `@font-face` fonts work, at the device pixel ratio, with the
+  halo in one colour channel and the fill in another. One atlas (2048 px
+  wide, growing to 4096 px high) is shared by all layers of the page. Text
+  in scripts that need shaping (Arabic, Hebrew, Indic, combining marks) is
+  drawn as a whole line. When a web font finishes loading, or the atlas is
+  full, it starts over and the labels are laid out again.
+- **Layout.** Positions follow ol's Canvas text renderer: alignment,
+  justification, baseline, offsets, rotation, scale, padding, background,
+  several lines, polygon labels at the interior point (hidden when wider
+  than the polygon unless `text-overflow`), and text along lines
+  (`text-placement: 'line'`, with `text-max-angle`, `text-repeat`,
+  `text-keep-upright`). Only the features in view (plus a margin) are laid
+  out, a slice per frame (10 ms, 4 ms while the view moves); the labels on
+  screen stay until the new ones are ready. A new layout is made when the
+  view leaves that area, and when the resolution (or, for text along lines
+  and with decluttering, the rotation) has changed and the view has settled.
+- **Drawing.** A glyph is an instanced quad, drawn after the layer's
+  geometries in the same pass, in every world copy: first all halos, then
+  all fills, so a halo never covers a neighbouring letter. Upright labels
+  are placed on whole device pixels with glyphs at quarter-pixel positions,
+  like Canvas text.
+- **Decluttering.** `declutter: true` hides labels that would overlap a
+  label with a higher priority: higher `z-index` first, then older features.
+  Layers with the same `declutter` value share the space, higher layers
+  first. `text-declutter-mode` (`'declutter'`, `'obstacle'`, `'none'`) works
+  as in ol. Labels that are shown keep their place while the view moves, and
+  labels fade in and out (150 ms). All labels are measured, but only those
+  that can win a place get glyphs.
+- **Hit detection.** A shown label is hit within its box (with
+  `hitTolerance`), before the geometries below it.
+
+Compared with ol's Canvas vector layer (`ol/layer/Vector`), upright text is
+the same pixel for pixel, also with decluttering; see [Tests](#tests).
 
 ## Development
 
@@ -166,7 +235,7 @@ npm run sync-upstream-tests   # copy ol's WebGLVector rendering cases + data int
 npm run dev                   # examples on http://localhost:5180 (compare.html, bench.html)
 npm test                      # unit tests (vitest): golden buffers, shader translation
 npm run test:rust             # cargo tests of both crates
-npm run test:rendering        # screenshots, hit detection, text, export and shared canvas checks in Chromium
+npm run test:rendering        # screenshots, hit detection, text, labels, export and shared canvas checks in Chromium
 npm run bench                 # benchmark, see bench/run.js for options
 npm run build                 # dist/ (ES module + worker + wasm + .d.ts)
 npm run test:dist             # production app build against dist/, checked in Chromium
@@ -240,7 +309,7 @@ upstream's `expected.png`:
 | webgl-text-style-linestring | 2.10% | 0.00% vs ol | 0.00% vs ol | 0.00% |
 
 All 19 cases pass on both backends, and WebGL2 and WebGPU produce identical
-pixels. The 17 geometry cases deviate from the reference exactly as much as
+pixels. The two text cases run with `text: 'canvas'`, ol's text worker. The 17 geometry cases deviate from the reference exactly as much as
 ol's own layer does on this machine (driver differences against the CI
 machine that made `expected.png`).
 
@@ -251,7 +320,36 @@ the worker, so upstream's `@font-face` "Ubuntu" never reaches it, and the
 glyphs come from the machine's fallback font. That is why ol itself is off by
 1.6–2.1% here.
 
-**Text while panning.** `test/rendering/text.ts` pans by whole pixels and
+**Labels on the GPU.** `test/rendering/gputext.ts` renders nine scenarios
+with ol's Canvas vector layer and with both backends, at pixel ratios 1 and
+2, and compares the screenshots (share of differing pixels, Chromium on
+Windows):
+
+| Scenario | 1x | 2x |
+|---|---|---|
+| several lines, justified, with a halo and a second style | 0.00% | 0.00% |
+| polygon labels, with and without `text-overflow` | 0.01% | 0.00% |
+| 400 labels on a grid, decluttered | 0.00% | 0.00% |
+| labels in several world copies | 0.00% | 0.00% |
+| a web font from the page's `@font-face` | 0.00% | 0.00% |
+| Arabic, Hebrew and Devanagari | 0.00% | 0.00% |
+| text along lines, also reversed and repeated | 1.43% | 0.39% |
+| the same in a rotated view | 1.46% | 0.34% |
+| alignment, rotation, scale and background in a rotated view | 2.1% | 0.76% |
+
+WebGL2 and WebGPU give the same pixels, except 148 pixels in the last
+scenario at 1x. Rotated text is resampled a little differently than Canvas
+does it. In a rotated view Canvas also resamples upright labels, where GPU
+text keeps them on whole pixels; that is most of the last row.
+
+`test/rendering/labels.ts` checks 13 situations on both backends: hit
+detection of labels (also with `hitTolerance`, and not for a label hidden by
+decluttering), a new layout after panning and zooming, style variables, a
+new style, added and removed features, and the layer opacity.
+`test/unit/declutter.test.ts` covers the collision grid and the choice of
+the labels that get glyphs.
+
+**Text while panning.** With `text: 'canvas'`, `test/rendering/text.ts` pans by whole pixels and
 reads the frame in the same task, so it shows the previous text image
 reprojected with the overlay matrix. It must equal the previous frame shifted
 by the same amount. It does, with 0 differing pixels on both backends, with
@@ -334,10 +432,50 @@ What this shows:
   features, Intel Iris Xe, 60 Hz), zooming with the whole map in view ran
   at 16 fps with ol's layers, 18 fps with WebGL2 and 29 fps with WebGPU.
 
+**Labels** (`examples/labels.html`: country names and random place names,
+1100×900 map, decluttered, AMD Radeon R9 200, Chromium). A frame is
+`renderSync()` while panning:
+
+| Places | | ol Canvas layer | GPU text |
+|---|---|---|---|
+| 20 000 (5 900 in view) | frame while panning | 20 | **0.9** |
+| | label layout after a zoom | (in the frame) | 34, over 3 frames |
+| 200 000 (59 000 in view) | frame while panning | 168 | **4.8** |
+| | label layout after a zoom | (in the frame) | 208, over 12 frames |
+| | worst frame while panning | 330 | 121 |
+
+The Canvas layer lays out and declutters all labels in every frame; GPU
+text measures them once per layout, gives glyphs to the 1 700 to 2 300 that
+can win a place, and declutters those per frame (0.4 ms). The worst frame
+is the one that starts a new layout (collecting and sorting the features in
+view), which is not sliced yet.
+
 ## Limitations
 
-- **Text** has ol's own limitations, because it is drawn by ol's text
-  worker:
+- **Labels on the GPU** (`text: 'gpu'`):
+  - Text styles are evaluated on the main thread, per feature in view, at
+    each layout. With very many labels in view this is the cost to watch
+    (about 4 µs to measure a label, 10 µs to lay one out with glyphs).
+    Without `declutter` every label in view gets glyphs.
+  - Labels are laid out for one resolution. While zooming they keep their
+    size and anchor, but text along a line does not follow the line more
+    closely, and labels that would newly fit only appear after the view
+    has settled.
+  - `['zoom']` cannot be used in `text-*` expressions (ol's CPU expression
+    evaluator has no zoom; use `['resolution']`). Gradient and pattern
+    fills for text are not supported.
+  - Labels are drawn after the geometries of their own layer, so a higher
+    layer's geometries cover them (ol's Canvas layers draw decluttered
+    labels above all layers of the canvas). Decluttering is not shared with
+    ol's Canvas layers.
+  - Hit detection uses the label's box, not its glyphs.
+  - When a web font finishes loading or the atlas is full, labels disappear
+    for the frames it takes to lay them out again.
+  - Compared with ol's text worker (`WebGLVector`, `text: 'canvas'`) the
+    pixels differ: translucent halos and backgrounds are blended as Canvas
+    does, where ol's text post-process applies the alpha twice.
+- **Labels from ol's text worker** (`text: 'canvas'`) have ol's own
+  limitations:
   - Only fonts available inside a worker can be used: system fonts, or fonts
     the worker loads itself. Web fonts from the page's `@font-face` are not
     seen (with ol's `WebGLVector` neither).
@@ -345,6 +483,7 @@ What this shows:
     the central world copy only.
   - Labels are not hit-detectable.
   - Labels appear one worker round-trip after the geometries.
+  - `declutter` has no effect.
 - Depends on non-API ol modules (`ol/render/webgl/*`, `ol/expr/*`), so the
   peer dependency is pinned to ol 10.11.x; the golden and rendering tests
   catch breaking changes when upgrading.
@@ -362,9 +501,9 @@ What this shows:
   share one canvas; any other layer in between starts a new one. Give a layer
   its own `className` if it needs its own canvas (e.g. for CSS). Browsers
   keep only about 16 WebGL contexts per page, so a canvas per layer would
-  lose layers on maps with many of them. Layers with an opacity below 1 or
-  with labels are drawn into an offscreen image first and composited with
-  the layer opacity, as ol does.
+  lose layers on maps with many of them. Layers with an opacity below 1, or
+  with labels from the text worker, are drawn into an offscreen image first
+  and composited with the layer opacity, as ol does.
 - WebGPU layers record their frames into one shared command encoder that is
   submitted once per map frame (on the map's `postcompose`), so reading a
   layer canvas in the same task after `renderSync()` works as with WebGL.

@@ -10,6 +10,9 @@ import {create as createTransform} from 'ol/transform.js';
 import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js';
 import {TEXT_OVERLAY_GLSL, type TextImage} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
+import type {GlyphAtlas} from '../text/atlas.js';
+import {INSTANCE_FLOATS} from '../text/layout.js';
+import {LABEL_GLSL, LABEL_UNIFORM_FLOATS, QUAD, writeLabelUniforms} from '../text/shaders.js';
 import type {BufferSet} from '../worker/protocol.js';
 import {surfaceType} from '../render/surface.js';
 import {WebGL2Surface} from '../webgl2/surface.js';
@@ -23,6 +26,41 @@ interface GLBuffers {
   instanceFloats: number;
   /** VAO per program, created lazily. */
   vaos: Map<WebGLProgram, WebGLVertexArrayObject>;
+}
+
+/** Glyph atlas texture, one per context (the atlas is shared by all layers). */
+const atlasTextures = new WeakMap<WebGL2RenderingContext, {texture: WebGLTexture; canvas: HTMLCanvasElement; version: number}>();
+
+function bindAtlas(gl: WebGL2RenderingContext, atlas: GlyphAtlas) {
+  let entry = atlasTextures.get(gl);
+  if (!entry) {
+    entry = {texture: gl.createTexture()!, canvas: atlas.canvas, version: -1};
+    atlasTextures.set(gl, entry);
+  }
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, entry.texture);
+  if (entry.version !== atlas.version || entry.canvas !== atlas.canvas) {
+    entry.version = atlas.version;
+    entry.canvas = atlas.canvas;
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas.canvas);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+}
+
+/** GL resources for the labels of one layer. */
+interface LabelResources {
+  program: WebGLProgram;
+  uniforms: Record<string, WebGLUniformLocation | null>;
+  quad: WebGLBuffer;
+  instances: WebGLBuffer | null;
+  /** Id of the label set in `instances`. */
+  set: number;
+  opacity: Map<number, {buffer: WebGLBuffer; vao: WebGLVertexArrayObject; version: number; set: number}>;
 }
 
 interface UniformInfo {
@@ -41,6 +79,8 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   private gl: WebGL2RenderingContext | null = null;
   private programs: Array<{fill?: Program; stroke?: Program; symbol?: Program}> = [];
   private textures = new Map<string, {texture: WebGLTexture; source: TexImageSource | null}>();
+  private labels: LabelResources | null = null;
+  private readonly labelUniforms = new Float32Array(LABEL_UNIFORM_FLOATS);
   private contextLost = false;
   private readonly transform = createTransform();
   /** Text compositing program and the texture of the current text image. */
@@ -65,6 +105,9 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   /** @internal Called by the shared surface. */
   onContextLost() {
     this.contextLost = true;
+    if (this.gl) {
+      atlasTextures.delete(this.gl); // gone with the context: uploaded again after it is restored
+    }
   }
 
   /** @internal Called by the shared surface. */
@@ -81,6 +124,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     this.programs = [];
     this.textures.clear();
     this.text = null;
+    this.labels = null;
     this.offscreen = null;
   }
 
@@ -95,6 +139,16 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     if (this.text) {
       gl.deleteProgram(this.text.program);
       gl.deleteTexture(this.text.texture);
+    }
+    if (this.labels) {
+      const r = this.labels;
+      gl.deleteProgram(r.program);
+      gl.deleteBuffer(r.quad);
+      gl.deleteBuffer(r.instances);
+      r.opacity.forEach((o) => {
+        gl.deleteBuffer(o.buffer);
+        gl.deleteVertexArray(o.vao);
+      });
     }
     this.deleteOffscreen();
     this.forgetGLResources();
@@ -367,7 +421,8 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     const {width, height} = surface.canvas;
     const b = this.buffers;
     const text = this.textImage(frameState);
-    if (!text && !(b && [b.polygons, b.lines, b.points].some((set) => set && set.gpu.indexCount > 0))) {
+    const labels = this.labelFrame;
+    if (!text && !labels && !(b && [b.polygons, b.lines, b.points].some((set) => set && set.gpu.indexCount > 0))) {
       return gl; // nothing to draw: the surface clears at the end of the frame if needed
     }
 
@@ -401,6 +456,9 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     gl.bindVertexArray(null);
     if (text) {
       this.drawText(text);
+    }
+    if (labels) {
+      this.drawLabels(frameState);
     }
     if (offscreen) {
       if (offscreen.msaa) {
@@ -442,6 +500,93 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     }
     o = this.offscreen = {width, height, texture, framebuffer, msaa};
     return o;
+  }
+
+  /** Draws this frame's labels (see text/GpuText.ts), uploading what changed. */
+  private drawLabels(frameState: FrameState) {
+    const gl = this.gl!;
+    const frame = this.labelFrame!;
+    const {set, worlds} = frame;
+    if (!this.labels) {
+      const program = this.link(LABEL_GLSL.vertex, LABEL_GLSL.fragment);
+      const uniforms: Record<string, WebGLUniformLocation | null> = {};
+      for (const name of ['u_matrix', 'u_translate', 'u_viewport', 'u_atlasSize', 'u_rotation', 'u_opacity', 'u_pixelRatio', 'u_pass', 'u_atlas']) {
+        uniforms[name] = gl.getUniformLocation(program, name);
+      }
+      const quad = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+      gl.bufferData(gl.ARRAY_BUFFER, QUAD, gl.STATIC_DRAW);
+      this.labels = {program, uniforms, quad, instances: null, set: -1, opacity: new Map()};
+    }
+    const r = this.labels;
+    gl.bindVertexArray(null);
+    if (r.set !== set.id || !r.instances) {
+      r.instances ??= gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, r.instances);
+      gl.bufferData(gl.ARRAY_BUFFER, set.instances, gl.STATIC_DRAW);
+      r.set = set.id;
+    }
+    gl.useProgram(r.program);
+    bindAtlas(gl, frame.atlas);
+    gl.uniform1i(r.uniforms.u_atlas, 0);
+    const u = this.labelUniforms;
+    const used = new Set<number>();
+    for (const w of worlds) {
+      used.add(w.world);
+      let o = r.opacity.get(w.world);
+      if (!o) {
+        const buffer = gl.createBuffer()!;
+        const vao = gl.createVertexArray()!;
+        gl.bindVertexArray(vao);
+        const attribute = (location: number, size: number, stride: number, offset: number, divisor: number) => {
+          gl.enableVertexAttribArray(location);
+          gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
+          gl.vertexAttribDivisor(location, divisor);
+        };
+        gl.bindBuffer(gl.ARRAY_BUFFER, r.quad);
+        attribute(0, 2, 8, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, r.instances);
+        let offset = 0;
+        [2, 2, 2, 2, 4, 4, 4, 2].forEach((size, i) => {
+          attribute(i + 1, size, INSTANCE_FLOATS * 4, offset, 1);
+          offset += size * 4;
+        });
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        attribute(9, 1, 4, 0, 1);
+        gl.bindVertexArray(null);
+        o = {buffer, vao, version: -1, set: -1};
+        r.opacity.set(w.world, o);
+      }
+      if (o.version !== w.version || o.set !== set.id) {
+        o.version = w.version;
+        o.set = set.id;
+        gl.bindBuffer(gl.ARRAY_BUFFER, o.buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, w.opacity, gl.DYNAMIC_DRAW);
+      }
+      // the layer opacity is applied when the layer image is composited
+      writeLabelUniforms(u, 0, frameState, set, w.world * frame.worldWidth, frame.atlas.canvas.width, frame.atlas.canvas.height, 1);
+      gl.uniform4f(r.uniforms.u_matrix, u[0], u[1], u[2], u[3]);
+      gl.uniform2f(r.uniforms.u_translate, u[4], u[5]);
+      gl.uniform2f(r.uniforms.u_viewport, u[6], u[7]);
+      gl.uniform2f(r.uniforms.u_atlasSize, u[8], u[9]);
+      gl.uniform1f(r.uniforms.u_rotation, u[10]);
+      gl.uniform1f(r.uniforms.u_opacity, u[11]);
+      gl.uniform1f(r.uniforms.u_pixelRatio, u[12]);
+      gl.bindVertexArray(o.vao);
+      // all halos, then all fills: a halo never covers a neighbouring letter
+      gl.uniform1i(r.uniforms.u_pass, 0);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, set.glyphCount);
+      gl.uniform1i(r.uniforms.u_pass, 1);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, set.glyphCount);
+    }
+    gl.bindVertexArray(null);
+    for (const [world, o] of r.opacity) {
+      if (!used.has(world)) {
+        gl.deleteBuffer(o.buffer);
+        gl.deleteVertexArray(o.vao);
+        r.opacity.delete(world);
+      }
+    }
   }
 
   /** Composites the text image over the layer, like ol's text post-process. */

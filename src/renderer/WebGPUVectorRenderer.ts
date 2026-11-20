@@ -10,6 +10,9 @@ import {create as createTransform} from 'ol/transform.js';
 import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js';
 import {TEXT_OVERLAY_WGSL} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
+import type {GlyphAtlas} from '../text/atlas.js';
+import {INSTANCE_FLOATS} from '../text/layout.js';
+import {LABEL_UNIFORM_FLOATS, LABEL_WGSL, QUAD, writeLabelUniforms} from '../text/shaders.js';
 import {type ShaderTranslator, type WgslProgram, loadShaderTranslator} from '../wasm/shader.js';
 import {flushSubmits, frameEncoder, getDevice, onDeviceLost, preferredFormat} from '../webgpu/device.js';
 import {surfaceType} from '../render/surface.js';
@@ -42,6 +45,56 @@ interface DrawCall {
   pipe: Pipeline;
   set: UploadedSet<GPUBuffers>;
   slot: number;
+}
+
+/** Glyph atlas texture, one per device (the atlas is shared by all layers). */
+interface AtlasTexture {
+  texture: GPUTexture;
+  view: GPUTextureView;
+  canvas: HTMLCanvasElement;
+  version: number;
+}
+const atlasTextures = new WeakMap<GPUDevice, AtlasTexture>();
+
+function atlasTexture(device: GPUDevice, atlas: GlyphAtlas): AtlasTexture {
+  let entry = atlasTextures.get(device);
+  const canvas = atlas.canvas;
+  if (!entry || entry.canvas !== canvas) {
+    if (entry) {
+      flushSubmits();
+      entry.texture.destroy();
+    }
+    const texture = device.createTexture({
+      size: [canvas.width, canvas.height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      label: 'ol-webgpu glyph atlas',
+    });
+    entry = {texture, view: texture.createView(), canvas, version: -1};
+    atlasTextures.set(device, entry);
+  }
+  if (entry.version !== atlas.version) {
+    entry.version = atlas.version;
+    device.queue.copyExternalImageToTexture({source: canvas}, {texture: entry.texture}, [canvas.width, canvas.height]);
+  }
+  return entry;
+}
+
+/** GPU resources for the labels of one layer. */
+interface LabelResources {
+  layout: GPUBindGroupLayout;
+  halo: GPURenderPipeline;
+  fill: GPURenderPipeline;
+  quad: GPUBuffer;
+  uniforms: GPUBuffer | null;
+  uniformData: Float32Array;
+  slotSize: number;
+  instances: GPUBuffer | null;
+  /** Id of the label set in `instances`. */
+  set: number;
+  opacity: Map<number, {buffer: GPUBuffer; version: number; set: number}>;
+  group: GPUBindGroup | null;
+  groupResources: unknown[];
 }
 
 function vertexFormat(size: number): GPUVertexFormat {
@@ -85,6 +138,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     group: GPUBindGroup | null;
     version: number;
   } | null = null;
+  private labels: LabelResources | null = null;
   private uniformBuffer: GPUBuffer | null = null;
   private uniformStaging = new ArrayBuffer(0);
   private uniformView = new DataView(this.uniformStaging);
@@ -121,6 +175,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     this.pipelines = [];
     this.offscreen = null;
     this.text = null;
+    this.labels = null;
     this.uniformBuffer = null;
     this.zeroBuffer = null;
     this.sampler = null;
@@ -387,7 +442,8 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     }
 
     const text = this.prepareText(frameState);
-    if (!calls.length && !text) {
+    const labels = this.prepareLabels(frameState);
+    if (!calls.length && !text && !labels) {
       return context; // nothing to draw: the surface clears at the end of the frame if needed
     }
 
@@ -454,6 +510,21 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       pass.setBindGroup(0, text.group);
       pass.draw(3);
     }
+    if (labels) {
+      const r = this.labels!;
+      const count = this.labelFrame!.set.glyphCount;
+      pass.setVertexBuffer(0, r.quad);
+      pass.setVertexBuffer(1, r.instances!);
+      labels.forEach((opacityBuffer, i) => {
+        pass.setBindGroup(0, r.group!, [i * r.slotSize]);
+        pass.setVertexBuffer(2, opacityBuffer);
+        // all halos, then all fills: a halo never covers a neighbouring letter
+        pass.setPipeline(r.halo);
+        pass.draw(4, count);
+        pass.setPipeline(r.fill);
+        pass.draw(4, count);
+      });
+    }
     pass.end();
     if (offscreen) {
       if (offscreen.opacity !== opacity) {
@@ -501,6 +572,167 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       o = this.offscreen = {texture, view, msaa, uniforms, group, opacity: -1};
     }
     return o;
+  }
+
+  private labelResources(): LabelResources {
+    if (this.labels) {
+      return this.labels;
+    }
+    const device = this.device!;
+    const module = device.createShaderModule({code: LABEL_WGSL, label: 'ol-webgpu labels'});
+    const layout = device.createBindGroupLayout({
+      entries: [
+        {binding: 0, visibility: GPUShaderStage.VERTEX, buffer: {type: 'uniform', hasDynamicOffset: true}},
+        {binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
+        {binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {type: 'filtering'}},
+      ],
+    });
+    const formats: GPUVertexFormat[] = ['float32x2', 'float32x2', 'float32x2', 'float32x2', 'float32x4', 'float32x4', 'float32x4', 'float32x2'];
+    let offset = 0;
+    const attributes: GPUVertexAttribute[] = formats.map((format, i) => {
+      const attribute = {shaderLocation: i + 1, offset, format};
+      offset += format === 'float32x4' ? 16 : 8;
+      return attribute;
+    });
+    const buffers: GPUVertexBufferLayout[] = [
+      {arrayStride: 8, stepMode: 'vertex', attributes: [{shaderLocation: 0, offset: 0, format: 'float32x2'}]},
+      {arrayStride: INSTANCE_FLOATS * 4, stepMode: 'instance', attributes},
+      {arrayStride: 4, stepMode: 'instance', attributes: [{shaderLocation: 9, offset: 0, format: 'float32'}]},
+    ];
+    const pipeline = (entryPoint: string) =>
+      device.createRenderPipeline({
+        label: `ol-webgpu labels ${entryPoint}`,
+        layout: device.createPipelineLayout({bindGroupLayouts: [layout]}),
+        vertex: {module, entryPoint: 'vs', buffers},
+        fragment: {
+          module,
+          entryPoint,
+          targets: [
+            {
+              format: this.format,
+              blend: {
+                color: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
+                alpha: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
+              },
+            },
+          ],
+        },
+        primitive: {topology: 'triangle-strip'},
+        multisample: {count: this.sampleCount},
+      });
+    const quad = device.createBuffer({size: QUAD.byteLength, usage: GPUBufferUsage.VERTEX, mappedAtCreation: true, label: 'ol-webgpu label quad'});
+    new Float32Array(quad.getMappedRange()).set(QUAD);
+    quad.unmap();
+    const align = device.limits.minUniformBufferOffsetAlignment;
+    this.labels = {
+      layout,
+      halo: pipeline('fs_halo'),
+      fill: pipeline('fs_fill'),
+      quad,
+      uniforms: null,
+      uniformData: new Float32Array(0),
+      slotSize: Math.ceil((LABEL_UNIFORM_FLOATS * 4) / align) * align,
+      instances: null,
+      set: -1,
+      opacity: new Map(),
+      group: null,
+      groupResources: [],
+    };
+    return this.labels;
+  }
+
+  /**
+   * Uploads what changed of this frame's labels (see text/GpuText.ts) and
+   * returns the opacity buffer per world copy to draw, or null without labels.
+   */
+  private prepareLabels(frameState: FrameState): GPUBuffer[] | null {
+    const frame = this.labelFrame;
+    if (!frame) {
+      return null;
+    }
+    const device = this.device!;
+    const r = this.labelResources();
+    const {set, worlds} = frame;
+    const atlas = atlasTexture(device, frame.atlas);
+    if (r.set !== set.id || !r.instances) {
+      if (r.instances) {
+        flushSubmits();
+        r.instances.destroy();
+      }
+      r.instances = device.createBuffer({size: set.instances.byteLength, usage: GPUBufferUsage.VERTEX, mappedAtCreation: true, label: 'ol-webgpu glyphs'});
+      new Float32Array(r.instances.getMappedRange()).set(set.instances);
+      r.instances.unmap();
+      r.set = set.id;
+    }
+    const opacityBuffers: GPUBuffer[] = [];
+    const used = new Set<number>();
+    for (const w of worlds) {
+      used.add(w.world);
+      let o = r.opacity.get(w.world);
+      if (!o || o.set !== set.id) {
+        if (o) {
+          flushSubmits();
+          o.buffer.destroy();
+        }
+        o = {
+          buffer: device.createBuffer({size: w.opacity.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: 'ol-webgpu glyph opacity'}),
+          version: -1,
+          set: set.id,
+        };
+        r.opacity.set(w.world, o);
+      }
+      if (o.version !== w.version) {
+        o.version = w.version;
+        device.queue.writeBuffer(o.buffer, 0, w.opacity);
+      }
+      opacityBuffers.push(o.buffer);
+    }
+    for (const [world, o] of r.opacity) {
+      if (!used.has(world)) {
+        flushSubmits();
+        o.buffer.destroy();
+        r.opacity.delete(world);
+      }
+    }
+    const floatsPerSlot = r.slotSize / 4;
+    if (r.uniformData.length < worlds.length * floatsPerSlot) {
+      r.uniformData = new Float32Array(worlds.length * floatsPerSlot);
+    }
+    if (!r.uniforms || r.uniforms.size < worlds.length * r.slotSize) {
+      if (r.uniforms) {
+        flushSubmits();
+        r.uniforms.destroy();
+      }
+      r.uniforms = device.createBuffer({size: Math.max(4, worlds.length) * r.slotSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-webgpu label uniforms'});
+    }
+    worlds.forEach((w, i) => {
+      // the layer opacity is applied when the layer image is composited
+      writeLabelUniforms(r.uniformData, i * floatsPerSlot, frameState, set, w.world * frame.worldWidth, atlas.canvas.width, atlas.canvas.height, 1);
+    });
+    device.queue.writeBuffer(r.uniforms, 0, r.uniformData, 0, worlds.length * floatsPerSlot);
+    if (!r.group || r.groupResources[0] !== r.uniforms || r.groupResources[1] !== atlas.view) {
+      r.group = device.createBindGroup({
+        layout: r.layout,
+        entries: [
+          {binding: 0, resource: {buffer: r.uniforms, offset: 0, size: LABEL_UNIFORM_FLOATS * 4}},
+          {binding: 1, resource: atlas.view},
+          {binding: 2, resource: this.sampler!},
+        ],
+      });
+      r.groupResources = [r.uniforms, atlas.view];
+    }
+    return opacityBuffers;
+  }
+
+  private destroyLabels() {
+    const r = this.labels;
+    if (r) {
+      r.quad.destroy();
+      r.uniforms?.destroy();
+      r.instances?.destroy();
+      r.opacity.forEach((o) => o.buffer.destroy());
+    }
+    this.labels = null;
   }
 
   /**
@@ -601,6 +833,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     this.offscreen?.uniforms.destroy();
     this.text?.texture?.destroy();
     this.text?.uniforms.destroy();
+    this.destroyLabels();
     this.uniformBuffer?.destroy();
     this.zeroBuffer?.destroy();
     this.placeholder?.texture.destroy();

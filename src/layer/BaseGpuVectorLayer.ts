@@ -7,7 +7,7 @@ import {surfaceType} from '../render/surface.js';
 import type BaseGpuVectorRenderer from '../renderer/BaseGpuVectorRenderer.js';
 
 export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> extends Omit<LayerOptions<S>, 'render'> {
-  /** Flat style, same syntax as `ol/layer/WebGLVector`, including `text-*` (drawn by ol's text worker). */
+  /** Flat style, same syntax as `ol/layer/WebGLVector`, including `text-*` (see `text`). */
   style: FlatStyleLike;
   /** Style variables, used with `['var', name]`; update with `updateStyleVariables`. */
   variables?: StyleVariables;
@@ -23,6 +23,19 @@ export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> ex
   preserveDrawingBuffer?: boolean;
   /** Multisample antialiasing (default false = pixel parity with ol's WebGL layers). */
   antialias?: boolean;
+  /**
+   * How `text-*` styles are drawn. 'gpu' (default): glyphs from an atlas
+   * drawn by the layer itself, with the page's fonts, at the device pixel
+   * ratio, in every world copy, and hit-detectable. 'canvas': ol's text
+   * worker, as `ol/layer/WebGLVector` does (pixel for pixel the same).
+   */
+  text?: 'gpu' | 'canvas';
+  /**
+   * Hide labels that would overlap (GPU text only). Layers with the same
+   * value share a declutter group, in which higher layers go first.
+   * Default false.
+   */
+  declutter?: boolean | string | number;
 }
 
 /**
@@ -35,7 +48,7 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
   protected readonly gpuOptions: GpuVectorLayerOptions<S>;
 
   constructor(options: GpuVectorLayerOptions<S>) {
-    const {style, variables, disableHitDetection, wasmUrl, preserveDrawingBuffer, antialias, ...base} = options;
+    const {style, variables, disableHitDetection, wasmUrl, preserveDrawingBuffer, antialias, text, declutter, ...base} = options;
     super(base);
     this.gpuOptions = options;
     this.style = style;
@@ -63,6 +76,8 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
       wasmUrl: this.gpuOptions.wasmUrl,
       preserveDrawingBuffer: this.gpuOptions.preserveDrawingBuffer,
       antialias: this.gpuOptions.antialias,
+      text: this.gpuOptions.text,
+      declutter: this.gpuOptions.declutter,
     };
   }
 

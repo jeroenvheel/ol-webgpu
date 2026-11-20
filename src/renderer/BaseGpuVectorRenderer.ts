@@ -34,6 +34,7 @@ import {toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
 import {create as createMat4} from 'ol/vec/mat4.js';
 import {Picker} from '../render/picking.js';
 import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
+import GpuText, {type LabelFrame, resolveFrameLabels} from '../text/GpuText.js';
 import {type StylePasses, buildStylePasses} from '../render/stylePasses.js';
 import {type Surface, acquireSurface, releaseSurface} from '../render/surface.js';
 import {UniformState, makeProjectionTransform} from '../render/uniforms.js';
@@ -53,6 +54,14 @@ export interface GpuVectorRendererOptions extends WorkerOptions {
    * pixel for pixel.
    */
   antialias?: boolean;
+  /**
+   * How `text-*` styles are drawn. 'gpu' (default): glyphs from an atlas,
+   * drawn by the layer itself. 'canvas': ol's text worker, as
+   * `ol/layer/WebGLVector` does.
+   */
+  text?: 'gpu' | 'canvas';
+  /** Declutter group for GPU text (false: labels may overlap). */
+  declutter?: boolean | string | number;
 }
 
 export interface UploadedSet<B> {
@@ -153,6 +162,14 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private skipNextTextRender = false;
   private layerRevision = -1;
   private readonly textMatrix = createMat4();
+  private readonly textMode: 'gpu' | 'canvas';
+  private readonly declutter: string | null;
+  /** Labels drawn by the layer itself (text mode 'gpu'). */
+  gpuText: GpuText | null = null;
+  /** The labels to draw in the current frame. */
+  protected labelFrame: LabelFrame | null = null;
+  /** Buffers are being built for the current view. */
+  private building = false;
 
   constructor(layer: Layer<VectorSource>, options: GpuVectorRendererOptions) {
     super(layer);
@@ -164,7 +181,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.passes = buildStylePasses(this.style, this.variables);
     this.uniformState = new UniformState(this.passes.uniforms);
     this.worker = WorkerClient.shared(options);
-    this.textOverlay = this.passes.hasText ? new TextOverlay() : null;
+    this.textMode = options.text ?? 'gpu';
+    this.declutter = options.declutter ? String(options.declutter) : null;
+    this.updateTextMode();
     // Ready until the first rebuild starts, like ol's renderers: a layer outside its
     // zoom range never prepares a frame and must not hold back `rendercomplete`.
     liveRenderers.add(this as BaseGpuVectorRenderer<unknown>);
@@ -239,6 +258,34 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     }
   }
 
+  // --- text ------------------------------------------------------------
+
+  /** Creates or drops the text renderer the current style needs. */
+  private updateTextMode() {
+    const canvas = this.passes.hasText && this.textMode === 'canvas';
+    const gpu = this.passes.hasText && this.textMode === 'gpu';
+    if (canvas && !this.textOverlay) {
+      this.textOverlay = new TextOverlay();
+    } else if (!canvas && this.textOverlay) {
+      this.textOverlay.terminate();
+      this.textOverlay = null;
+    }
+    if (gpu && !this.gpuText) {
+      this.gpuText = new GpuText(this.style, this.variables, this.declutter, () => this.getLayer()?.getMapInternal()?.render());
+    } else if (gpu) {
+      this.gpuText!.setStyle(this.style, this.variables);
+    } else if (this.gpuText) {
+      this.gpuText.dispose();
+      this.gpuText = null;
+      this.labelFrame = null;
+    }
+  }
+
+  /** Labels are being laid out or are fading (tests wait for this). */
+  get labelsBusy(): boolean {
+    return !!this.gpuText?.busy;
+  }
+
   // --- style -----------------------------------------------------------
 
   setStyle(style: FlatStyleLike, variables: Record<string, any>) {
@@ -249,12 +296,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.picker?.setStyle(style, variables);
     this.applyPasses();
     this.disposeBuffers();
-    if (this.passes.hasText && !this.textOverlay) {
-      this.textOverlay = new TextOverlay();
-    } else if (!this.passes.hasText && this.textOverlay) {
-      this.textOverlay.terminate();
-      this.textOverlay = null;
-    }
+    this.updateTextMode();
     this.previousExtent = createEmpty(); // force a rebuild: the attribute layout changed
   }
 
@@ -319,11 +361,17 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       this.rebuild(frameState);
       this.previousExtent = frameExtent.slice();
     }
+    if (this.gpuText) {
+      this.gpuText.prepare(frameState, source);
+      // rendercomplete waits for the first labels, as it does for the buffers
+      this.ready = !this.building && !this.gpuText.pending;
+    }
     return true;
   }
 
   private rebuild(frameState: FrameState) {
     const generation = ++this.generation;
+    this.building = true;
     this.ready = false;
     this.framesSinceReady = 0;
     const t0 = performance.now();
@@ -387,11 +435,13 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         this.stats = {engine: response.engine, instructions: instructionsTime, worker: response.timings, total: performance.now() - t0};
         // with labels, stay not-ready (no rendercomplete) until the first
         // text image for these instructions has arrived (see requestText)
-        this.ready = !key;
+        this.building = false;
+        this.ready = !key && !this.gpuText?.pending;
         this.getLayer()?.changed();
       })
       .catch((e) => {
         console.error('ol-webgpu: buffer generation failed', e);
+        this.building = false;
         this.ready = true;
       });
   }
@@ -457,6 +507,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     } while (++world < endWorld);
     this.lastWorlds = worlds.map((w) => w * worldWidth);
 
+    resolveFrameLabels(frameState);
+    this.labelFrame = this.gpuText?.frame(frameState) ?? null;
+
     this.dispatch('prerender', frameState, null);
     // the layer opacity is applied when drawing, as the canvas may be shared
     const context = this.draw(frameState, worlds, worldWidth, layerState.opacity);
@@ -507,9 +560,6 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     if (!this.hitDetection) {
       throw new Error('`forEachFeatureAtCoordinate` cannot be used on an ol-webgpu layer with `disableHitDetection: true`.');
     }
-    if (!this.picker) {
-      return [];
-    }
     return [...this.iteratePicks(coordinate, frameState, hitTolerance)];
   }
 
@@ -517,8 +567,15 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     if (!this.hitDetection) {
       throw new Error('`forEachFeatureAtCoordinate` cannot be used on an ol-webgpu layer with `disableHitDetection: true`.');
     }
+    // labels are drawn over the geometries
+    const labelled = this.gpuText?.pick(applyTransform(frameState.coordinateToPixelTransform, coordinate.slice()), frameState, hitTolerance) ?? [];
+    yield* labelled;
     if (this.picker) {
-      yield* this.picker.pick(coordinate, frameState, hitTolerance, (ref) => this.batch.getFeatureFromRef(ref), this.lastWorlds);
+      for (const feature of this.picker.pick(coordinate, frameState, hitTolerance, (ref) => this.batch.getFeatureFromRef(ref), this.lastWorlds)) {
+        if (!labelled.includes(feature)) {
+          yield feature;
+        }
+      }
     }
   }
 
@@ -583,6 +640,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.disposeBuffers();
     this.textOverlay?.terminate();
     this.textOverlay = null;
+    this.gpuText?.dispose();
+    this.gpuText = null;
+    this.labelFrame = null;
     this.sourceKeys?.forEach(unlistenByKey);
     this.sourceKeys = null;
     if (this.surface) {
