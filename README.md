@@ -1,6 +1,7 @@
 # ol-webgpu
 
 [![CI](https://github.com/jeroenvheel/ol-webgpu/actions/workflows/ci.yml/badge.svg)](https://github.com/jeroenvheel/ol-webgpu/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/ol-webgpu/next?label=npm)](https://www.npmjs.com/package/ol-webgpu)
 
 WebGL2 and WebGPU vector layers for [OpenLayers](https://openlayers.org), with
 a Rust/WebAssembly geometry core.
@@ -39,6 +40,8 @@ map.addLayer(layer);
 - Like `WebGLVector`, dispose layers you no longer use.
 
 ## Installation
+
+The package is on npm as [ol-webgpu](https://www.npmjs.com/package/ol-webgpu).
 
 ```sh
 npm install ol-webgpu@next ol@10.11
