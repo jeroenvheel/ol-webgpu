@@ -28,7 +28,9 @@ map.addLayer(layer);
 - Options and methods mirror `ol/layer/WebGLVector`: `style` (flat style,
   rules with `filter`/`else`, expressions), `variables`,
   `updateStyleVariables()`, `setStyle()`, `disableHitDetection`.
-  Extra options: `antialias` (default `false`), `wasmUrl`, `shaderWasmUrl`.
+  Extra options: `antialias` (default `false`), `preserveDrawingBuffer`
+  (default `true`, needed for map export), `wasmUrl`, `shaderWasmUrl`, and on
+  `GpuVectorLayer` `backend` (`'auto'` (default), `'webgpu'` or `'webgl2'`).
 - Like `WebGLVector`, dispose layers you no longer use.
 
 ## How it works
@@ -72,6 +74,12 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
   current view until the next image arrives, so labels follow the map while
   panning. Unlike ol's layer, `rendercomplete` waits for the labels, so map
   export includes them.
+- **Shared canvases, like ol.** Consecutive layers of one backend with the
+  same `className` draw into one canvas (one WebGL context, or for WebGPU
+  one canvas texture and render pass per frame). Layers with an opacity
+  below 1 or with labels are drawn into an offscreen image first and
+  composited with the layer opacity. WebGPU layers record into one command
+  encoder that is submitted once per map frame.
 - **Fallbacks.** If WebAssembly cannot load, the worker uses ol's JS buffer
   code; if WebGPU is unavailable, `GpuVectorLayer` uses WebGL2.
 
@@ -90,7 +98,7 @@ npm run sync-upstream-tests   # copy ol's WebGLVector rendering cases + data int
 npm run dev                   # examples on http://localhost:5180 (compare.html, bench.html)
 npm test                      # unit tests (vitest): golden buffers, shader translation
 npm run test:rust             # cargo tests of both crates
-npm run test:rendering        # screenshots, hit detection and text checks in Chromium
+npm run test:rendering        # screenshots, hit detection, text, export and shared canvas checks in Chromium
 npm run bench                 # benchmark, see bench/run.js for options
 npm run build                 # dist/ (ES module + worker + wasm + .d.ts)
 npm run test:dist             # production app build against dist/, checked in Chromium
@@ -110,7 +118,8 @@ warning; `--require-webgpu` makes that an error.
 **CI.** GitHub Actions (`.github/workflows/ci.yml`) runs on every push to
 `main` and on pull requests (Ubuntu, SwiftShader): wasm build, typecheck,
 unit and Rust tests, a check that the synced upstream cases are current, all
-rendering, hit detection and text tests with WebGPU required, the package
+rendering, hit detection, text, export and shared canvas tests with WebGPU
+required, the package
 build and the dist smoke test. On failure, the screenshots and diffs are
 uploaded as the `rendering-report` artifact.
 
@@ -164,6 +173,18 @@ reprojected with the overlay matrix. It must equal the previous frame shifted
 by the same amount. It does, with 0 differing pixels on both backends, with
 and without view rotation.
 
+**Map export.** `test/rendering/export.ts` reads the layer canvases with
+`drawImage` in a `rendercomplete` listener: the drawn layer must read back
+complete (14 400 px), an empty layer must read back empty, and after its
+features are removed the layer must disappear from the screen. Both backends
+pass.
+
+**Shared canvases.** `test/rendering/shared.ts` renders two layers, an ol
+canvas layer and a third layer, one of them with opacity 0.5 and overlapping
+features. It checks that the first two share a canvas (3 canvases in map
+order) and compares the screenshot with ol's `WebGLVector` layers: 0.00%
+differing pixels on both backends, with and without `antialias`.
+
 **Hit detection.** `test/rendering/picking.ts` checks 14 situations (symbol
 radius, stroke width, polygon fill and holes, `hitTolerance`, filtered-out
 features, rotation, panning). WebGL2 and WebGPU pass all 14. ol's
@@ -178,49 +199,56 @@ pick, and can be exported with `drawImage` in a `rendercomplete` listener.
 
 ## Benchmark
 
-`npm run bench` (examples/bench.html in Playwright Chromium, Intel Iris Xe
-laptop GPU, D3D11, 1100×900 map, all features in view). Milliseconds, lower
-is better.
+`npm run bench -- --layers=ol,webgl2,webgpu` (examples/bench.html in
+Playwright Chromium, Intel Iris Xe laptop GPU, D3D11, 1100×900 map, all
+features in view, one layer). Milliseconds, lower is better. A frame is
+`renderSync()` plus a 1-pixel readback of the canvas, so it includes the
+GPU work. Runs on a laptop vary by 10–30%; compare columns of one run.
 
 **End to end per layer**
 
 | Data set | | ol WebGLVector | WebGL2 | WebGPU |
 |---|---|---|---|---|
-| 1M points | ready (add layer → rendercomplete) | 982 | 1132 | 1029 |
-| | frame (pan, no rebuild) | 137 | 89 | **25** |
-| | pick (`forEachFeatureAtPixel`) | 0.00 | 0.09 | 0.06 |
-| 200k lines | ready | 1922 | **793** | 862 |
-| | frame | 424 | 46 | **37** |
-| | pick | 0.00 | 0.03 | 0.04 |
-| 100k polygons | ready | 1588 | 738 | **625** |
-| | frame | 290 | 36 | **22** |
-| | pick | 0.00 | 0.02 | 0.02 |
+| 1M points | ready (add layer → rendercomplete) | **920** | 1045 | 1015 |
+| | frame (pan, no rebuild) | 139 | 85 | **24** |
+| | pick (`forEachFeatureAtPixel`) | 0.01 | 0.09 | 0.11 |
+| 200k lines | ready | 2256 | 868 | **850** |
+| | frame | 389 | **32** | 37 |
+| | pick | 0.52 | 0.05 | 0.04 |
+| 100k polygons | ready | 1799 | 797 | **702** |
+| | frame | 307 | 39 | **21** |
+| | pick | 0.00 | 0.03 | 0.02 |
 
 **Buffer generation (worker), ol's JS vs Rust/WASM**
 
 | | ol JS | Rust/WASM |
 |---|---|---|
-| 1M points | 7 | 11 |
-| 200k lines | 860 | **246** (3.5×) |
-| 100k polygons (earcut) | 385 | **42** (9×) |
-| hit index build, 1M points / 200k lines / 100k polygons | – | 167 / 52 / 26 |
+| 1M points | 5 | 9 |
+| 200k lines | 1385 | **243** (5.7×) |
+| 100k polygons (earcut) | 372 | **40** (9×) |
+| hit index build, 1M points / 200k lines / 100k polygons | – | 150 / 95 / 26 |
 
 What this shows:
 
-- **Frames** are 4–13× faster than ol's layer for lines and polygons and
-  5× faster for points on WebGPU, with the same shaders and buffers. The
-  gap is in how frames are drawn (ol renders into an offscreen framebuffer
-  and copies it, among other things); it has not been profiled further.
-- **Time to first render** halves for lines and polygons, where the
-  tessellation is Rust's. For points it is on par: there the time goes into
-  ol's main-thread steps (`MixedGeometryBatch` ≈ 0.4 s and render
+- **Frames** are 8–15× faster than ol's layer for lines and polygons, and
+  about 6× faster for points on WebGPU (1.6× on WebGL2), with the same
+  shaders and buffers. The gap is in how frames are drawn (ol renders into
+  an offscreen framebuffer and copies it, among other things); it has not
+  been profiled further.
+- **Time to first render** is about 2.5× shorter for lines and polygons,
+  where the tessellation is Rust's. For points it is on par: there the time
+  goes into ol's main-thread steps (`MixedGeometryBatch` ≈ 0.4 s and render
   instructions ≈ 0.12 s for 1M points), which this package reuses and which
   cannot move to WASM while the input is `ol/Feature` objects.
-- **Picking** costs well under 0.1 ms, like ol's GPU readback, but works on
-  WebGPU and is correct in the two cases where ol's is not. The first pick
-  after a rebuild can take 1–3 ms while feature-dependent sizes are still
-  being measured.
+- **Picking** costs about 0.1 ms or less, like ol's GPU readback, but works
+  on WebGPU and is correct in the two cases where ol's is not. The first
+  pick after a rebuild is slower (a few ms, up to about 50 ms for 1M
+  points) while feature-dependent sizes are still being measured.
 - Point buffers are a plain copy, so WASM gains nothing there.
+- This benchmark has one layer. On maps with many layers, the shared
+  canvases matter more: on a real map with 24 vector layers (660k
+  features, Intel Iris Xe, 60 Hz), zooming with the whole map in view ran
+  at 16 fps with ol's layers, 18 fps with WebGL2 and 29 fps with WebGPU.
 
 ## Limitations
 
@@ -241,7 +269,10 @@ What this shows:
 - Map export (`drawImage` of the layer canvas in `rendercomplete`, as in
   ol's export examples) needs `preserveDrawingBuffer` (default `true`). On
   WebGPU this draws the last frame once more on `rendercomplete`; set it to
-  `false` to skip that if you never export.
+  `false` to skip that if you never export. Not while the view is being
+  dragged or animated (ol fires `rendercomplete` after each such frame), so
+  WebGPU layers read back empty in a `rendercomplete` listener during an
+  interaction; the frame after it ends is readable again.
 - Like ol's WebGL layers, consecutive layers of the same backend with the
   same `className` (and the same `antialias` and `preserveDrawingBuffer`)
   share one canvas; any other layer in between starts a new one. Give a layer
