@@ -11,7 +11,9 @@ import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js
 import {TEXT_OVERLAY_WGSL} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
 import {type ShaderTranslator, type WgslProgram, loadShaderTranslator} from '../wasm/shader.js';
-import {getDevice, onDeviceLost, preferredFormat} from '../webgpu/device.js';
+import {flushSubmits, frameEncoder, getDevice, onDeviceLost, preferredFormat} from '../webgpu/device.js';
+import {surfaceType} from '../render/surface.js';
+import {WebGPUSurface, compositePipeline} from '../webgpu/surface.js';
 import type {BufferSet} from '../worker/protocol.js';
 import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
 
@@ -31,6 +33,9 @@ interface Pipeline {
   layout: GPUBindGroupLayout;
   /** Number of zero-filled attribute slots in vertex buffer 2. */
   zeroSlots: number;
+  /** Bind group of the last frame and the resources it was made from. */
+  group: GPUBindGroup | null;
+  groupResources: unknown[];
 }
 
 interface DrawCall {
@@ -50,18 +55,27 @@ export interface WebGPURendererOptions extends GpuVectorRendererOptions {
   shaderWasmUrl?: string | URL;
 }
 
-export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffers> {
+export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffers, WebGPUSurface> {
   private device: GPUDevice | null = null;
-  private context: GPUCanvasContext | null = null;
   private format: GPUTextureFormat = 'bgra8unorm';
   private translator: ShaderTranslator | null = null;
   private initializing: Promise<void> | null = null;
   private initError: unknown = null;
   private pipelines: Array<{fill?: Pipeline; stroke?: Pipeline; symbol?: Pipeline}> = [];
-  private msaa: GPUTexture | null = null;
-  /** Copy of the last frame (preserveDrawingBuffer), re-presented on rendercomplete. */
-  private kept: GPUTexture | null = null;
-  private keptFrameIndex = -1;
+  /** Largest uniform block of the current pipelines. */
+  private blockSize = 16;
+  /**
+   * Offscreen image of the layer, for layers composited onto the shared
+   * canvas with an opacity below 1 or with labels (as ol does for every layer).
+   */
+  private offscreen: {
+    texture: GPUTexture;
+    view: GPUTextureView;
+    msaa: {texture: GPUTexture; view: GPUTextureView} | null;
+    uniforms: GPUBuffer;
+    group: GPUBindGroup;
+    opacity: number;
+  } | null = null;
   /** Text compositing pipeline and the texture of the current text image. */
   private text: {
     layout: GPUBindGroupLayout;
@@ -73,10 +87,11 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   } | null = null;
   private uniformBuffer: GPUBuffer | null = null;
   private uniformStaging = new ArrayBuffer(0);
+  private uniformView = new DataView(this.uniformStaging);
   private zeroBuffer: GPUBuffer | null = null;
   private sampler: GPUSampler | null = null;
-  private textures = new Map<string, {texture: GPUTexture; source: TexImageSource | null}>();
-  private placeholder: GPUTexture | null = null;
+  private textures = new Map<string, {texture: GPUTexture; view: GPUTextureView; source: TexImageSource | null}>();
+  private placeholder: {texture: GPUTexture; view: GPUTextureView} | null = null;
   private readonly transform = createTransform();
   private readonly unlistenLost: () => void;
   private readonly shaderWasmUrl?: string | URL;
@@ -104,9 +119,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
 
   private resetGpuState() {
     this.pipelines = [];
-    this.msaa = null;
-    this.kept = null;
-    this.keptFrameIndex = -1;
+    this.offscreen = null;
     this.text = null;
     this.uniformBuffer = null;
     this.zeroBuffer = null;
@@ -115,8 +128,21 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     this.placeholder = null;
   }
 
+  protected surfaceType(): string {
+    return surfaceType('webgpu', this.antialias, this.preserveDrawingBuffer);
+  }
+
+  protected createSurface(key: string, className: string): WebGPUSurface {
+    return new WebGPUSurface(key, className, this.sampleCount, this.preserveDrawingBuffer);
+  }
+
+  protected surfaceChanged() {
+    // GPU resources belong to the device, not the canvas: nothing to move
+  }
+
   protected prepareBackend(): boolean {
-    if (this.device && this.translator && this.context) {
+    if (this.device && this.translator) {
+      this.surface!.configure(this.device, this.format);
       return true;
     }
     if (this.initError) {
@@ -133,16 +159,6 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         this.device = device;
         this.translator = translator;
         this.format = preferredFormat();
-        this.context = this.canvas.getContext('webgpu');
-        if (!this.context) {
-          throw new Error('ol-webgpu: could not create a WebGPU canvas context');
-        }
-        this.context.configure({
-          device,
-          format: this.format,
-          alphaMode: 'premultiplied',
-          usage: GPUTextureUsage.RENDER_ATTACHMENT | (this.preserveDrawingBuffer ? GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST : 0),
-        });
         this.sampler = device.createSampler({minFilter: 'linear', magFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge'});
         this.zeroBuffer = device.createBuffer({size: 256, usage: GPUBufferUsage.VERTEX, label: 'ol-webgpu zeros'});
         this.applyPasses();
@@ -171,6 +187,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       stroke: pass.stroke && this.createPipeline(pass.stroke),
       symbol: pass.symbol && this.createPipeline(pass.symbol),
     }));
+    this.blockSize = Math.max(16, ...this.pipelines.flatMap((p) => [p.fill, p.stroke, p.symbol]).map((x) => x?.program.uniformBlockSize ?? 0));
   }
 
   private createPipeline(pass: SubPass): Pipeline {
@@ -228,7 +245,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       primitive: {topology: 'triangle-list', cullMode: 'none'},
       multisample: {count: this.sampleCount},
     });
-    return {pass, program, pipeline, layout, zeroSlots: zeros.length};
+    return {pass, program, pipeline, layout, zeroSlots: zeros.length, group: null, groupResources: []};
   }
 
   protected upload(set: BufferSet): GPUBuffers {
@@ -257,26 +274,33 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   }
 
   protected release(b: GPUBuffers) {
+    flushSubmits(); // the recorded frame may still use these buffers
     b.index?.destroy();
     b.vertex?.destroy();
     b.instance?.destroy();
   }
 
-  private textureFor(name: string, source: unknown): GPUTexture {
+  private textureFor(name: string, source: unknown): GPUTextureView {
     const device = this.device!;
-    this.placeholder ??= device.createTexture({size: [1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST});
+    if (!this.placeholder) {
+      const texture = device.createTexture({size: [1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST});
+      this.placeholder = {texture, view: texture.createView()};
+    }
     if (!isTextureSource(source)) {
-      return this.placeholder;
+      return this.placeholder.view;
     }
     const ready = !(source instanceof HTMLImageElement) || (source.complete && source.naturalWidth > 0);
     if (!ready) {
-      return this.placeholder;
+      return this.placeholder.view;
     }
     let entry = this.textures.get(name);
     if (entry && entry.source === source) {
-      return entry.texture;
+      return entry.view;
     }
-    entry?.texture.destroy();
+    if (entry) {
+      flushSubmits();
+      entry.texture.destroy();
+    }
     const width = (source as any).naturalWidth || (source as any).width;
     const height = (source as any).naturalHeight || (source as any).height;
     const texture = device.createTexture({
@@ -286,9 +310,9 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     });
     // like gl.texImage2D without UNPACK_PREMULTIPLY_ALPHA: straight alpha, no flip
     device.queue.copyExternalImageToTexture({source: source as GPUImageCopyExternalImageSource}, {texture, premultipliedAlpha: false}, [width, height]);
-    entry = {texture, source};
+    entry = {texture, view: texture.createView(), source};
     this.textures.set(name, entry);
-    return texture;
+    return entry.view;
   }
 
   /** Writes uniform values into `view` at `base` following the program's std140 layout. */
@@ -314,20 +338,30 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     }
   }
 
-  private ensureMsaa(width: number, height: number) {
-    if (!this.msaa || this.msaa.width !== width || this.msaa.height !== height) {
-      this.msaa?.destroy();
-      this.msaa = this.device!.createTexture({size: [width, height], sampleCount: this.sampleCount, format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT});
+  /** The pipeline's bind group, made again only when its uniform buffer or textures change. */
+  private bindGroup(pipe: Pipeline, values: Map<string, ResolvedUniform>): GPUBindGroup {
+    const resources: unknown[] = [this.uniformBuffer];
+    pipe.program.samplers.forEach((name) => resources.push(this.textureFor(name, values.get(name))));
+    if (pipe.group && resources.length === pipe.groupResources.length && resources.every((r, i) => r === pipe.groupResources[i])) {
+      return pipe.group;
     }
-    return this.msaa;
+    const entries: GPUBindGroupEntry[] = [{binding: 0, resource: {buffer: this.uniformBuffer!, offset: 0, size: this.blockSize}}];
+    pipe.program.samplers.forEach((_name, k) => {
+      entries.push({binding: 1 + 2 * k, resource: resources[1 + k] as GPUTextureView});
+      entries.push({binding: 2 + 2 * k, resource: this.sampler!});
+    });
+    pipe.group = this.device!.createBindGroup({layout: pipe.layout, entries});
+    pipe.groupResources = resources;
+    return pipe.group;
   }
 
-  protected draw(frameState: FrameState, worlds: number[], worldWidth: number): GPUCanvasContext {
+  protected draw(frameState: FrameState, worlds: number[], worldWidth: number, opacity: number): GPUCanvasContext {
     const device = this.device!;
-    const context = this.context!;
-    const width = this.canvas.width;
-    const height = this.canvas.height;
-    const msaa = this.sampleCount > 1 ? this.ensureMsaa(width, height) : null;
+    const surface = this.surface!;
+    const context = surface.getContext()!;
+    const width = surface.canvas.width;
+    const height = surface.canvas.height;
+    surface.record({redraw: () => this.draw(frameState, worlds, worldWidth, opacity)});
 
     // collect draw calls; one uniform slot per (world, program)
     const calls: DrawCall[] = [];
@@ -352,47 +386,52 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       }
     }
 
+    const text = this.prepareText(frameState);
+    if (!calls.length && !text) {
+      return context; // nothing to draw: the surface clears at the end of the frame if needed
+    }
+
     // uniform buffer: aligned slots, written once per frame
     const align = device.limits.minUniformBufferOffsetAlignment;
-    const blockSize = Math.max(16, ...this.pipelines.flatMap((p) => [p.fill, p.stroke, p.symbol]).map((x) => x?.program.uniformBlockSize ?? 0));
-    const slotSize = Math.ceil(blockSize / align) * align;
+    const slotSize = Math.ceil(this.blockSize / align) * align;
     const needed = Math.max(1, slotValues.length) * slotSize;
     if (!this.uniformBuffer || this.uniformBuffer.size < needed) {
-      this.uniformBuffer?.destroy();
+      if (this.uniformBuffer) {
+        flushSubmits();
+        this.uniformBuffer.destroy();
+      }
       this.uniformBuffer = device.createBuffer({size: Math.max(needed, 4 * slotSize), usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-webgpu uniforms'});
       this.uniformStaging = new ArrayBuffer(this.uniformBuffer.size);
+      this.uniformView = new DataView(this.uniformStaging);
     }
-    const view = new DataView(this.uniformStaging);
-    slotValues.forEach((s, i) => this.pack(s.pipe.program, s.values, view, i * slotSize));
+    slotValues.forEach((s, i) => this.pack(s.pipe.program, s.values, this.uniformView, i * slotSize));
     if (slotValues.length) {
       device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformStaging, 0, slotValues.length * slotSize);
     }
 
-    // one bind group per pipeline (textures resolved from the first slot's values)
+    // one bind group per pipeline (textures resolved from the first slot's values), kept across frames
     const groups = new Map<Pipeline, GPUBindGroup>();
     for (const s of slotValues) {
-      if (groups.has(s.pipe)) {
-        continue;
+      if (!groups.has(s.pipe)) {
+        groups.set(s.pipe, this.bindGroup(s.pipe, s.values));
       }
-      const entries: GPUBindGroupEntry[] = [{binding: 0, resource: {buffer: this.uniformBuffer, offset: 0, size: blockSize}}];
-      s.pipe.program.samplers.forEach((name, k) => {
-        entries.push({binding: 1 + 2 * k, resource: this.textureFor(name, s.values.get(name)).createView()});
-        entries.push({binding: 2 + 2 * k, resource: this.sampler!});
-      });
-      groups.set(s.pipe, device.createBindGroup({layout: s.pipe.layout, entries}));
     }
 
-    const encoder = device.createCommandEncoder({label: 'ol-webgpu frame'});
-    const current = context.getCurrentTexture();
-    const target = current.createView();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        msaa
-          ? {view: msaa.createView(), resolveTarget: target, clearValue: [0, 0, 0, 0], loadOp: 'clear', storeOp: 'discard'}
-          : {view: target, clearValue: [0, 0, 0, 0], loadOp: 'clear', storeOp: 'store'},
-      ],
-    });
-    const text = this.prepareText(frameState);
+    // Render passes go into the frame's shared encoder (see device.ts). With
+    // full opacity and no labels the layer draws straight onto the shared
+    // canvas (blending each feature over the canvas gives the same result as
+    // compositing the layer image); otherwise into its own image first.
+    const encoder = frameEncoder(device);
+    const offscreen = opacity < 1 || text !== null ? this.offscreenTarget(width, height) : null;
+    const pass = offscreen
+      ? encoder.beginRenderPass({
+          colorAttachments: [
+            offscreen.msaa
+              ? {view: offscreen.msaa.view, resolveTarget: offscreen.view, clearValue: [0, 0, 0, 0], loadOp: 'clear', storeOp: 'discard'}
+              : {view: offscreen.view, clearValue: [0, 0, 0, 0], loadOp: 'clear', storeOp: 'store'},
+          ],
+        })
+      : surface.beginPass(encoder);
     for (const call of calls) {
       const g = call.set.gpu;
       pass.setPipeline(call.pipe.pipeline);
@@ -416,23 +455,52 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       pass.draw(3);
     }
     pass.end();
-    if (this.preserveDrawingBuffer) {
-      // A presented WebGPU canvas reads back empty from a later task, so
-      // keep a copy to re-present when the app may export (rendercomplete).
-      if (!this.kept || this.kept.width !== width || this.kept.height !== height) {
-        this.kept?.destroy();
-        this.kept = device.createTexture({
-          size: [width, height],
-          format: this.format,
-          usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-          label: 'ol-webgpu kept frame',
-        });
+    if (offscreen) {
+      if (offscreen.opacity !== opacity) {
+        offscreen.opacity = opacity;
+        device.queue.writeBuffer(offscreen.uniforms, 0, new Float32Array([opacity, 0, 0, 0]));
       }
-      encoder.copyTextureToTexture({texture: current}, {texture: this.kept}, [width, height]);
-      this.keptFrameIndex = frameState.index;
+      const composite = surface.beginPass(encoder);
+      composite.setPipeline(compositePipeline(device, this.format, this.sampleCount).pipeline);
+      composite.setBindGroup(0, offscreen.group);
+      composite.draw(3);
+      composite.end();
     }
-    device.queue.submit([encoder.finish()]);
     return context;
+  }
+
+  private offscreenTarget(width: number, height: number) {
+    let o = this.offscreen;
+    if (!o || o.texture.width !== width || o.texture.height !== height) {
+      const device = this.device!;
+      if (o) {
+        flushSubmits();
+        o.texture.destroy();
+        o.msaa?.texture.destroy();
+      }
+      const texture = device.createTexture({
+        size: [width, height],
+        format: this.format,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        label: 'ol-webgpu layer image',
+      });
+      const view = texture.createView();
+      let msaa = null;
+      if (this.sampleCount > 1) {
+        const t = device.createTexture({size: [width, height], sampleCount: this.sampleCount, format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT});
+        msaa = {texture: t, view: t.createView()};
+      }
+      const uniforms = o?.uniforms ?? device.createBuffer({size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-webgpu layer opacity'});
+      const group = device.createBindGroup({
+        layout: compositePipeline(device, this.format, this.sampleCount).layout,
+        entries: [
+          {binding: 0, resource: {buffer: uniforms}},
+          {binding: 1, resource: view},
+        ],
+      });
+      o = this.offscreen = {texture, view, msaa, uniforms, group, opacity: -1};
+    }
+    return o;
   }
 
   /**
@@ -488,7 +556,10 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     if (t.version !== text.image.version || !t.texture || !t.group) {
       t.version = text.image.version;
       if (!t.texture || t.texture.width !== canvas.width || t.texture.height !== canvas.height) {
-        t.texture?.destroy();
+        if (t.texture) {
+          flushSubmits();
+          t.texture.destroy();
+        }
         t.texture = device.createTexture({
           size: [canvas.width, canvas.height],
           format: 'rgba8unorm',
@@ -511,34 +582,29 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     return {pipeline: t.pipeline, group: t.group!};
   }
 
+  override onPostCompose(frameState: FrameState | null | undefined) {
+    super.onPostCompose(frameState);
+    flushSubmits();
+  }
+
+  /** Export support: the shared canvas draws its last frame once more (see WebGPUSurface.redraw). */
   override onRenderComplete(frameState: FrameState | null | undefined) {
-    const kept = this.kept;
-    const device = this.device;
-    const context = this.context;
-    if (!kept || !device || !context || !frameState || frameState.index !== this.keptFrameIndex) {
-      return; // this layer was not drawn in that frame
-    }
-    const current = context.getCurrentTexture();
-    if (current.width !== kept.width || current.height !== kept.height) {
-      return;
-    }
-    const encoder = device.createCommandEncoder({label: 'ol-webgpu re-present'});
-    encoder.copyTextureToTexture({texture: kept}, {texture: current}, [kept.width, kept.height]);
-    device.queue.submit([encoder.finish()]);
+    this.surface?.redraw(frameState);
   }
 
   override disposeInternal() {
+    flushSubmits();
     super.disposeInternal();
     this.unlistenLost();
-    this.msaa?.destroy();
-    this.kept?.destroy();
+    this.offscreen?.texture.destroy();
+    this.offscreen?.msaa?.texture.destroy();
+    this.offscreen?.uniforms.destroy();
     this.text?.texture?.destroy();
     this.text?.uniforms.destroy();
     this.uniformBuffer?.destroy();
     this.zeroBuffer?.destroy();
-    this.placeholder?.destroy();
+    this.placeholder?.texture.destroy();
     this.textures.forEach((t) => t.texture.destroy());
-    this.context?.unconfigure();
     this.resetGpuState();
   }
 }

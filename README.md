@@ -240,8 +240,19 @@ What this shows:
   non-multisampled framebuffer); the default `false` matches ol exactly.
 - Map export (`drawImage` of the layer canvas in `rendercomplete`, as in
   ol's export examples) needs `preserveDrawingBuffer` (default `true`). On
-  WebGPU this keeps a GPU copy of each frame and re-presents it on
-  `rendercomplete`; set it to `false` to save that copy if you never export.
+  WebGPU this draws the last frame once more on `rendercomplete`; set it to
+  `false` to skip that if you never export.
+- Like ol's WebGL layers, consecutive layers of the same backend with the
+  same `className` (and the same `antialias` and `preserveDrawingBuffer`)
+  share one canvas; any other layer in between starts a new one. Give a layer
+  its own `className` if it needs its own canvas (e.g. for CSS). Browsers
+  keep only about 16 WebGL contexts per page, so a canvas per layer would
+  lose layers on maps with many of them. Layers with an opacity below 1 or
+  with labels are drawn into an offscreen image first and composited with
+  the layer opacity, as ol does.
+- WebGPU layers record their frames into one shared command encoder that is
+  submitted once per map frame (on the map's `postcompose`), so reading a
+  layer canvas in the same task after `renderSync()` works as with WebGL.
 - Hit detection is geometric: dash gaps and transparent icon pixels still
   count as hits. When symbol or stroke sizes depend on feature properties,
   the largest size is measured in idle time after each rebuild; until then

@@ -34,6 +34,7 @@ import {create as createMat4} from 'ol/vec/mat4.js';
 import {Picker} from '../render/picking.js';
 import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
 import {type StylePasses, buildStylePasses} from '../render/stylePasses.js';
+import {type Surface, acquireSurface, releaseSurface} from '../render/surface.js';
 import {UniformState, makeProjectionTransform} from '../render/uniforms.js';
 import {type Core, loadCore} from '../wasm/core.js';
 import {WorkerClient, type WorkerOptions} from '../worker/client.js';
@@ -80,13 +81,14 @@ let mainThreadCore: Promise<Core> | null = null;
 /** Renderers currently alive (used by tests to wait until everything is drawn). */
 export const liveRenderers = new Set<BaseGpuVectorRenderer<unknown>>();
 
-export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Layer<VectorSource>> {
+export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surface> extends LayerRenderer<Layer<VectorSource>> {
   protected style: FlatStyleLike;
   protected variables: Record<string, any>;
   protected passes: StylePasses;
   protected readonly uniformState: UniformState;
   protected buffers: Uploaded<B> | null = null;
-  protected readonly canvas: HTMLCanvasElement;
+  /** Canvas shared with neighbouring layers of the same backend (set in prepareFrame). */
+  protected surface: S | null = null;
   protected readonly preserveDrawingBuffer: boolean;
   protected readonly antialias: boolean;
   /** Last rebuild statistics. */
@@ -128,11 +130,6 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
     // zoom range never prepares a frame and must not hold back `rendercomplete`.
     liveRenderers.add(this as BaseGpuVectorRenderer<unknown>);
 
-    this.canvas = document.createElement('canvas');
-    this.canvas.style.position = 'absolute';
-    this.canvas.style.left = '0'; // like ol's WebGL canvas: no explicit top
-    this.canvas.className = layer.getClassName();
-
     if (this.hitDetection) {
       mainThreadCore ??= loadCore(options.wasmUrl ?? undefined);
       mainThreadCore.then(
@@ -156,8 +153,73 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
   protected abstract applyPasses(): void;
   protected abstract upload(set: BufferSet): B;
   protected abstract release(gpu: B): void;
-  /** Draw all worlds; returns the rendering context for render events. */
-  protected abstract draw(frameState: FrameState, worlds: number[], worldWidth: number): unknown;
+  /**
+   * Draw all worlds over what earlier layers drew on the shared canvas, with
+   * the layer opacity; returns the rendering context for render events.
+   */
+  protected abstract draw(frameState: FrameState, worlds: number[], worldWidth: number, opacity: number): unknown;
+  /**
+   * Layers share a canvas only when this matches: the backend plus every
+   * option that is fixed per canvas (context attributes, sample count).
+   */
+  protected abstract surfaceType(): string;
+  protected abstract createSurface(key: string, className: string): S;
+  /** The renderer moved to another canvas (`previous` is still alive until this returns). */
+  protected abstract surfaceChanged(previous: S | null): void;
+
+  /** The canvas this layer draws into (shared with neighbouring layers). */
+  get canvas(): HTMLCanvasElement {
+    if (!this.surface) {
+      throw new Error('ol-webgpu: the layer has not been prepared for a frame yet');
+    }
+    return this.surface.canvas;
+  }
+
+  // --- shared canvas ---------------------------------------------------
+
+  /**
+   * Same grouping as ol's WebGL layers (renderer/webgl/Layer.js): consecutive
+   * layers of this backend with the same class name share a canvas; any other
+   * layer in between starts a new group. Read from the layers
+   * (`getSurfaceType`), so no renderers are created for hidden layers.
+   */
+  private surfaceKey(frameState: FrameState): string {
+    const type = this.surfaceType();
+    const own = this.getLayer();
+    let group = -1;
+    let newGroup = true;
+    let className: string | undefined;
+    for (const state of frameState.layerStatesArray) {
+      const layer = state.layer as Layer & {getSurfaceType?: () => string};
+      if ((layer === own ? type : layer.getSurfaceType?.()) !== type) {
+        newGroup = true;
+        continue;
+      }
+      const layerClassName = layer.getClassName();
+      if (newGroup || layerClassName !== className) {
+        group++;
+        newGroup = false;
+      }
+      className = layerClassName;
+      if (layer === own) {
+        break;
+      }
+    }
+    return `${frameState.mapId}/${type}/${group}`;
+  }
+
+  private updateSurface(frameState: FrameState) {
+    const key = this.surfaceKey(frameState);
+    if (this.surface?.key === key) {
+      return;
+    }
+    const previous = this.surface;
+    this.surface = acquireSurface(key, () => this.createSurface(key, this.getLayer().getClassName()));
+    this.surfaceChanged(previous);
+    if (previous) {
+      releaseSurface(previous);
+    }
+  }
 
   // --- style -----------------------------------------------------------
 
@@ -201,6 +263,7 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
   // --- frame -----------------------------------------------------------
 
   override prepareFrame(frameState: FrameState): boolean {
+    this.updateSurface(frameState);
     if (!this.prepareBackend(frameState)) {
       return false;
     }
@@ -358,17 +421,15 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
   override renderFrame(frameState: FrameState, _target: HTMLElement | null): HTMLElement {
     const layer = this.getLayer();
     const layerState = frameState.layerStatesArray[frameState.layerIndex];
-    const canvas = this.canvas;
+    const surface = this.surface!;
     const pixelRatio = frameState.pixelRatio;
-    const width = Math.round(frameState.size[0] * pixelRatio);
-    const height = Math.round(frameState.size[1] * pixelRatio);
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-      canvas.style.width = frameState.size[0] + 'px';
-      canvas.style.height = frameState.size[1] + 'px';
-    }
-    canvas.style.opacity = String(layerState.opacity);
+    surface.resize(
+      Math.round(frameState.size[0] * pixelRatio),
+      Math.round(frameState.size[1] * pixelRatio),
+      frameState.size[0],
+      frameState.size[1],
+    );
+    surface.beginFrame(frameState);
 
     const [startWorld, endWorld, worldWidth] = getWorldParameters(frameState, layer);
     const worlds: number[] = [];
@@ -379,13 +440,14 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
     this.lastWorlds = worlds.map((w) => w * worldWidth);
 
     this.dispatch('prerender', frameState, null);
-    const context = this.draw(frameState, worlds, worldWidth);
+    // the layer opacity is applied when drawing, as the canvas may be shared
+    const context = this.draw(frameState, worlds, worldWidth, layerState.opacity);
     this.requestText(frameState);
     this.dispatch('postrender', frameState, context);
     if (this.ready) {
       this.framesSinceReady++;
     }
-    return canvas;
+    return surface.canvas;
   }
 
   /**
@@ -394,6 +456,11 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
    * WebGPU backend make its last frame readable for map export.
    */
   onRenderComplete(_frameState: FrameState | null | undefined) {}
+
+  /** Called on the map's `postcompose`, after every layer of the frame has rendered. */
+  onPostCompose(frameState: FrameState | null | undefined) {
+    this.surface?.endFrame(frameState);
+  }
 
   private dispatch(type: 'prerender' | 'postrender', frameState: FrameState, context: unknown) {
     const layer = this.getLayer();
@@ -500,6 +567,10 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
     this.textOverlay = null;
     this.sourceKeys?.forEach(unlistenByKey);
     this.sourceKeys = null;
+    if (this.surface) {
+      releaseSurface(this.surface);
+      this.surface = null;
+    }
     super.disposeInternal();
   }
 }

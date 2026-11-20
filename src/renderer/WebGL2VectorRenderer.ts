@@ -8,9 +8,11 @@ import type Layer from 'ol/layer/Layer.js';
 import type VectorSource from 'ol/source/Vector.js';
 import {create as createTransform} from 'ol/transform.js';
 import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js';
-import {TEXT_OVERLAY_GLSL} from '../render/textOverlay.js';
+import {TEXT_OVERLAY_GLSL, type TextImage} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
 import type {BufferSet} from '../worker/protocol.js';
+import {surfaceType} from '../render/surface.js';
+import {WebGL2Surface} from '../webgl2/surface.js';
 import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
 
 interface GLBuffers {
@@ -35,7 +37,7 @@ interface Program {
   uniforms: Map<string, UniformInfo>;
 }
 
-export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffers> {
+export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffers, WebGL2Surface> {
   private gl: WebGL2RenderingContext | null = null;
   private programs: Array<{fill?: Program; stroke?: Program; symbol?: Program}> = [];
   private textures = new Map<string, {texture: WebGLTexture; source: TexImageSource | null}>();
@@ -43,27 +45,109 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   private readonly transform = createTransform();
   /** Text compositing program and the texture of the current text image. */
   private text: {program: WebGLProgram; texture: WebGLTexture; version: number; sampler: WebGLUniformLocation; matrix: WebGLUniformLocation} | null = null;
+  /**
+   * Offscreen image of the layer, for layers composited onto the shared
+   * canvas with an opacity below 1 or with labels (as ol does for every
+   * layer); multisampled into a renderbuffer first when antialiasing.
+   */
+  private offscreen: {
+    width: number;
+    height: number;
+    texture: WebGLTexture;
+    framebuffer: WebGLFramebuffer;
+    msaa: {renderbuffer: WebGLRenderbuffer; framebuffer: WebGLFramebuffer} | null;
+  } | null = null;
 
   constructor(layer: Layer<VectorSource>, options: GpuVectorRendererOptions) {
     super(layer, options);
-    this.canvas.addEventListener('webglcontextlost', this.onContextLost);
-    this.canvas.addEventListener('webglcontextrestored', this.onContextRestored);
   }
 
-  private onContextLost = (e: Event) => {
-    e.preventDefault();
+  /** @internal Called by the shared surface. */
+  onContextLost() {
     this.contextLost = true;
-  };
+  }
 
-  private onContextRestored = () => {
+  /** @internal Called by the shared surface. */
+  onContextRestored() {
     this.contextLost = false;
-    this.programs = [];
-    this.textures.clear();
-    this.text = null;
+    this.forgetGLResources();
     this.applyPasses();
     this.reuploadBuffers();
     this.getLayer()?.changed();
-  };
+  }
+
+  /** Drops references to resources of a lost or replaced context. */
+  private forgetGLResources() {
+    this.programs = [];
+    this.textures.clear();
+    this.text = null;
+    this.offscreen = null;
+  }
+
+  /** Deletes this layer's resources from its context (other layers keep using the context). */
+  private deleteGLResources() {
+    const gl = this.gl;
+    if (!gl) {
+      return;
+    }
+    this.programs.forEach((p) => [p.fill, p.stroke, p.symbol].forEach((x) => x && gl.deleteProgram(x.program)));
+    this.textures.forEach((t) => gl.deleteTexture(t.texture));
+    if (this.text) {
+      gl.deleteProgram(this.text.program);
+      gl.deleteTexture(this.text.texture);
+    }
+    this.deleteOffscreen();
+    this.forgetGLResources();
+  }
+
+  private deleteOffscreen() {
+    const gl = this.gl;
+    const o = this.offscreen;
+    if (gl && o) {
+      gl.deleteTexture(o.texture);
+      gl.deleteFramebuffer(o.framebuffer);
+      if (o.msaa) {
+        gl.deleteRenderbuffer(o.msaa.renderbuffer);
+        gl.deleteFramebuffer(o.msaa.framebuffer);
+      }
+    }
+    this.offscreen = null;
+  }
+
+  protected surfaceType(): string {
+    return surfaceType('webgl2', this.antialias, this.preserveDrawingBuffer);
+  }
+
+  protected createSurface(key: string, className: string): WebGL2Surface {
+    return new WebGL2Surface(key, className, {
+      alpha: true,
+      premultipliedAlpha: true,
+      antialias: this.antialias,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: this.preserveDrawingBuffer,
+    });
+  }
+
+  protected surfaceChanged(previous: WebGL2Surface | null) {
+    if (previous) {
+      // move to the new context: free everything in the old one, upload again below
+      const b = this.buffers;
+      for (const set of b ? [b.polygons, b.lines, b.points] : []) {
+        if (set) {
+          this.release(set.gpu);
+        }
+      }
+      this.deleteGLResources();
+      previous.members.delete(this);
+    }
+    const surface = this.surface!;
+    surface.members.add(this);
+    this.gl = surface.gl;
+    this.contextLost = surface.gl.isContextLost();
+    this.applyPasses();
+    this.reuploadBuffers();
+  }
 
   /** The WebGL2 context (null before the first frame). */
   getGL(): WebGL2RenderingContext | null {
@@ -71,25 +155,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   }
 
   protected prepareBackend(): boolean {
-    if (this.contextLost) {
-      return false;
-    }
-    if (!this.gl) {
-      const gl = this.canvas.getContext('webgl2', {
-        alpha: true,
-        premultipliedAlpha: true,
-        antialias: this.antialias,
-        depth: false,
-        stencil: false,
-        preserveDrawingBuffer: this.preserveDrawingBuffer,
-      });
-      if (!gl) {
-        throw new Error('ol-webgpu: WebGL2 is not supported in this browser');
-      }
-      this.gl = gl;
-      this.applyPasses();
-    }
-    return true;
+    return !!this.gl && !this.contextLost;
   }
 
   protected applyPasses() {
@@ -295,21 +361,36 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     }
   }
 
-  protected draw(frameState: FrameState, worlds: number[], worldWidth: number): WebGL2RenderingContext {
+  protected draw(frameState: FrameState, worlds: number[], worldWidth: number, opacity: number): WebGL2RenderingContext {
     const gl = this.gl!;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    const surface = this.surface!;
+    const {width, height} = surface.canvas;
+    const b = this.buffers;
+    const text = this.textImage(frameState);
+    if (!text && !(b && [b.polygons, b.lines, b.points].some((set) => set && set.gpu.indexCount > 0))) {
+      return gl; // nothing to draw: the surface clears at the end of the frame if needed
+    }
+
+    // With full opacity and no labels the layer draws straight onto the
+    // shared canvas (blending each feature over the canvas gives the same
+    // result as compositing the layer image); otherwise into its own image.
+    const offscreen = opacity < 1 || text ? this.offscreenTarget(width, height) : null;
+    if (offscreen) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, offscreen.msaa?.framebuffer ?? offscreen.framebuffer);
+      gl.viewport(0, 0, width, height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    } else {
+      surface.bind();
+    }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
 
-    const b = this.buffers;
     if (b) {
       for (const world of worlds) {
         this.worldTransform(frameState, world, worldWidth, this.transform);
-        const values = this.uniformState.compute(frameState, this.transform, b.invertVerticesTransform, this.canvas.height);
+        const values = this.uniformState.compute(frameState, this.transform, b.invertVerticesTransform, height);
         for (const p of this.programs) {
           this.drawSet(p.fill, b.polygons, values);
           this.drawSet(p.stroke, b.lines, values);
@@ -318,16 +399,53 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       }
     }
     gl.bindVertexArray(null);
-    this.drawText(frameState);
+    if (text) {
+      this.drawText(text);
+    }
+    if (offscreen) {
+      if (offscreen.msaa) {
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, offscreen.msaa.framebuffer);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, offscreen.framebuffer);
+        gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      }
+      surface.compositeImage(offscreen.texture, opacity);
+    }
     return gl;
   }
 
-  /** Composites the text image over the layer, like ol's text post-process. */
-  private drawText(frameState: FrameState) {
-    const text = this.textImage(frameState);
-    if (!text) {
-      return;
+  private offscreenTarget(width: number, height: number) {
+    let o = this.offscreen;
+    if (o && o.width === width && o.height === height) {
+      return o;
     }
+    this.deleteOffscreen();
+    const gl = this.gl!;
+    const texture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const framebuffer = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    let msaa = null;
+    if (this.antialias) {
+      const renderbuffer = gl.createRenderbuffer()!;
+      gl.bindRenderbuffer(gl.RENDERBUFFER, renderbuffer);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, Math.min(4, gl.getParameter(gl.MAX_SAMPLES)), gl.RGBA8, width, height);
+      const msaaFramebuffer = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, msaaFramebuffer);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, renderbuffer);
+      msaa = {renderbuffer, framebuffer: msaaFramebuffer};
+    }
+    o = this.offscreen = {width, height, texture, framebuffer, msaa};
+    return o;
+  }
+
+  /** Composites the text image over the layer, like ol's text post-process. */
+  private drawText(text: {image: TextImage; matrix: Float32Array | number[]}) {
     const gl = this.gl!;
     if (!this.text) {
       const program = this.link(TEXT_OVERLAY_GLSL.vertex, TEXT_OVERLAY_GLSL.fragment);
@@ -362,19 +480,10 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   }
 
   override disposeInternal() {
-    super.disposeInternal();
-    const gl = this.gl;
-    if (gl) {
-      this.programs.forEach((p) => [p.fill, p.stroke, p.symbol].forEach((x) => x && gl.deleteProgram(x.program)));
-      this.textures.forEach((t) => gl.deleteTexture(t.texture));
-      if (this.text) {
-        gl.deleteProgram(this.text.program);
-        gl.deleteTexture(this.text.texture);
-      }
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
-    }
+    this.deleteGLResources();
+    this.surface?.members.delete(this);
+    super.disposeInternal(); // releases the buffers, then the shared surface
     this.gl = null;
-    this.canvas.removeEventListener('webglcontextlost', this.onContextLost);
-    this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored);
   }
+
 }

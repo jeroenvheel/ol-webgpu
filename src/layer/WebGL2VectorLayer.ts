@@ -8,6 +8,10 @@ import BaseGpuVectorLayer from './BaseGpuVectorLayer.js';
  * the Rust/WebAssembly core in a worker.
  */
 export default class WebGL2VectorLayer<S extends VectorSource = VectorSource> extends BaseGpuVectorLayer<S> {
+  getBackend(): 'webgl2' {
+    return 'webgl2';
+  }
+
   override createRenderer() {
     return new WebGL2VectorRenderer(this as any, this.rendererOptions());
   }

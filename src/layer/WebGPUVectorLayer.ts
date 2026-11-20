@@ -18,6 +18,10 @@ export default class WebGPUVectorLayer<S extends VectorSource = VectorSource> ex
     super(options);
   }
 
+  getBackend(): 'webgpu' {
+    return 'webgpu';
+  }
+
   override createRenderer() {
     return new WebGPUVectorRenderer(this as any, {
       ...this.rendererOptions(),

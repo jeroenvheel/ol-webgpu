@@ -36,6 +36,50 @@ export function getDevice(): Promise<GPUDevice> {
   return device;
 }
 
+/**
+ * Command encoder shared by all layers for the current map frame. Each layer
+ * records a render pass for its own canvas into it, and the frame is
+ * submitted once. An encoder and a submit per layer per frame create many
+ * short-lived GPU objects, and with a large JS heap the garbage collection
+ * they cause costs more than the drawing.
+ */
+let frame: {device: GPUDevice; encoder: GPUCommandEncoder} | null = null;
+let epoch = 0;
+
+/**
+ * Increases with every submit. A canvas texture from `getCurrentTexture`
+ * is reused by the layers of a frame until then.
+ */
+export function submitEpoch(): number {
+  return epoch;
+}
+
+/** The current frame's encoder; recorded work is submitted by `flushSubmits`, at the latest in a microtask. */
+export function frameEncoder(d: GPUDevice): GPUCommandEncoder {
+  if (frame && frame.device !== d) {
+    flushSubmits();
+  }
+  if (!frame) {
+    frame = {device: d, encoder: d.createCommandEncoder({label: 'ol-webgpu frame'})};
+    queueMicrotask(flushSubmits);
+  }
+  return frame.encoder;
+}
+
+/**
+ * Submits the recorded frame. Called when the map has composed a frame (so a
+ * canvas read in the same task sees it), before destroying resources the
+ * frame may use, and from a microtask as a fallback.
+ */
+export function flushSubmits() {
+  const f = frame;
+  frame = null;
+  epoch++;
+  if (f) {
+    f.device.queue.submit([f.encoder.finish()]);
+  }
+}
+
 /** Registers a callback for device loss; returns an unregister function. */
 export function onDeviceLost(listener: () => void): () => void {
   lostListeners.add(listener);

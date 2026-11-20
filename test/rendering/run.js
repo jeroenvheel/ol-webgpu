@@ -243,12 +243,82 @@ if (args.text !== 'false' && (!args.match || 'text'.includes(args.match) || args
   }
 }
 
+// --- map export on rendercomplete, and clearing an emptied layer -------------
+let exportFailures = 0;
+if (args.export !== 'false' && (!args.match || 'export'.includes(args.match) || args.match.includes('export'))) {
+  console.log('\nmap export on rendercomplete (export.ts):');
+  // pixels of the screenshot that are not the white map background
+  const coloured = (png) => {
+    let n = 0;
+    for (let i = 0; i < png.data.length; i += 4) {
+      n += png.data[i] < 250 || png.data[i + 1] < 250 || png.data[i + 2] < 250 ? 1 : 0;
+    }
+    return n;
+  };
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    errors.length = 0;
+    await page.goto(`${base}export.html?layer=${layer}`);
+    let r = null;
+    let shown = -1;
+    let cleared = -1;
+    try {
+      await page.waitForFunction(() => window.__export, null, {timeout: 30_000, polling: 50});
+      r = await page.evaluate(() => window.__export);
+      shown = coloured(PNG.sync.read(await page.screenshot()));
+      await page.evaluate(() => window.__clearExport());
+      cleared = coloured(PNG.sync.read(await page.screenshot()));
+    } catch {
+      // reported below
+    }
+    // a 120 x 120 px square
+    const ok = r && r.drawn > 14_000 && r.empty === 0 && shown > 14_000 && cleared === 0;
+    exportFailures += ok ? 0 : 1;
+    console.log(
+      `  ${layer.padEnd(24)} ${ok ? 'ok  ' : 'FAIL'} ${r ? `exported ${r.drawn} px (empty layer ${r.empty}), shown ${shown} px, ${cleared} px after clearing` : `timed out ${errors.join(' | ').slice(0, 200)}`}`,
+    );
+  }
+}
+
+// --- shared canvases: grouping, order and layer opacity ----------------------
+let sharedFailures = 0;
+if (args.shared !== 'false' && (!args.match || 'shared'.includes(args.match) || args.match.includes('shared'))) {
+  console.log('\nshared canvases (shared.ts), compared with ol:');
+  const shots = {};
+  const runs = ['ol', ...layers.filter((l) => l !== 'ol').flatMap((l) => [l, `${l}&antialias=1`])];
+  for (const run of runs) {
+    errors.length = 0;
+    await page.goto(`${base}shared.html?layer=${run}`);
+    const name = run.replace('&antialias=1', ', antialias');
+    let r = null;
+    try {
+      await page.waitForFunction(() => window.__shared, null, {timeout: 30_000, polling: 50});
+      r = await page.evaluate(() => window.__shared);
+      shots[run] = PNG.sync.read(await page.screenshot({path: join(reportDir, `shared-${name.replace(', ', '-')}.png`)}));
+    } catch {
+      // reported below
+    }
+    const problems = errors.filter((e) => !e.includes('powerPreference')).join(' | ').slice(0, 300);
+    if (run === 'ol') {
+      console.log(`  ${'ol'.padEnd(24)} reference, ${r ? `${r.canvases} canvases (${r.elements.join(', ')})` : 'timed out'} ${problems}`);
+      continue;
+    }
+    const mismatch = shots.ol && shots[run] ? compare(shots[run], shots.ol, join(reportDir, `shared-${name.replace(', ', '-')}-diff.png`)) : 1;
+    // layers 1+2 share a canvas, ol's canvas layer, then layer 4; multisampled edges differ from ol a little
+    const tolerance = run.includes('antialias') ? 0.02 : 0.001;
+    const ok = r && r.canvases === 3 && r.elements.join() === 'canvas,div,canvas' && mismatch <= tolerance && !problems;
+    sharedFailures += ok ? 0 : 1;
+    console.log(
+      `  ${name.padEnd(24)} ${ok ? 'ok  ' : 'FAIL'} ${r ? `${r.canvases} canvases (${r.elements.join(', ')}), ${(mismatch * 100).toFixed(2)}% differ from ol` : 'timed out'} ${problems}`,
+    );
+  }
+}
+
 await browser.close();
 await server.close();
 writeFileSync(join(reportDir, 'results.json'), JSON.stringify(results, null, 2));
 
 const failures = results.filter((r) => r.case && !r.known && ['webgl2', 'webgpu'].some((l) => r[l] && !r[l].pass));
 console.log(
-  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures, ${textFailures} text overlay failures (report: ${reportDir})`,
+  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures, ${textFailures} text overlay failures, ${exportFailures} export failures, ${sharedFailures} shared canvas failures (report: ${reportDir})`,
 );
-process.exitCode = failures.length || pickFailures || textFailures ? 1 : 0;
+process.exitCode = failures.length || pickFailures || textFailures || exportFailures || sharedFailures ? 1 : 0;
