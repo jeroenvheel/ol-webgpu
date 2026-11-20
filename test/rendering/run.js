@@ -115,7 +115,8 @@ const results = [];
 for (const name of cases) {
   const expected = readPng(join(casesDir, name, 'expected.png'));
   const row = {case: name, known: KNOWN[name]};
-  for (const layer of layers) {
+  // renders the case with a layer and judges the image
+  const capture = async (layer) => {
     errors.length = 0;
     const rendered = new Promise((resolve) => (onRender = resolve));
     await page.goto(`${base}index.html?case=${name}&layer=${layer}${name in COMPARE_WITH_OL ? '&text=canvas' : ''}`, {waitUntil: 'networkidle'});
@@ -152,20 +153,33 @@ for (const name of cases) {
     await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
     const file = join(casesDir, name, `actual-${layer}.png`);
     await page.screenshot({path: file});
-    const tolerance = config.tolerance ?? 0.005;
+    row[layer] = {tolerance: config.tolerance ?? 0.005, errors: [...new Set(errors)].slice(0, 5)};
+    judge(layer);
+  };
+  // compares the image of a layer with its reference: expected.png, or ol's image
+  const judge = (layer) => {
+    const r = row[layer];
     const reference = name in COMPARE_WITH_OL && layer !== 'ol' && row.ol ? readPng(join(casesDir, name, 'actual-ol.png')) : expected;
-    const mismatch = compare(readPng(file), reference, join(reportDir, `${name}-${layer}-diff.png`));
-    row[layer] = {
-      mismatch,
-      tolerance,
-      pass: mismatch <= tolerance,
-      reference: reference === expected ? 'expected' : 'ol',
-      errors: [...new Set(errors)].slice(0, 5),
-    };
+    r.mismatch = compare(readPng(join(casesDir, name, `actual-${layer}.png`)), reference, join(reportDir, `${name}-${layer}-diff.png`));
+    r.pass = r.mismatch <= r.tolerance;
+    r.reference = reference === expected ? 'expected' : 'ol';
+  };
+  for (const layer of layers) {
+    await capture(layer);
+  }
+  // ol's layer sometimes never shows its text on the CI runner (its image is
+  // then the same textless one every time). The ol-webgpu layers fail
+  // against that through no fault of theirs: take ol's image again, and
+  // judge the images they already made against it.
+  const others = layers.filter((l) => l !== 'ol');
+  for (let retry = 0; retry < 2 && name in COMPARE_WITH_OL && row.ol && others.some((l) => !row[l].pass); retry++) {
+    await capture('ol');
+    others.forEach(judge);
+    row.retriedOl = retry + 1;
   }
   if (name in COMPARE_WITH_OL) {
     if (row.ol) {
-      row.note = `${COMPARE_WITH_OL[name]}: ol vs expected.png is informative, webgl2/webgpu are checked against ol`;
+      row.note = `${COMPARE_WITH_OL[name]}: ol vs expected.png is informative, webgl2/webgpu are checked against ol${row.retriedOl ? `; ol's image was taken ${row.retriedOl + 1} times` : ''}`;
     } else {
       row.known = `${COMPARE_WITH_OL[name]}; include --layers=ol to check against ol`;
     }
