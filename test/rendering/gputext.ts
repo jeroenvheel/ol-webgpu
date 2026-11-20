@@ -179,6 +179,29 @@ const scenarios: Record<string, () => Scenario> = {
       },
     };
   },
+  // labels that overlap: a later label, or one with a higher z-index, covers the text below it
+  overlap: () => ({
+    features: [
+      point(-40, 60, {name: 'First label', box: true}),
+      point(-10, 68, {name: 'Second label', box: true}),
+      point(20, 76, {name: 'Third label', box: true}),
+      point(-40, 0, {name: 'Halo below'}),
+      point(-20, 6, {name: 'Halo on top'}),
+      point(-30, -60, {name: 'Raised', box: true, z: 2}),
+      point(-10, -52, {name: 'Lower, added later', box: true, z: 1}),
+    ],
+    style: {
+      'text-value': ['get', 'name'],
+      'text-font': 'bold 16px sans-serif',
+      'text-fill-color': '#1c2833',
+      'text-stroke-color': '#ffffff',
+      'text-stroke-width': 4,
+      'text-padding': [3, 5, 3, 5],
+      'text-background-fill-color': ['case', ['coalesce', ['get', 'box'], false], '#ffffff', 'rgba(0,0,0,0)'],
+      'text-background-stroke-color': ['case', ['coalesce', ['get', 'box'], false], '#333333', 'rgba(0,0,0,0)'],
+      'z-index': ['coalesce', ['get', 'z'], 0],
+    },
+  }),
   // a grid of labels too dense to show all
   declutter: () => {
     const features: Feature[] = [];

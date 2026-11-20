@@ -206,8 +206,11 @@ two backends and GPU-evaluated styles.
   view leaves that area, and when the resolution (or, for text along lines
   and with decluttering, the rotation) has changed and the view has settled.
 - **Drawing.** A glyph is an instanced quad, drawn after the layer's
-  geometries in the same pass, in every world copy: first all halos, then
-  all fills, so a halo never covers a neighbouring letter. Upright labels
+  geometries in the same pass, in every world copy. Labels are drawn one
+  after the other, by `z-index` and then feature age, each as its
+  background, the halos of all its glyphs and then their fills. So a halo
+  never covers a letter of its own label, and a label that overlaps another
+  covers it, background and halo included, as on a Canvas. Upright labels
   are placed on whole device pixels with glyphs at quarter-pixel positions,
   like Canvas text.
 - **Decluttering.** `declutter: true` hides labels that would overlap a
@@ -325,7 +328,7 @@ the worker, so upstream's `@font-face` "Ubuntu" never reaches it, and the
 glyphs come from the machine's fallback font. That is why ol itself is off by
 1.6–2.1% here.
 
-**Labels on the GPU.** `test/rendering/gputext.ts` renders nine scenarios
+**Labels on the GPU.** `test/rendering/gputext.ts` renders ten scenarios
 with ol's Canvas vector layer and with both backends, at pixel ratios 1 and
 2, and compares the screenshots (share of differing pixels, Chromium on
 Windows):
@@ -333,6 +336,7 @@ Windows):
 | Scenario | 1x | 2x |
 |---|---|---|
 | several lines, justified, with a halo and a second style | 0.00% | 0.00% |
+| overlapping labels with backgrounds, halos and `z-index` | 0.00% | 0.00% |
 | polygon labels, with and without `text-overflow` | 0.01% | 0.00% |
 | 400 labels on a grid, decluttered | 0.00% | 0.00% |
 | labels in several world copies | 0.00% | 0.00% |
@@ -340,10 +344,9 @@ Windows):
 | Arabic, Hebrew and Devanagari | 0.00% | 0.00% |
 | text along lines, also reversed and repeated | 1.43% | 0.39% |
 | the same in a rotated view | 1.46% | 0.34% |
-| alignment, rotation, scale and background in a rotated view | 2.1% | 0.76% |
+| alignment, rotation, scale and background in a rotated view | 2.0% | 0.76% |
 
-WebGL2 and WebGPU give the same pixels, except 148 pixels in the last
-scenario at 1x. Rotated text is resampled a little differently than Canvas
+WebGL2 and WebGPU give the same pixels. Rotated text is resampled a little differently than Canvas
 does it. In a rotated view Canvas also resamples upright labels, where GPU
 text keeps them on whole pixels; that is most of the last row.
 

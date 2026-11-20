@@ -5,8 +5,8 @@
  *
  * Each cell holds two coverage masks, as in the OpenLayers `webgpu-renderer`
  * branch (ol/webgpu/FontAtlas.js): the halo (stroke) in the red channel and
- * the fill in the green channel. Text is drawn in two passes, all halos and
- * then all fills, so a halo never covers a neighbouring letter.
+ * the fill in the green channel. A label draws the halos of all its glyphs
+ * and then their fills, so a halo never covers a neighbouring letter.
  *
  * Browsers anti-alias light text heavier than dark text, so a mask is drawn
  * the way its colour would be: black on white for a dark colour, white on
@@ -159,8 +159,6 @@ export class GlyphAtlas {
   private readonly faces = new Map<string, Face>();
   private readonly fonts = new Map<string, FontMetrics>();
   private readonly listeners = new Set<() => void>();
-  /** Texel of the solid block used for background rectangles (halo channel). */
-  solid = {x: 0, y: 0};
   /** A cell did not fit: the atlas starts over when the layout that found out is done. */
   private full = false;
   /** Where one mask of a cell is drawn before it goes into its channel. */
@@ -210,12 +208,6 @@ export class GlyphAtlas {
     this.full = false;
     this.generation++;
     this.version++;
-    const at = this.allocate(4, 4);
-    if (at) {
-      this.context.fillStyle = '#f00';
-      this.context.fillRect(at.x, at.y, 4, 4);
-      this.solid = {x: at.x + 1, y: at.y + 1};
-    }
     this.listeners.forEach((l) => l());
   }
 

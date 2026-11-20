@@ -83,8 +83,7 @@ function atlasTexture(device: GPUDevice, atlas: GlyphAtlas): AtlasTexture {
 /** GPU resources for the labels of one layer. */
 interface LabelResources {
   layout: GPUBindGroupLayout;
-  halo: GPURenderPipeline;
-  fill: GPURenderPipeline;
+  pipeline: GPURenderPipeline;
   quad: GPUBuffer;
   uniforms: GPUBuffer | null;
   uniformData: Float32Array;
@@ -513,15 +512,12 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     if (labels) {
       const r = this.labels!;
       const count = this.labelFrame!.set.glyphCount;
+      pass.setPipeline(r.pipeline);
       pass.setVertexBuffer(0, r.quad);
       pass.setVertexBuffer(1, r.instances!);
       labels.forEach((opacityBuffer, i) => {
         pass.setBindGroup(0, r.group!, [i * r.slotSize]);
         pass.setVertexBuffer(2, opacityBuffer);
-        // all halos, then all fills: a halo never covers a neighbouring letter
-        pass.setPipeline(r.halo);
-        pass.draw(4, count);
-        pass.setPipeline(r.fill);
         pass.draw(4, count);
       });
     }
@@ -587,26 +583,25 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         {binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {type: 'filtering'}},
       ],
     });
-    const formats: GPUVertexFormat[] = ['float32x2', 'float32x2', 'float32x2', 'float32x2', 'float32x4', 'float32x4', 'float32x4', 'float32x2'];
+    const formats: GPUVertexFormat[] = ['float32x2', 'float32x2', 'float32x2', 'float32x2', 'float32x4', 'float32x4', 'float32x3'];
     let offset = 0;
     const attributes: GPUVertexAttribute[] = formats.map((format, i) => {
       const attribute = {shaderLocation: i + 1, offset, format};
-      offset += format === 'float32x4' ? 16 : 8;
+      offset += format === 'float32x4' ? 16 : format === 'float32x3' ? 12 : 8;
       return attribute;
     });
     const buffers: GPUVertexBufferLayout[] = [
       {arrayStride: 8, stepMode: 'vertex', attributes: [{shaderLocation: 0, offset: 0, format: 'float32x2'}]},
       {arrayStride: INSTANCE_FLOATS * 4, stepMode: 'instance', attributes},
-      {arrayStride: 4, stepMode: 'instance', attributes: [{shaderLocation: 9, offset: 0, format: 'float32'}]},
+      {arrayStride: 4, stepMode: 'instance', attributes: [{shaderLocation: 8, offset: 0, format: 'float32'}]},
     ];
-    const pipeline = (entryPoint: string) =>
-      device.createRenderPipeline({
-        label: `ol-webgpu labels ${entryPoint}`,
+    const pipeline = device.createRenderPipeline({
+        label: 'ol-webgpu labels',
         layout: device.createPipelineLayout({bindGroupLayouts: [layout]}),
         vertex: {module, entryPoint: 'vs', buffers},
         fragment: {
           module,
-          entryPoint,
+          entryPoint: 'fs',
           targets: [
             {
               format: this.format,
@@ -626,8 +621,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     const align = device.limits.minUniformBufferOffsetAlignment;
     this.labels = {
       layout,
-      halo: pipeline('fs_halo'),
-      fill: pipeline('fs_fill'),
+      pipeline,
       quad,
       uniforms: null,
       uniformData: new Float32Array(0),

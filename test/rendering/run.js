@@ -326,6 +326,7 @@ if (args.shared !== 'false' && (!args.match || 'shared'.includes(args.match) || 
 const GPU_TEXT = {
   styles: 0.035,
   multiline: 0.002,
+  overlap: 0.002,
   line: 0.025,
   lineRotated: 0.025,
   polygon: 0.002,

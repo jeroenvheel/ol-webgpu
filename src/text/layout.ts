@@ -24,11 +24,22 @@ import {DROP_BINS, type GlyphAtlas, SUBPIXEL_BINS, segments} from './atlas.js';
 import type {TextEvaluator} from './style.js';
 
 /**
- * Floats per glyph instance: anchor (2, map units relative to the set's
- * origin), part offset (2, pixels), glyph offset (2), size (2), atlas cell
- * (4, texels), fill (4), halo (4), angle, rotate with view.
+ * Floats per instance: anchor (2, map units relative to the set's origin),
+ * part offset (2, pixels), glyph offset (2), size (2), atlas cell (4,
+ * texels), colour (4), angle, rotate with view, and what to draw: the
+ * `HALO` or `FILL` channel of the cell, or a `SOLID` rectangle.
+ *
+ * Instances are drawn in order. A label is its background, then the halos
+ * of all its glyphs, then their fills: a halo never covers a letter of its
+ * own label, and a label covers the labels drawn before it, as on a Canvas.
  */
-export const INSTANCE_FLOATS = 22;
+export const INSTANCE_FLOATS = 19;
+
+/** Channels of an atlas cell: the halo in red, the fill in green. */
+const HALO = 0;
+const FILL = 1;
+/** A rectangle of one colour with anti-aliased edges, for backgrounds (no cell). */
+const SOLID = 2;
 
 /**
  * Doubles per part: anchor x, y (map units, absolute), part offset x, y
@@ -263,6 +274,16 @@ export class LabelBuilder {
 
   finish(): LabelSet {
     const count = this.labelFeatures.length;
+    // Labels are drawn in the order of the buffers: by z-index, then as the
+    // features come (by age), so a label with a higher z-index is on top.
+    const zIndices = this.zIndex;
+    let sorted = true;
+    for (let i = 1; i < count && sorted; i++) {
+      sorted = zIndices[i] >= zIndices[i - 1];
+    }
+    if (!sorted) {
+      this.sortByZIndex();
+    }
     const order = new Uint32Array(count);
     for (let i = 0; i < count; i++) {
       order[i] = i;
@@ -294,6 +315,40 @@ export class LabelBuilder {
     };
   }
 
+  /** Reorders the labels, with their instances, by z-index (stable). */
+  private sortByZIndex() {
+    const count = this.labelFeatures.length;
+    const zIndex = this.zIndex;
+    const draw = new Uint32Array(count);
+    for (let i = 0; i < count; i++) {
+      draw[i] = i;
+    }
+    draw.sort((a, b) => zIndex[a] - zIndex[b] || a - b);
+    const instances = new Float32Array(this.glyphCount * INSTANCE_FLOATS);
+    const take = <T>(values: T[]): T[] => Array.from(draw, (i) => values[i]);
+    const glyphStart: number[] = [];
+    const glyphEnd: number[] = [];
+    let at = 0;
+    for (const i of draw) {
+      const from = this.glyphStart[i];
+      const to = this.glyphEnd[i];
+      instances.set(this.instances.subarray(from * INSTANCE_FLOATS, to * INSTANCE_FLOATS), at * INSTANCE_FLOATS);
+      glyphStart.push(at);
+      at += to - from;
+      glyphEnd.push(at);
+    }
+    this.instances = instances;
+    replace(this.glyphStart, glyphStart);
+    replace(this.glyphEnd, glyphEnd);
+    replace(this.labelFeatures, take(this.labelFeatures));
+    replace(this.keys, take(this.keys));
+    replace(this.partStart, take(this.partStart));
+    replace(this.partEnd, take(this.partEnd));
+    replace(this.mode, take(this.mode));
+    replace(this.uid, take(this.uid));
+    replace(this.zIndex, take(this.zIndex));
+  }
+
   // --- instances ---------------------------------------------------------
 
   private instance(
@@ -309,10 +364,10 @@ export class LabelBuilder {
     ty: number,
     tw: number,
     th: number,
-    fill: number[],
-    stroke: number[],
+    color: number[],
     angle: number,
     rotateWithView: number,
+    channel: number,
   ) {
     if (this.boxesOnly) {
       return;
@@ -337,23 +392,19 @@ export class LabelBuilder {
     a[at + 9] = ty;
     a[at + 10] = tw;
     a[at + 11] = th;
-    a[at + 12] = fill[0];
-    a[at + 13] = fill[1];
-    a[at + 14] = fill[2];
-    a[at + 15] = fill[3];
-    a[at + 16] = stroke[0];
-    a[at + 17] = stroke[1];
-    a[at + 18] = stroke[2];
-    a[at + 19] = stroke[3];
-    a[at + 20] = angle;
-    a[at + 21] = rotateWithView;
+    a[at + 12] = color[0];
+    a[at + 13] = color[1];
+    a[at + 14] = color[2];
+    a[at + 15] = color[3];
+    a[at + 16] = angle;
+    a[at + 17] = rotateWithView;
+    a[at + 18] = channel;
     this.glyphCount++;
   }
 
-  /** A filled rectangle, drawn with the halos (below all letters). */
+  /** A filled rectangle. */
   private rect(ax: number, ay: number, x: number, y: number, w: number, h: number, color: number[], angle: number, rotateWithView: number) {
-    const solid = this.atlas.solid;
-    this.instance(ax, ay, 0, 0, x, y, w, h, solid.x, solid.y, 2, 2, NONE, color, angle, rotateWithView);
+    this.instance(ax, ay, 0, 0, x, y, w, h, 0, 0, 0, 0, color, angle, rotateWithView, SOLID);
   }
 
   /**
@@ -623,8 +674,15 @@ export class LabelBuilder {
       this.rect(x, y, x0 - w / 2, y0 + w / 2, w, y1 - y0 - w, c, rotation, rotateWithView);
       this.rect(x, y, x1 - w / 2, y0 + w / 2, w, y1 - y0 - w, c, rotation, rotateWithView);
     }
-    for (let i = 0; i < quads.length; i += 8) {
-      this.instance(x, y, corner[0], corner[1], quads[i], quads[i + 1], quads[i + 2], quads[i + 3], quads[i + 4], quads[i + 5], quads[i + 6], quads[i + 7], style.fill, style.stroke, rotation, rotateWithView);
+    // all halos of the label, then all fills
+    for (let channel = HALO; channel <= FILL; channel++) {
+      const color = channel === HALO ? style.stroke : style.fill;
+      if (color[3] <= 0 || (channel === HALO && style.strokeWidth <= 0)) {
+        continue;
+      }
+      for (let i = 0; i < quads.length; i += 8) {
+        this.instance(x, y, corner[0], corner[1], quads[i], quads[i + 1], quads[i + 2], quads[i + 3], quads[i + 4], quads[i + 5], quads[i + 6], quads[i + 7], color, rotation, rotateWithView, channel);
+      }
     }
     this.parts.push(x, y, 0, 0, rotation, rotateWithView, x0, y0, x1, y1);
     this.endLabel();
@@ -724,6 +782,8 @@ export class LabelBuilder {
     const metrics = atlas.metrics(font);
     const face = atlas.face(font, s, raster, style.lightFill, style.lightHalo);
     this.beginLabel(style.mode, style.zIndex);
+    // per glyph: part offset x, y, offset x, y, size w, h, atlas cell x, y, w, h, angle
+    const glyphs: number[] = [];
     for (const part of parts) {
       const px = (part[0] as number) - mx;
       const py = (part[1] as number) - my;
@@ -734,12 +794,22 @@ export class LabelBuilder {
       for (let k = 0; k < segs.length; k++) {
         const g = face.glyph(segs[k]);
         if (g.w > 0) {
-          this.instance(ax, ay, px, py, -half + offsetX + (pen + g.left) * sx, cy + g.top * sy, g.width * sx, g.height * sy, g.x, g.y, g.w, g.h, style.fill, style.stroke, angle, 1);
+          glyphs.push(px, py, -half + offsetX + (pen + g.left) * sx, cy + g.top * sy, g.width * sx, g.height * sy, g.x, g.y, g.w, g.h, angle);
         }
         pen += metrics.advance(segs[k]) + (k + 1 < segs.length ? metrics.kerning(segs[k], segs[k + 1]) : 0);
       }
       const h = (Math.abs(height * sy) + s) / 2;
       this.parts.push(ax, ay, px, py, angle, 1, -half + offsetX - s / 2, cy - h, half + offsetX + s / 2, cy + h);
+    }
+    // all halos of the label, then all fills
+    for (let channel = HALO; channel <= FILL; channel++) {
+      const color = channel === HALO ? style.stroke : style.fill;
+      if (color[3] <= 0 || (channel === HALO && s <= 0)) {
+        continue;
+      }
+      for (let i = 0; i < glyphs.length; i += 11) {
+        this.instance(ax, ay, glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4], glyphs[i + 5], glyphs[i + 6], glyphs[i + 7], glyphs[i + 8], glyphs[i + 9], color, glyphs[i + 10], 1, channel);
+      }
     }
     this.endLabel();
   }
@@ -778,6 +848,12 @@ function rasterScale(pixelRatio: number, sx: number, sy: number): number {
   const scale = Math.max(Math.abs(sx), Math.abs(sy), 0.25);
   // in steps, so a scale that varies per feature does not fill the atlas
   return pixelRatio * Math.min(8, Math.ceil(scale * 20 - 1e-9) / 20);
+}
+
+function replace<T>(target: T[], values: T[]) {
+  for (let i = 0; i < values.length; i++) {
+    target[i] = values[i];
+  }
 }
 
 function strip(flat: number[], offset: number, end: number, stride: number): number[] {

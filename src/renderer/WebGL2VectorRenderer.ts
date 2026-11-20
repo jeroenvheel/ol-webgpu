@@ -510,7 +510,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     if (!this.labels) {
       const program = this.link(LABEL_GLSL.vertex, LABEL_GLSL.fragment);
       const uniforms: Record<string, WebGLUniformLocation | null> = {};
-      for (const name of ['u_matrix', 'u_translate', 'u_viewport', 'u_atlasSize', 'u_rotation', 'u_opacity', 'u_pixelRatio', 'u_pass', 'u_atlas']) {
+      for (const name of ['u_matrix', 'u_translate', 'u_viewport', 'u_atlasSize', 'u_rotation', 'u_opacity', 'u_pixelRatio', 'u_atlas']) {
         uniforms[name] = gl.getUniformLocation(program, name);
       }
       const quad = gl.createBuffer()!;
@@ -547,12 +547,12 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
         attribute(0, 2, 8, 0, 0);
         gl.bindBuffer(gl.ARRAY_BUFFER, r.instances);
         let offset = 0;
-        [2, 2, 2, 2, 4, 4, 4, 2].forEach((size, i) => {
+        [2, 2, 2, 2, 4, 4, 3].forEach((size, i) => {
           attribute(i + 1, size, INSTANCE_FLOATS * 4, offset, 1);
           offset += size * 4;
         });
         gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-        attribute(9, 1, 4, 0, 1);
+        attribute(8, 1, 4, 0, 1);
         gl.bindVertexArray(null);
         o = {buffer, vao, version: -1, set: -1};
         r.opacity.set(w.world, o);
@@ -573,10 +573,6 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       gl.uniform1f(r.uniforms.u_opacity, u[11]);
       gl.uniform1f(r.uniforms.u_pixelRatio, u[12]);
       gl.bindVertexArray(o.vao);
-      // all halos, then all fills: a halo never covers a neighbouring letter
-      gl.uniform1i(r.uniforms.u_pass, 0);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, set.glyphCount);
-      gl.uniform1i(r.uniforms.u_pass, 1);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, set.glyphCount);
     }
     gl.bindVertexArray(null);
