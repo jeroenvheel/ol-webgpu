@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ol-webgpu labels side by side</title>
+    <link rel="stylesheet" href="./style.css" />
+    <style>
+      @font-face {
+        font-family: 'Ubuntu';
+        src: url('/fonts/ubuntu-regular-webfont.woff2') format('woff2');
+      }
+      body { max-width: 1500px; }
+      .maps { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+      .maps .map { height: 380px; background: #dbe9f4; }
+    </style>
+  </head>
+  <body>
+    <h1>Labels side by side: ol Canvas · ol WebGLVector · WebGL2 · WebGPU</h1>
+    <p>
+      Same sources, same flat style, synchronized views. Hover to pick (result per map below it).
+      <label>Places <input id="count" type="number" value="3000" step="1000" min="0" /></label>
+      <label><input id="declutter" type="checkbox" /> declutter</label>
+      <label><input id="webfont" type="checkbox" /> web font (Ubuntu, from the page's <code>@font-face</code>)</label>
+      <label><input id="worker" type="checkbox" /> <code>text: 'canvas'</code> (ol's text worker) in the ol-webgpu layers</label>
+    </p>
+    <div class="maps">
+      <div><strong>ol/layer/Vector (Canvas)</strong><div id="map-canvas" class="map"></div><pre id="pick-canvas"></pre></div>
+      <div><strong>ol/layer/WebGLVector (text worker)</strong><div id="map-ol" class="map"></div><pre id="pick-ol"></pre></div>
+      <div><strong>WebGL2VectorLayer</strong><div id="map-webgl2" class="map"></div><pre id="pick-webgl2"></pre></div>
+      <div><strong>WebGPUVectorLayer</strong><div id="map-webgpu" class="map"></div><pre id="pick-webgpu"></pre></div>
+    </div>
+    <pre id="stats"></pre>
+    <p>
+      What to look for: ol's WebGL layer cannot declutter and its text worker does not see the web font; its labels
+      arrive after the geometries and are not picked. The ol-webgpu layers draw labels like the Canvas layer. With
+      decluttering the Canvas layer shows fewer of them: it also declutters the circles, together with their labels,
+      where the ol-webgpu layers draw every circle and declutter the labels only.
+    </p>
+    <script type="module" src="./labels-compare.ts"></script>
+  </body>
+</html>

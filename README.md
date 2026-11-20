@@ -219,6 +219,8 @@ two backends and GPU-evaluated styles.
 
 Compared with ol's Canvas vector layer (`ol/layer/Vector`), upright text is
 the same pixel for pixel, also with decluttering; see [Tests](#tests).
+`examples/labels-compare.html` shows the Canvas layer, ol's `WebGLVector`
+and both ol-webgpu layers side by side with one source and style.
 
 ## Development
 
@@ -468,6 +470,10 @@ view), which is not sliced yet.
     layer's geometries cover them (ol's Canvas layers draw decluttered
     labels above all layers of the canvas). Decluttering is not shared with
     ol's Canvas layers.
+  - Only labels are decluttered. ol's Canvas layer also declutters point
+    symbols, together with their labels; here every symbol is drawn and
+    does not take space (`examples/labels-compare.html` shows the
+    difference).
   - Hit detection uses the label's box, not its glyphs.
   - When a web font finishes loading or the atlas is full, labels disappear
     for the frames it takes to lay them out again.

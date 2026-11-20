@@ -4,15 +4,15 @@
  * the numbers of the last label layout; `window.__measure()` runs a scripted
  * pan and zoom and returns timings (used for the numbers in the README).
  */
-import Feature from 'ol/Feature.js';
+import type Feature from 'ol/Feature.js';
 import Map from 'ol/Map.js';
 import View from 'ol/View.js';
 import GeoJSON from 'ol/format/GeoJSON.js';
-import Point from 'ol/geom/Point.js';
 import VectorLayer from 'ol/layer/Vector.js';
 import VectorSource from 'ol/source/Vector.js';
 import GpuVectorLayer from '../src/layer/GpuVectorLayer.js';
 import {liveRenderers} from '../src/renderer/BaseGpuVectorRenderer.js';
+import {makePlaces} from './synthetic.js';
 
 const params = new URLSearchParams(location.search);
 const kind = params.get('layer') ?? 'gpu';
@@ -20,30 +20,8 @@ const text = (params.get('text') ?? 'gpu') as 'gpu' | 'canvas';
 const declutter = params.get('declutter') !== '0';
 const count = Number(params.get('points') ?? 20000);
 
-// deterministic pseudo-random points with a name each
-let seed = 42;
-const random = () => {
-  seed = (seed * 1664525 + 1013904223) >>> 0;
-  return seed / 4294967296;
-};
-const syllables = ['ka', 'lo', 'mi', 'ren', 'sta', 'vel', 'dor', 'an', 'be', 'ti', 'gro', 'hem', 'wijk', 'veen', 'burg', 'dam'];
-const features: Feature[] = [];
-for (let i = 0; i < count; i++) {
-  let name = '';
-  for (let k = 0, n = 2 + Math.floor(random() * 3); k < n; k++) {
-    name += syllables[Math.floor(random() * syllables.length)];
-  }
-  features.push(
-    new Feature({
-      geometry: new Point([(random() - 0.5) * 3.6e7, (random() - 0.5) * 1.6e7]),
-      name: name[0].toUpperCase() + name.slice(1),
-      rank: Math.floor(random() * 4),
-    }),
-  );
-}
-
 const countries = new VectorSource<Feature>({url: '/countries.json', format: new GeoJSON<Feature>()});
-const places = new VectorSource({features});
+const places = new VectorSource({features: makePlaces(count)});
 
 const countryStyle = {
   'fill-color': '#eef3e6',

@@ -25,6 +25,26 @@ export function makePoints(count: number, seed = 1): Feature[] {
   return out;
 }
 
+const SYLLABLES = ['ka', 'lo', 'mi', 'ren', 'sta', 'vel', 'dor', 'an', 'be', 'ti', 'gro', 'hem', 'wijk', 'veen', 'burg', 'dam'];
+
+/** Points with a made-up `name` and a `rank` (0 is the most important of 4). */
+export function makePlaces(count: number, seed = 42): Feature[] {
+  const r = rng(seed);
+  const out = new Array<Feature>(count);
+  for (let i = 0; i < count; i++) {
+    let name = '';
+    for (let k = 0, n = 2 + Math.floor(r() * 3); k < n; k++) {
+      name += SYLLABLES[Math.floor(r() * SYLLABLES.length)];
+    }
+    out[i] = new Feature({
+      geometry: new Point([(r() - 0.5) * 2 * EXTENT, (r() - 0.5) * 1.6e7]),
+      name: name[0].toUpperCase() + name.slice(1),
+      rank: Math.floor(r() * 4),
+    });
+  }
+  return out;
+}
+
 export function makeLines(count: number, vertices = 10, seed = 2): Feature[] {
   const r = rng(seed);
   const out = new Array<Feature>(count);
