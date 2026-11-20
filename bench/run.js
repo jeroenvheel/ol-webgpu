@@ -4,8 +4,8 @@
 import {writeFileSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {chromium} from 'playwright';
 import {createServer} from 'vite';
+import {launchChromium} from '../test/browser.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = Object.fromEntries(
@@ -27,17 +27,10 @@ const server = await createServer({
 await server.listen();
 const url = server.resolvedUrls.local[0];
 
-const browser = await chromium.launch({
-  headless: args.headed !== 'true',
+const browser = await launchChromium({
   channel: args.channel,
-  args: [
-    '--enable-unsafe-webgpu',
-    '--enable-gpu',
-    '--ignore-gpu-blocklist',
-    '--use-angle=d3d11',
-    '--js-flags=--max-old-space-size=8192 --expose-gc',
-    ...(args.channel ? [] : ['--disable-dawn-features=use_dxc']),
-  ],
+  headed: args.headed === 'true',
+  extraArgs: ['--js-flags=--max-old-space-size=8192 --expose-gc'],
 });
 const page = await browser.newPage({viewport: {width: 1100, height: 900}});
 page.on('console', (m) => console.log('[page]', m.text()));

@@ -2,14 +2,17 @@
 // ol-webgpu layers, and compares each with upstream's expected.png (and the
 // WebGL2 output with the WebGPU output).
 //
-// Usage: npm run test:rendering -- [--match=substring] [--layers=ol,webgl2,webgpu] [--headed]
+// Usage: npm run test:rendering -- [--match=substring] [--layers=ol,webgl2,webgpu]
+//        [--require-webgpu] [--channel=msedge|chrome] [--headed]
+// Without a WebGPU adapter the WebGPU layer is skipped with a warning,
+// unless --require-webgpu is given.
 import {existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import pixelmatch from 'pixelmatch';
-import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
 import {createServer} from 'vite';
+import {gpuInfo, launchChromium} from '../browser.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -64,21 +67,21 @@ const server = await createServer({
 await server.listen();
 const base = server.resolvedUrls.local[0];
 
-// Playwright's bundled Chromium on Windows ships without dxcompiler.dll, so
-// WebGPU device creation fails unless Dawn falls back to FXC. Use
-// --channel=msedge or --channel=chrome to test with an installed browser.
-const browser = await chromium.launch({
-  headless: args.headed !== 'true',
-  channel: args.channel,
-  args: [
-    '--enable-unsafe-webgpu',
-    '--enable-gpu',
-    '--ignore-gpu-blocklist',
-    '--use-angle=d3d11',
-    ...(args.channel ? [] : ['--disable-dawn-features=use_dxc']),
-  ],
-});
+// flags per platform: see test/browser.js (--channel=msedge|chrome to use an installed browser)
+const browser = await launchChromium({channel: args.channel, headed: args.headed === 'true'});
 const page = await browser.newPage({viewport: {width: 256, height: 256}, deviceScaleFactor: 1});
+await page.goto(`${base}index.html`);
+const gpu = await gpuInfo(page);
+console.log(`WebGL: ${gpu.webgl}\nWebGPU: ${gpu.webgpu ?? 'no adapter'}\n`);
+if (!gpu.webgpu && layers.includes('webgpu')) {
+  if (args['require-webgpu'] === 'true') {
+    console.error('no WebGPU adapter, but --require-webgpu was given');
+    process.exit(1);
+  }
+  layers.splice(layers.indexOf('webgpu'), 1);
+  const message = 'no WebGPU adapter in this browser: the WebGPU layer is skipped';
+  console.log(process.env.GITHUB_ACTIONS ? `::warning::${message}` : `warning: ${message}`);
+}
 let onRender = null;
 await page.exposeFunction('render', (config) => onRender?.(config ?? {}));
 const errors = [];

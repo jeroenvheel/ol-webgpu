@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # test/browser.js: software rendering (SwiftShader) on the GPU-less runner
+      CI: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/*/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/*/Cargo.lock', 'crates/*/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch OpenLayers test data
+        run: npm run fetch-upstream
+
+      - name: Synced rendering cases match upstream
+        run: |
+          npm run sync-upstream-tests
+          git diff --exit-code -- test/rendering/cases
+
+      - name: Build wasm
+        run: npm run build:wasm
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Rust tests
+        run: npm run test:rust
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # SwiftShader provides WebGPU on the runner too, so the WebGPU layer must not be skipped
+      - name: Rendering, hit detection and text tests
+        run: npm run test:rendering -- --require-webgpu
+
+      - name: Build package
+        run: npm run build
+
+      - name: Package smoke test
+        run: npm run test:dist
+
+      - name: Upload rendering report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendering-report
+          path: |
+            test/rendering/report/
+            test/rendering/cases/*/actual-*.png
+          if-no-files-found: ignore

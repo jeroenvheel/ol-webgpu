@@ -5,8 +5,8 @@
 import {existsSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {chromium} from 'playwright';
 import {build, preview} from 'vite';
+import {gpuInfo, launchChromium} from '../browser.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 if (!existsSync(join(here, '../../dist/index.js'))) {
@@ -18,11 +18,15 @@ await build({configFile});
 const server = await preview({configFile, preview: {port: 5182, strictPort: true}});
 const url = server.resolvedUrls.local[0];
 
-const browser = await chromium.launch({
-  args: ['--enable-unsafe-webgpu', '--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11', '--disable-dawn-features=use_dxc'],
-});
+const browser = await launchChromium();
+const probe = await browser.newPage();
+await probe.goto(url);
+const gpu = await gpuInfo(probe);
+await probe.close();
+console.log(`WebGL: ${gpu.webgl}\nWebGPU: ${gpu.webgpu ?? 'no adapter'}`);
 const cases = [
-  ['auto', 'webgpu'],
+  // without a WebGPU adapter, 'auto' must pick WebGL2
+  ['auto', gpu.webgpu ? 'webgpu' : 'webgl2'],
   ['webgl2', 'webgl2'],
   ['fallback', 'webgl2'],
 ];

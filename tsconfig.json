@@ -11,7 +11,9 @@
     "allowJs": false,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
-    "noEmit": true
+    "noEmit": true,
+    // the dist smoke test imports the package by name; typecheck it against the sources
+    "paths": {"ol-webgpu": ["./src/index.ts"]}
   },
   "include": ["src", "test", "examples", "bench"]
 }

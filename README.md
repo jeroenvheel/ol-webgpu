@@ -1,5 +1,7 @@
 # ol-webgpu
 
+[![CI](https://github.com/jeroenvheel/ol-webgpu/actions/workflows/ci.yml/badge.svg)](https://github.com/jeroenvheel/ol-webgpu/actions/workflows/ci.yml)
+
 WebGL2 and WebGPU vector layers for [OpenLayers](https://openlayers.org), with
 a Rust/WebAssembly geometry core.
 
@@ -81,24 +83,36 @@ On Windows without Visual Studio, the GNU host toolchain works
 
 ```sh
 npm install
+npx playwright install chromium   # for the browser tests and the benchmark
 npm run build:wasm            # crates/* → src/wasm/*.wasm
+npm run fetch-upstream        # ol's rendering tests + data for the installed ol version → .upstream/
+npm run sync-upstream-tests   # copy ol's WebGLVector rendering cases + data into test/rendering
 npm run dev                   # examples on http://localhost:5180 (compare.html, bench.html)
 npm test                      # unit tests (vitest): golden buffers, shader translation
 npm run test:rust             # cargo tests of both crates
-npm run sync-upstream-tests   # copy ol's WebGLVector rendering cases + data (see below)
-npm run test:rendering        # screenshot + hit detection tests in Chromium (real GPU)
+npm run test:rendering        # screenshots, hit detection and text checks in Chromium
 npm run bench                 # benchmark, see bench/run.js for options
 npm run build                 # dist/ (ES module + worker + wasm + .d.ts)
 npm run test:dist             # production app build against dist/, checked in Chromium
 ```
 
-`.upstream/openlayers` is a sparse clone of the ol tag matching the installed
-version (`git clone --depth 1 --filter=blob:none --sparse --branch v10.11.0 …`),
-used for the rendering cases and test data.
+`.upstream/openlayers` is a shallow, sparse clone of the ol tag matching the
+installed version, made by `npm run fetch-upstream`.
 
-Playwright's bundled Chromium on Windows lacks `dxcompiler.dll`; the runners
-pass `--disable-dawn-features=use_dxc` so WebGPU still works, or use
-`--channel=msedge`.
+Browser flags per platform are in `test/browser.js`. On Windows the tests use
+the real GPU via D3D11. Playwright's bundled Chromium there lacks
+`dxcompiler.dll`, so the runners pass `--disable-dawn-features=use_dxc`; use
+`--channel=msedge` to test with an installed browser instead. On Linux in CI
+they use SwiftShader, which provides both WebGL2 and WebGPU without a GPU.
+Without a WebGPU adapter, `test:rendering` skips the WebGPU layer with a
+warning; `--require-webgpu` makes that an error.
+
+**CI.** GitHub Actions (`.github/workflows/ci.yml`) runs on every push to
+`main` and on pull requests (Ubuntu, SwiftShader): wasm build, typecheck,
+unit and Rust tests, a check that the synced upstream cases are current, all
+rendering, hit detection and text tests with WebGPU required, the package
+build and the dist smoke test. On failure, the screenshots and diffs are
+uploaded as the `rendering-report` artifact.
 
 ## Tests
 
