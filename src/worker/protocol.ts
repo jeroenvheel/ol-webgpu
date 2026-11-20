@@ -1,4 +1,4 @@
-/** Messages between the main thread and the ol-gpu worker. */
+/** Messages between the main thread and the ol-webgpu worker. */
 
 export interface BuildRequest {
   type: 'build';

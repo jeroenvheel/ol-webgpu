@@ -144,7 +144,7 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
             this.pendingIndex = null;
           }
         },
-        (e) => console.warn('ol-gpu: hit detection unavailable (wasm failed to load)', e),
+        (e) => console.warn('ol-webgpu: hit detection unavailable (wasm failed to load)', e),
       );
     }
   }
@@ -309,7 +309,7 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
         this.getLayer()?.changed();
       })
       .catch((e) => {
-        console.error('ol-gpu: buffer generation failed', e);
+        console.error('ol-webgpu: buffer generation failed', e);
         this.ready = true;
       });
   }
@@ -419,7 +419,7 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
 
   private pickFeatures(coordinate: Coordinate, frameState: FrameState, hitTolerance: number): FeatureLike[] {
     if (!this.hitDetection) {
-      throw new Error('`forEachFeatureAtCoordinate` cannot be used on an ol-gpu layer with `disableHitDetection: true`.');
+      throw new Error('`forEachFeatureAtCoordinate` cannot be used on an ol-webgpu layer with `disableHitDetection: true`.');
     }
     if (!this.picker) {
       return [];
@@ -429,7 +429,7 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
 
   private *iteratePicks(coordinate: Coordinate, frameState: FrameState, hitTolerance: number): Generator<FeatureLike> {
     if (!this.hitDetection) {
-      throw new Error('`forEachFeatureAtCoordinate` cannot be used on an ol-gpu layer with `disableHitDetection: true`.');
+      throw new Error('`forEachFeatureAtCoordinate` cannot be used on an ol-webgpu layer with `disableHitDetection: true`.');
     }
     if (this.picker) {
       yield* this.picker.pick(coordinate, frameState, hitTolerance, (ref) => this.batch.getFeatureFromRef(ref), this.lastWorlds);

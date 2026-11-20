@@ -1,5 +1,5 @@
 /**
- * One shared GPUDevice per page for all ol-gpu WebGPU layers.
+ * One shared GPUDevice per page for all ol-webgpu WebGPU layers.
  */
 
 let device: Promise<GPUDevice> | null = null;
@@ -13,16 +13,16 @@ export function getDevice(): Promise<GPUDevice> {
   if (!device) {
     device = (async () => {
       if (!isWebGPUAvailable()) {
-        throw new Error('ol-gpu: WebGPU is not available in this browser');
+        throw new Error('ol-webgpu: WebGPU is not available in this browser');
       }
       const adapter = await navigator.gpu.requestAdapter({powerPreference: 'high-performance'});
       if (!adapter) {
-        throw new Error('ol-gpu: no WebGPU adapter available');
+        throw new Error('ol-webgpu: no WebGPU adapter available');
       }
-      const d = await adapter.requestDevice({label: 'ol-gpu'});
+      const d = await adapter.requestDevice({label: 'ol-webgpu'});
       d.lost.then((info) => {
         if (info.reason !== 'destroyed') {
-          console.warn('ol-gpu: WebGPU device lost:', info.message);
+          console.warn('ol-webgpu: WebGPU device lost:', info.message);
         }
         device = null;
         lostListeners.forEach((l) => l());

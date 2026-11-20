@@ -1,10 +1,10 @@
-# ol-gpu
+# ol-webgpu
 
 WebGL2 and WebGPU vector layers for [OpenLayers](https://openlayers.org), with
 a Rust/WebAssembly geometry core.
 
 ```js
-import {GpuVectorLayer} from 'ol-gpu';
+import {GpuVectorLayer} from 'ol-webgpu';
 
 const layer = new GpuVectorLayer({
   source: vectorSource, // any ol/source/Vector
@@ -234,6 +234,6 @@ What this shows:
   (and for sizes that change with `time`) picks search a 128 px radius,
   which is correct but slower on dense data.
 - Vite apps: if the dev server's dependency pre-bundling breaks the wasm
-  URLs, add `optimizeDeps: {exclude: ['ol-gpu']}`.
+  URLs, add `optimizeDeps: {exclude: ['ol-webgpu']}`.
 - The naga shader translator is ~1.3 MB of wasm (loaded once, only by the
   WebGPU layer).

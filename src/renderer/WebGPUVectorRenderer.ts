@@ -133,7 +133,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         this.format = preferredFormat();
         this.context = this.canvas.getContext('webgpu');
         if (!this.context) {
-          throw new Error('ol-gpu: could not create a WebGPU canvas context');
+          throw new Error('ol-webgpu: could not create a WebGPU canvas context');
         }
         this.context.configure({
           device,
@@ -142,7 +142,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
           usage: GPUTextureUsage.RENDER_ATTACHMENT | (this.preserveDrawingBuffer ? GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST : 0),
         });
         this.sampler = device.createSampler({minFilter: 'linear', magFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge'});
-        this.zeroBuffer = device.createBuffer({size: 256, usage: GPUBufferUsage.VERTEX, label: 'ol-gpu zeros'});
+        this.zeroBuffer = device.createBuffer({size: 256, usage: GPUBufferUsage.VERTEX, label: 'ol-webgpu zeros'});
         this.applyPasses();
         this.reuploadBuffers();
         this.getLayer()?.changed();
@@ -215,11 +215,11 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       alpha: {srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'},
     };
     const pipeline = device.createRenderPipeline({
-      label: `ol-gpu ${pass.kind}`,
+      label: `ol-webgpu ${pass.kind}`,
       layout: device.createPipelineLayout({bindGroupLayouts: [layout]}),
-      vertex: {module: device.createShaderModule({code: program.vertex, label: `ol-gpu ${pass.kind} vs`}), entryPoint: 'main', buffers},
+      vertex: {module: device.createShaderModule({code: program.vertex, label: `ol-webgpu ${pass.kind} vs`}), entryPoint: 'main', buffers},
       fragment: {
-        module: device.createShaderModule({code: program.fragment, label: `ol-gpu ${pass.kind} fs`}),
+        module: device.createShaderModule({code: program.fragment, label: `ol-webgpu ${pass.kind} fs`}),
         entryPoint: 'main',
         targets: [{format: this.format, blend}],
       },
@@ -357,7 +357,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     const needed = Math.max(1, slotValues.length) * slotSize;
     if (!this.uniformBuffer || this.uniformBuffer.size < needed) {
       this.uniformBuffer?.destroy();
-      this.uniformBuffer = device.createBuffer({size: Math.max(needed, 4 * slotSize), usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-gpu uniforms'});
+      this.uniformBuffer = device.createBuffer({size: Math.max(needed, 4 * slotSize), usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-webgpu uniforms'});
       this.uniformStaging = new ArrayBuffer(this.uniformBuffer.size);
     }
     const view = new DataView(this.uniformStaging);
@@ -380,7 +380,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       groups.set(s.pipe, device.createBindGroup({layout: s.pipe.layout, entries}));
     }
 
-    const encoder = device.createCommandEncoder({label: 'ol-gpu frame'});
+    const encoder = device.createCommandEncoder({label: 'ol-webgpu frame'});
     const current = context.getCurrentTexture();
     const target = current.createView();
     const pass = encoder.beginRenderPass({
@@ -423,7 +423,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
           size: [width, height],
           format: this.format,
           usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-          label: 'ol-gpu kept frame',
+          label: 'ol-webgpu kept frame',
         });
       }
       encoder.copyTextureToTexture({texture: current}, {texture: this.kept}, [width, height]);
@@ -444,7 +444,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     }
     const device = this.device!;
     if (!this.text) {
-      const module = device.createShaderModule({code: TEXT_OVERLAY_WGSL, label: 'ol-gpu text'});
+      const module = device.createShaderModule({code: TEXT_OVERLAY_WGSL, label: 'ol-webgpu text'});
       const layout = device.createBindGroupLayout({
         entries: [
           {binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {type: 'uniform'}},
@@ -455,7 +455,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       this.text = {
         layout,
         pipeline: device.createRenderPipeline({
-          label: 'ol-gpu text',
+          label: 'ol-webgpu text',
           layout: device.createPipelineLayout({bindGroupLayouts: [layout]}),
           vertex: {module, entryPoint: 'vs'},
           fragment: {
@@ -475,7 +475,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
           primitive: {topology: 'triangle-list'},
           multisample: {count: this.sampleCount},
         }),
-        uniforms: device.createBuffer({size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-gpu text matrix'}),
+        uniforms: device.createBuffer({size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-webgpu text matrix'}),
         texture: null,
         group: null,
         version: -1,
@@ -491,7 +491,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
           size: [canvas.width, canvas.height],
           format: 'rgba8unorm',
           usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-          label: 'ol-gpu text image',
+          label: 'ol-webgpu text image',
         });
         t.group = device.createBindGroup({
           layout: t.layout,
@@ -520,7 +520,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     if (current.width !== kept.width || current.height !== kept.height) {
       return;
     }
-    const encoder = device.createCommandEncoder({label: 'ol-gpu re-present'});
+    const encoder = device.createCommandEncoder({label: 'ol-webgpu re-present'});
     encoder.copyTextureToTexture({texture: kept}, {texture: current}, [kept.width, kept.height]);
     device.queue.submit([encoder.finish()]);
   }

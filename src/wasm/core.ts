@@ -197,7 +197,7 @@ export async function loadCore(source: WasmSource = defaultWasmUrl()): Promise<C
   } else if (source instanceof URL || typeof source === 'string') {
     const response = await fetch(source);
     if (!response.ok) {
-      throw new Error(`ol-gpu: could not load wasm from ${source} (${response.status})`);
+      throw new Error(`ol-webgpu: could not load wasm from ${source} (${response.status})`);
     }
     module = await WebAssembly.compile(await response.arrayBuffer());
   } else {

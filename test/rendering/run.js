@@ -1,5 +1,5 @@
 // Renders the synced upstream WebGLVector cases with ol's WebGLVector and the
-// ol-gpu layers, and compares each with upstream's expected.png (and the
+// ol-webgpu layers, and compares each with upstream's expected.png (and the
 // WebGL2 output with the WebGPU output).
 //
 // Usage: npm run test:rendering -- [--match=substring] [--layers=ol,webgl2,webgpu] [--headed]
@@ -118,7 +118,7 @@ for (const name of cases) {
     try {
       await page.waitForFunction(() => window.__olgpuSettled?.(), null, {timeout: 30_000, polling: 50});
     } catch {
-      errors.push('timed out waiting for ol-gpu renderers');
+      errors.push('timed out waiting for ol-webgpu renderers');
     }
     if (name in COMPARE_WITH_OL) {
       // ol's layer has no readiness signal for its text overlay: give its worker time

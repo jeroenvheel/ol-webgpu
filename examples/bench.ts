@@ -183,7 +183,7 @@ async function layerBench(layerName: string, features: Feature[]) {
   view.endInteraction();
 
   // picking: first pick right away, then wait until the picker has measured
-  // data-driven sizes (ol-gpu layers only), then the steady state
+  // data-driven sizes (ol-webgpu layers only), then the steady state
   const size = map.getSize()!;
   const center = [size[0] / 2, size[1] / 2];
   const p0 = performance.now();

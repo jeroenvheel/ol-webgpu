@@ -38,7 +38,7 @@ export default class GpuVectorLayer<S extends VectorSource = VectorSource> exten
         shaderWasmUrl: (this.gpuOptions as WebGPUVectorLayerOptions<S>).shaderWasmUrl,
       });
       renderer.onInitError = () => {
-        console.warn('ol-gpu: WebGPU unavailable, falling back to WebGL2');
+        console.warn('ol-webgpu: WebGPU unavailable, falling back to WebGL2');
         this.backend = 'webgl2';
         this.clearRenderer();
         this.changed();

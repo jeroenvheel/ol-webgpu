@@ -1,6 +1,6 @@
 /**
  * Loads one synced upstream case (`?case=name&layer=...`) and exposes
- * `window.__olgpuSettled()` so the runner can wait until ol-gpu renderers
+ * `window.__olgpuSettled()` so the runner can wait until ol-webgpu renderers
  * have built their buffers and drawn them.
  */
 import 'ol/ol.css';

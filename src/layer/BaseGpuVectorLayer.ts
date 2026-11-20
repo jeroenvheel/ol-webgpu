@@ -25,7 +25,7 @@ export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> ex
 }
 
 /**
- * Common API of the ol-gpu vector layers; mirrors `ol/layer/WebGLVector`.
+ * Common API of the ol-webgpu vector layers; mirrors `ol/layer/WebGLVector`.
  * Like WebGLVector, these layers must be disposed when no longer used.
  */
 export default abstract class BaseGpuVectorLayer<S extends VectorSource = VectorSource> extends Layer<S, any> {

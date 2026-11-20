@@ -1,6 +1,6 @@
 /**
  * Layer factories shared by examples, benchmark and rendering tests, so the
- * same scene can be rendered by ol's WebGLVector and by the ol-gpu layers.
+ * same scene can be rendered by ol's WebGLVector and by the ol-webgpu layers.
  */
 import type BaseLayer from 'ol/layer/Base.js';
 import WebGLVectorLayer from 'ol/layer/WebGLVector.js';

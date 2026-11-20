@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 /**
- * ol-gpu worker: turns render instructions into GPU buffers and builds the
+ * ol-webgpu worker: turns render instructions into GPU buffers and builds the
  * hit index, with the Rust/WASM core (JS fallback if wasm cannot load).
  */
 import {type Core, loadCore} from '../wasm/core.js';

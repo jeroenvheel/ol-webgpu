@@ -20,13 +20,13 @@ export class WorkerClient {
   readonly ready: Promise<'wasm' | 'js'>;
 
   constructor(options: WorkerOptions = {}) {
-    this.worker = new Worker(new URL('./worker.ts', import.meta.url), {type: 'module', name: 'ol-gpu'});
+    this.worker = new Worker(new URL('./worker.ts', import.meta.url), {type: 'module', name: 'ol-webgpu'});
     this.worker.postMessage({type: 'init', wasmUrl: String(options.wasmUrl ?? defaultWasmUrl())} satisfies InitMessage);
     this.ready = new Promise((resolve) => {
       const onReady = (e: MessageEvent<ReadyMessage | BuildResponse>) => {
         if (e.data.type === 'ready') {
           if (e.data.error) {
-            console.warn('ol-gpu: WebAssembly unavailable, using the JS fallback:', e.data.error);
+            console.warn('ol-webgpu: WebAssembly unavailable, using the JS fallback:', e.data.error);
           }
           this.worker.removeEventListener('message', onReady);
           resolve(e.data.engine);

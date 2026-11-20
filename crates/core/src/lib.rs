@@ -1,4 +1,4 @@
-//! ol-gpu core: geometry work for the WebGL2 and WebGPU vector layers.
+//! ol-webgpu core: geometry work for the WebGL2 and WebGPU vector layers.
 //!
 //! The wasm ABI is deliberately plain `extern "C"` (no wasm-bindgen): JS
 //! allocates input in linear memory with `olgpu_alloc`, calls a `build_*`

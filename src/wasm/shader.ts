@@ -75,7 +75,7 @@ export class ShaderTranslator {
     const out = new Uint8Array(this.ex.memory.buffer, this.ex.olgpu_shader_out_ptr(), this.ex.olgpu_shader_out_len());
     const result = JSON.parse(this.decoder.decode(out)) as StageResult;
     if (!result.ok) {
-      throw new ShaderTranslationError(`ol-gpu: ${stage ? 'fragment' : 'vertex'} shader ${result.error}`, src);
+      throw new ShaderTranslationError(`ol-webgpu: ${stage ? 'fragment' : 'vertex'} shader ${result.error}`, src);
     }
     return result;
   }
@@ -119,7 +119,7 @@ export function loadShaderTranslator(source: WasmSource = defaultShaderWasmUrl()
     } else if (source instanceof URL || typeof source === 'string') {
       const response = await fetch(source);
       if (!response.ok) {
-        throw new Error(`ol-gpu: could not load shader wasm from ${source} (${response.status})`);
+        throw new Error(`ol-webgpu: could not load shader wasm from ${source} (${response.status})`);
       }
       module = await WebAssembly.compile(await response.arrayBuffer());
     } else {

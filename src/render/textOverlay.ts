@@ -79,7 +79,7 @@ export class TextOverlay {
     });
     this.worker.catch((e) => {
       // labels are lost, but the layer must still render its geometries
-      console.warn('ol-gpu: text worker unavailable, labels are not drawn', e);
+      console.warn('ol-webgpu: text worker unavailable, labels are not drawn', e);
       this.failed = true;
       this.pending.forEach((resolve) => resolve({}));
       this.pending.clear();

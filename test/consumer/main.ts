@@ -1,5 +1,5 @@
 /**
- * Uses the built package (dist/, aliased as 'ol-gpu' by vite.config.ts here)
+ * Uses the built package (dist/, aliased as 'ol-webgpu' by vite.config.ts here)
  * the way an app would. ?case=auto | webgl2 | fallback (WebGPU adapter
  * forced to fail, so GpuVectorLayer must switch to WebGL2 at runtime).
  * Result in window.__result: backend used, centre pixel colour, picked ids.
@@ -9,7 +9,7 @@ import Map from 'ol/Map.js';
 import View from 'ol/View.js';
 import Point from 'ol/geom/Point.js';
 import VectorSource from 'ol/source/Vector.js';
-import {GpuVectorLayer, WebGL2VectorLayer} from 'ol-gpu';
+import {GpuVectorLayer, WebGL2VectorLayer} from 'ol-webgpu';
 
 const testCase = new URLSearchParams(location.search).get('case') ?? 'auto';
 if (testCase === 'fallback' && 'gpu' in navigator) {

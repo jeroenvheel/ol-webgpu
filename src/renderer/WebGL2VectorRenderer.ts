@@ -84,7 +84,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
         preserveDrawingBuffer: this.preserveDrawingBuffer,
       });
       if (!gl) {
-        throw new Error('ol-gpu: WebGL2 is not supported in this browser');
+        throw new Error('ol-webgpu: WebGL2 is not supported in this browser');
       }
       this.gl = gl;
       this.applyPasses();
@@ -118,7 +118,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       gl.shaderSource(s, src);
       gl.compileShader(s);
       if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost()) {
-        throw new Error(`ol-gpu: ${type === gl.VERTEX_SHADER ? 'vertex' : 'fragment'} shader compilation failed: ${gl.getShaderInfoLog(s)}`);
+        throw new Error(`ol-webgpu: ${type === gl.VERTEX_SHADER ? 'vertex' : 'fragment'} shader compilation failed: ${gl.getShaderInfoLog(s)}`);
       }
       return s;
     };
@@ -131,7 +131,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     gl.deleteShader(vs);
     gl.deleteShader(fs);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS) && !gl.isContextLost()) {
-      throw new Error(`ol-gpu: program link failed: ${gl.getProgramInfoLog(program)}`);
+      throw new Error(`ol-webgpu: program link failed: ${gl.getProgramInfoLog(program)}`);
     }
     return program;
   }

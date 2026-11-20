@@ -2,7 +2,7 @@
 name = "ol_gpu_core"
 version = "0.1.0"
 edition = "2024"
-description = "Geometry tessellation and spatial index for ol-gpu, compiled to WebAssembly"
+description = "Geometry tessellation and spatial index for ol-webgpu, compiled to WebAssembly"
 license = "BSD-2-Clause"
 publish = false
 
