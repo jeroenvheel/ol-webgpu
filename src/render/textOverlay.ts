@@ -70,6 +70,11 @@ export class TextOverlay {
         if (resolve) {
           this.pending.delete(e.data.id);
           resolve(e.data);
+        } else {
+          // Answer to a render that was replaced after the worker had drawn it:
+          // free the full-viewport bitmap now. Left to the garbage collector,
+          // one per frame forces full collections of the whole JS heap.
+          (e.data?.imageData as ImageBitmap | undefined)?.close?.();
         }
       });
       if (this.terminated) {

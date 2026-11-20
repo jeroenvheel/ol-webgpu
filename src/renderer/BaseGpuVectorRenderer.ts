@@ -7,6 +7,7 @@
  * (ol 10.11) so both new layers redraw exactly when ol's layer would.
  */
 import type {FeatureLike} from 'ol/Feature.js';
+import {getUid} from 'ol/util.js';
 import type {FrameState} from 'ol/Map.js';
 import ViewHint from 'ol/ViewHint.js';
 import type {Coordinate} from 'ol/coordinate.js';
@@ -77,6 +78,44 @@ export interface RebuildStats {
 }
 
 let mainThreadCore: Promise<Core> | null = null;
+
+/** Canvas group keys of the last frame's layers (computed once per frame, for all layers). */
+let groupKeys: {frameState: FrameState; keys: Map<unknown, string>} | null = null;
+
+/**
+ * Same grouping as ol's WebGL layers (renderer/webgl/Layer.js): consecutive
+ * layers of one surface type with the same class name share a canvas; any
+ * other layer in between starts a new group. Read from the layers
+ * (`getSurfaceType`), so no renderers are created for hidden layers.
+ */
+function surfaceKeys(frameState: FrameState): Map<unknown, string> {
+  if (groupKeys?.frameState === frameState) {
+    return groupKeys.keys;
+  }
+  const keys = new Map<unknown, string>();
+  const groups: Record<string, number> = {};
+  let previous: {type: string; className: string; key: string} | null = null;
+  for (const state of frameState.layerStatesArray) {
+    const layer = state.layer as Layer & {getSurfaceType?: () => string};
+    const type = layer.getSurfaceType?.();
+    if (!type) {
+      previous = null;
+      continue;
+    }
+    const className = layer.getClassName();
+    let key: string;
+    if (previous && previous.type === type && previous.className === className) {
+      key = previous.key;
+    } else {
+      groups[type] = (groups[type] ?? -1) + 1;
+      key = `${frameState.mapId}/${type}/${groups[type]}`;
+    }
+    keys.set(layer, key);
+    previous = {type, className, key};
+  }
+  groupKeys = {frameState, keys};
+  return keys;
+}
 
 /** Renderers currently alive (used by tests to wait until everything is drawn). */
 export const liveRenderers = new Set<BaseGpuVectorRenderer<unknown>>();
@@ -184,28 +223,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
    * (`getSurfaceType`), so no renderers are created for hidden layers.
    */
   private surfaceKey(frameState: FrameState): string {
-    const type = this.surfaceType();
-    const own = this.getLayer();
-    let group = -1;
-    let newGroup = true;
-    let className: string | undefined;
-    for (const state of frameState.layerStatesArray) {
-      const layer = state.layer as Layer & {getSurfaceType?: () => string};
-      if ((layer === own ? type : layer.getSurfaceType?.()) !== type) {
-        newGroup = true;
-        continue;
-      }
-      const layerClassName = layer.getClassName();
-      if (newGroup || layerClassName !== className) {
-        group++;
-        newGroup = false;
-      }
-      className = layerClassName;
-      if (layer === own) {
-        break;
-      }
-    }
-    return `${frameState.mapId}/${type}/${group}`;
+    return surfaceKeys(frameState).get(this.getLayer()) ?? `${frameState.mapId}/${this.surfaceType()}/${getUid(this)}`;
   }
 
   private updateSurface(frameState: FrameState) {
