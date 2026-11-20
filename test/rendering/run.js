@@ -128,6 +128,25 @@ for (const name of cases) {
     if (name in COMPARE_WITH_OL) {
       // ol's layer has no readiness signal for its text overlay: give its worker time
       await page.waitForTimeout(500);
+      if (layer === 'ol') {
+        // On a slow machine that is not enough, and the reference would be
+        // an image without text. The text shows as a change of the page:
+        // wait for one (none within the time means the text was there
+        // already), then until the page stays the same.
+        let last = await page.screenshot();
+        let changed = false;
+        for (let waited = 0; waited < (changed ? 6000 : 3000); waited += 250) {
+          await page.waitForTimeout(250);
+          const now = await page.screenshot();
+          const same = now.equals(last);
+          last = now;
+          if (!same) {
+            changed = true;
+          } else if (changed) {
+            break;
+          }
+        }
+      }
     }
     // let the map draw the final state
     await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
