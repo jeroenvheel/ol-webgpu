@@ -1,0 +1,78 @@
+name: Release
+
+# Publishes to npm when a version tag is pushed (git tag v0.1.0-beta.1 && git push origin v0.1.0-beta.1).
+# Uses npm trusted publishing: no token, the job proves its identity to npm with GitHub's OIDC token.
+# npm must list this repository, this workflow file and the `npm` environment as the package's
+# trusted publisher (npmjs.com → package → Settings → Trusted Publisher).
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for npm trusted publishing (and provenance)
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # GitHub environment: add required reviewers in the repository settings to approve each release
+    environment: npm
+    env:
+      # test/browser.js: software rendering (SwiftShader) on the GPU-less runner
+      CI: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      # trusted publishing needs npm 11.5.1 or later
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Tag matches package.json version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+          # prereleases (1.0.0-beta.1, 1.0.0-rc.0) go to `next`, releases to `latest`
+          case "$version" in *-*) tag=next ;; *) tag=latest ;; esac
+          echo "DIST_TAG=$tag" >> "$GITHUB_ENV"
+          echo "publishing $version as $tag"
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/*/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/*/Cargo.lock', 'crates/*/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      # for `test:dist`, which prepublishOnly runs before publishing
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # prepublishOnly: npm run build (wasm, bundle, types) && npm run test:dist
+      - name: Publish
+        run: npm publish --tag "$DIST_TAG"

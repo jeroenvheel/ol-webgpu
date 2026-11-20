@@ -183,11 +183,21 @@ they use SwiftShader, which provides both WebGL2 and WebGPU without a GPU.
 Without a WebGPU adapter, `test:rendering` skips the WebGPU layer with a
 warning; `--require-webgpu` makes that an error.
 
-**Releasing.** `npm publish` runs `prepublishOnly` first (`npm run build`,
+**Releasing.** Set the version, commit, and push a matching tag:
+
+```sh
+npm version 0.1.0-beta.1 --no-git-tag-version   # or edit package.json
+git commit -am "Release 0.1.0-beta.1"
+git tag v0.1.0-beta.1 && git push origin main v0.1.0-beta.1
+```
+
+The `Release` workflow (`.github/workflows/release.yml`) then publishes to
+npm with trusted publishing: no npm token, the job identifies itself to npm
+with GitHub's OIDC token, and npm adds a provenance statement. Versions
+with a `-` (beta, rc) are published under the `next` tag, others under
+`latest`. `npm publish` runs `prepublishOnly` first (`npm run build`,
 including the wasm, then `npm run test:dist`), so the package is always
-built from the current sources. `publishConfig.tag` is `next` while the
-package is in beta; set it to `latest` (or remove it) for a stable release.
-Check the contents with `npm pack --dry-run`.
+built from the tagged sources. Check the contents with `npm pack --dry-run`.
 
 **CI.** GitHub Actions (`.github/workflows/ci.yml`) runs on every push to
 `main` and on pull requests (Ubuntu, SwiftShader): wasm build, typecheck,
