@@ -124,7 +124,8 @@ export default abstract class BaseGpuVectorRenderer<B> extends LayerRenderer<Lay
     this.uniformState = new UniformState(this.passes.uniforms);
     this.worker = WorkerClient.shared(options);
     this.textOverlay = this.passes.hasText ? new TextOverlay() : null;
-    this.ready = false;
+    // Ready until the first rebuild starts, like ol's renderers: a layer outside its
+    // zoom range never prepares a frame and must not hold back `rendercomplete`.
     liveRenderers.add(this as BaseGpuVectorRenderer<unknown>);
 
     this.canvas = document.createElement('canvas');

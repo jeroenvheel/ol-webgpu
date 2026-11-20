@@ -122,6 +122,8 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     if (this.initError) {
       return false;
     }
+    // A layer in view waits for its device before the map reports rendercomplete.
+    this.ready = false;
     this.initializing ??= (async () => {
       try {
         const [device, translator] = await Promise.all([
