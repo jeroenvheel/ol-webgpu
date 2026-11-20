@@ -13,13 +13,17 @@ import type {GeneratedBuffers} from '../wasm/core.js';
 const QUAD_INDICES = [0, 1, 3, 1, 2, 3];
 const QUAD_VERTICES = [-1, -1, 1, -1, 1, 1, -1, 1];
 
+/**
+ * Point instances have the layout of the point instructions: they are the
+ * same array (not a copy), cut to whole points.
+ */
 export function buildPointsJs(instructions: Float32Array, customSize: number): GeneratedBuffers {
   const stride = 2 + customSize;
   const count = Math.floor(instructions.length / stride);
   return {
     indices: Uint32Array.from(QUAD_INDICES),
     vertices: Float32Array.from(QUAD_VERTICES),
-    instances: instructions.slice(0, count * stride),
+    instances: instructions.subarray(0, count * stride),
   };
 }
 

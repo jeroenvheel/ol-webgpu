@@ -14,8 +14,7 @@ import type {GlyphAtlas} from '../text/atlas.js';
 import {INSTANCE_ATTRIBUTES, INSTANCE_FLOATS, type LabelSet} from '../text/layout.js';
 import {LABEL_UNIFORM_FLOATS, LABEL_WGSL, QUAD, writeLabelUniforms} from '../text/shaders.js';
 import {type ShaderTranslator, type WgslProgram, loadShaderTranslator} from '../wasm/shader.js';
-import {flushSubmits, frameEncoder, getDevice, onDeviceLost, preferredFormat} from '../webgpu/device.js';
-import {surfaceType} from '../render/surface.js';
+import {destroyAfterSubmit, flushSubmits, frameEncoder, getDevice, onDeviceLost, preferredFormat} from '../webgpu/device.js';
 import {PREMULTIPLIED_BLEND, WebGPUSurface, compositePipeline} from '../webgpu/surface.js';
 import type {BufferSet} from '../worker/protocol.js';
 import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
@@ -58,10 +57,7 @@ function atlasTexture(device: GPUDevice, atlas: GlyphAtlas, set: LabelSet): Atla
   let entry = atlasTextures.get(device);
   const canvas = atlas.canvas;
   if (!entry || entry.canvas !== canvas) {
-    if (entry) {
-      flushSubmits();
-      entry.texture.destroy();
-    }
+    destroyAfterSubmit(entry?.texture);
     const texture = device.createTexture({
       size: [canvas.width, canvas.height],
       format: 'rgba8unorm',
@@ -117,7 +113,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   private blockSize = 16;
   /**
    * Offscreen image of the layer, for layers composited onto the shared
-   * canvas with an opacity below 1 or with labels (as ol does for every layer).
+   * canvas with an opacity below 1 or with a text image (as ol does for every layer).
    */
   private offscreen: {
     texture: GPUTexture;
@@ -153,9 +149,9 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   onInitError: ((error: unknown) => void) | null = null;
 
   constructor(layer: Layer<VectorSource>, options: WebGPURendererOptions) {
-    super(layer, options);
+    super(layer, options, 'webgpu');
     this.shaderWasmUrl = options.shaderWasmUrl;
-    this.sampleCount = options.antialias ? 4 : 1;
+    this.sampleCount = this.antialias ? 4 : 1;
     this.unlistenLost = onDeviceLost(() => {
       this.device = null;
       this.initializing = null;
@@ -181,10 +177,6 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     this.placeholder = null;
   }
 
-  protected surfaceType(): string {
-    return surfaceType('webgpu', this.antialias, this.preserveDrawingBuffer);
-  }
-
   protected createSurface(key: string, className: string): WebGPUSurface {
     return new WebGPUSurface(key, className, this.sampleCount, this.preserveDrawingBuffer);
   }
@@ -195,6 +187,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
 
   protected prepareBackend(): boolean {
     if (this.device && this.translator) {
+      this.backendPending = false;
       this.surface!.configure(this.device, this.format);
       return true;
     }
@@ -202,7 +195,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       return false;
     }
     // A layer in view waits for its device before the map reports rendercomplete.
-    this.ready = false;
+    this.backendPending = true;
     this.initializing ??= (async () => {
       try {
         const [device, translator] = await Promise.all([
@@ -219,7 +212,8 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         this.getLayer()?.changed();
       } catch (e) {
         this.initError = e;
-        this.ready = true; // do not block rendercomplete
+        this.backendPending = false; // do not block rendercomplete
+        this.updateReady();
         this.framesSinceReady = Infinity;
         if (this.onInitError) {
           this.onInitError(e);
@@ -323,10 +317,9 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   }
 
   protected release(b: GPUBuffers) {
-    flushSubmits(); // the recorded frame may still use these buffers
-    b.index?.destroy();
-    b.vertex?.destroy();
-    b.instance?.destroy();
+    destroyAfterSubmit(b.index);
+    destroyAfterSubmit(b.vertex);
+    destroyAfterSubmit(b.instance);
   }
 
   private textureFor(name: string, source: unknown): GPUTextureView {
@@ -346,10 +339,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     if (entry && entry.source === source) {
       return entry.view;
     }
-    if (entry) {
-      flushSubmits();
-      entry.texture.destroy();
-    }
+    destroyAfterSubmit(entry?.texture);
     const width = (source as any).naturalWidth || (source as any).width;
     const height = (source as any).naturalHeight || (source as any).height;
     const texture = device.createTexture({
@@ -412,21 +402,25 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     const height = surface.canvas.height;
     surface.record({redraw: () => this.draw(frameState, worlds, worldWidth, opacity)});
 
+    const text = this.prepareText(frameState);
+    const labels = this.prepareLabels(frameState);
+    const plan = this.framePlan(opacity, text !== null);
+    if (!plan) {
+      return context;
+    }
+
     // collect draw calls; one uniform slot per (world, program)
     const calls: DrawCall[] = [];
     const slotValues: Array<{pipe: Pipeline; values: Map<string, ResolvedUniform>}> = [];
-    const b = this.buffers;
-    if (b) {
+    if (plan.draws.length) {
+      const invert = this.buffers!.invertVerticesTransform;
       for (const world of worlds) {
         this.worldTransform(frameState, world, worldWidth, this.transform);
-        const values = this.uniformState.compute(frameState, this.transform, b.invertVerticesTransform, height);
+        const values = this.uniformState.compute(frameState, this.transform, invert, height);
         for (const p of this.pipelines) {
-          for (const [pipe, set] of [
-            [p.fill, b.polygons],
-            [p.stroke, b.lines],
-            [p.symbol, b.points],
-          ] as const) {
-            if (pipe && set && set.gpu.indexCount > 0 && set.gpu.vertex && set.gpu.index) {
+          for (const {kind, set} of plan.draws) {
+            const pipe = p[kind];
+            if (pipe && set.gpu.vertex && set.gpu.index) {
               calls.push({pipe, set, slot: slotValues.length});
               slotValues.push({pipe, values});
             }
@@ -435,21 +429,12 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       }
     }
 
-    const text = this.prepareText(frameState);
-    const labels = this.prepareLabels(frameState);
-    if (!calls.length && !text && !labels) {
-      return context; // nothing to draw: the surface clears at the end of the frame if needed
-    }
-
     // uniform buffer: aligned slots, written once per frame
     const align = device.limits.minUniformBufferOffsetAlignment;
     const slotSize = Math.ceil(this.blockSize / align) * align;
     const needed = Math.max(1, slotValues.length) * slotSize;
     if (!this.uniformBuffer || this.uniformBuffer.size < needed) {
-      if (this.uniformBuffer) {
-        flushSubmits();
-        this.uniformBuffer.destroy();
-      }
+      destroyAfterSubmit(this.uniformBuffer);
       this.uniformBuffer = device.createBuffer({size: Math.max(needed, 4 * slotSize), usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-webgpu uniforms'});
       this.uniformStaging = new ArrayBuffer(this.uniformBuffer.size);
       this.uniformView = new DataView(this.uniformStaging);
@@ -467,12 +452,9 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       }
     }
 
-    // Render passes go into the frame's shared encoder (see device.ts). With
-    // full opacity and no labels the layer draws straight onto the shared
-    // canvas (blending each feature over the canvas gives the same result as
-    // compositing the layer image); otherwise into its own image first.
+    // render passes go into the frame's shared encoder (see device.ts)
     const encoder = frameEncoder(device);
-    const offscreen = opacity < 1 || text !== null ? this.offscreenTarget(width, height) : null;
+    const offscreen = plan.offscreen ? this.offscreenTarget(width, height) : null;
     const pass = offscreen
       ? encoder.beginRenderPass({
           colorAttachments: [
@@ -535,11 +517,8 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     let o = this.offscreen;
     if (!o || o.texture.width !== width || o.texture.height !== height) {
       const device = this.device!;
-      if (o) {
-        flushSubmits();
-        o.texture.destroy();
-        o.msaa?.texture.destroy();
-      }
+      destroyAfterSubmit(o?.texture);
+      destroyAfterSubmit(o?.msaa?.texture);
       const texture = device.createTexture({
         size: [width, height],
         format: this.format,
@@ -635,10 +614,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     const {set, worlds} = frame;
     const atlas = atlasTexture(device, frame.atlas, set);
     if (r.set !== set.id || !r.instances) {
-      if (r.instances) {
-        flushSubmits();
-        r.instances.destroy();
-      }
+      destroyAfterSubmit(r.instances);
       r.instances = device.createBuffer({size: set.instances.byteLength, usage: GPUBufferUsage.VERTEX, mappedAtCreation: true, label: 'ol-webgpu glyphs'});
       new Float32Array(r.instances.getMappedRange()).set(set.instances);
       r.instances.unmap();
@@ -650,10 +626,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       used.add(w.world);
       let o = r.opacity.get(w.world);
       if (!o || o.set !== set.id) {
-        if (o) {
-          flushSubmits();
-          o.buffer.destroy();
-        }
+        destroyAfterSubmit(o?.buffer);
         o = {
           buffer: device.createBuffer({size: w.opacity.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: 'ol-webgpu glyph opacity'}),
           version: -1,
@@ -669,8 +642,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     }
     for (const [world, o] of r.opacity) {
       if (!used.has(world)) {
-        flushSubmits();
-        o.buffer.destroy();
+        destroyAfterSubmit(o.buffer);
         r.opacity.delete(world);
       }
     }
@@ -679,10 +651,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       r.uniformData = new Float32Array(worlds.length * floatsPerSlot);
     }
     if (!r.uniforms || r.uniforms.size < worlds.length * r.slotSize) {
-      if (r.uniforms) {
-        flushSubmits();
-        r.uniforms.destroy();
-      }
+      destroyAfterSubmit(r.uniforms);
       r.uniforms = device.createBuffer({size: Math.max(4, worlds.length) * r.slotSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-webgpu label uniforms'});
     }
     worlds.forEach((w, i) => {
@@ -767,10 +736,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     if (t.version !== text.image.version || !t.texture || !t.group) {
       t.version = text.image.version;
       if (!t.texture || t.texture.width !== canvas.width || t.texture.height !== canvas.height) {
-        if (t.texture) {
-          flushSubmits();
-          t.texture.destroy();
-        }
+        destroyAfterSubmit(t.texture);
         t.texture = device.createTexture({
           size: [canvas.width, canvas.height],
           format: 'rgba8unorm',

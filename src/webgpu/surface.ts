@@ -4,7 +4,7 @@
 import type {FrameState} from 'ol/Map.js';
 import ViewHint from 'ol/ViewHint.js';
 import {Surface} from '../render/surface.js';
-import {flushSubmits, frameEncoder, submitEpoch} from './device.js';
+import {destroyAfterSubmit, flushSubmits, frameEncoder, submitEpoch} from './device.js';
 
 /** Composites a layer's offscreen image onto the canvas with the layer opacity. */
 const COMPOSITE_WGSL = `
@@ -153,10 +153,7 @@ export class WebGPUSurface extends Surface {
   private msaaView(): GPUTextureView {
     const {width, height} = this.canvas;
     if (!this.msaa || this.msaa.texture.width !== width || this.msaa.texture.height !== height) {
-      if (this.msaa) {
-        flushSubmits();
-        this.msaa.texture.destroy();
-      }
+      destroyAfterSubmit(this.msaa?.texture);
       const texture = this.device!.createTexture({size: [width, height], sampleCount: this.sampleCount, format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT});
       this.msaa = {texture, view: texture.createView()};
     }

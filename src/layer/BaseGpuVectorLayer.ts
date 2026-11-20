@@ -3,7 +3,7 @@ import {type EventsKey, listen, unlistenByKey} from 'ol/events.js';
 import Layer, {type Options as LayerOptions} from 'ol/layer/Layer.js';
 import type VectorSource from 'ol/source/Vector.js';
 import type {FlatStyleLike, StyleVariables} from 'ol/style/flat.js';
-import {surfaceType} from '../render/surface.js';
+import {surfaceSpec, surfaceType} from '../render/surface.js';
 import type BaseGpuVectorRenderer from '../renderer/BaseGpuVectorRenderer.js';
 
 export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> extends Omit<LayerOptions<S>, 'render'> {
@@ -65,7 +65,7 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
    * @internal
    */
   getSurfaceType(): string {
-    return surfaceType(this.getBackend(), this.gpuOptions.antialias ?? false, this.gpuOptions.preserveDrawingBuffer ?? true);
+    return surfaceType(surfaceSpec(this.getBackend(), this.gpuOptions));
   }
 
   protected rendererOptions() {

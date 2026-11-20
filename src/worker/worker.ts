@@ -33,9 +33,6 @@ self.onmessage = async (event: MessageEvent<BuildRequest | InitMessage>) => {
     resolveInit(req.wasmUrl);
     return;
   }
-  if (req.type !== 'build') {
-    return;
-  }
   await coreReady;
   const timings: Record<string, number> = {};
   const time = <T>(name: string, fn: () => T): T => {
@@ -60,18 +57,14 @@ self.onmessage = async (event: MessageEvent<BuildRequest | InitMessage>) => {
     timings,
   };
   try {
+    // the point instances are the point instructions, which go back as they came
+    response.points = points && time('points', () => buildPointsJs(points, req.customSize));
     if (core) {
-      const c = core;
-      response.points = points && time('points', () => c.buildPoints(points, req.customSize));
-      response.lines = lines && time('lines', () => c.buildLines(lines, req.customSize, invert));
-      response.polygons = polygons && time('polygons', () => c.buildPolygons(polygons, req.customSize));
-      if (req.indexTransform) {
-        response.index = time('index', () =>
-          c.buildIndex(points, lines, polygons, req.customSize, req.refOffset, req.indexTransform!),
-        );
-      }
+      const built = core.buildAll(points, lines, polygons, req.customSize, invert, req.indexTransform, req.refOffset, timings);
+      response.lines = built.lines;
+      response.polygons = built.polygons;
+      response.index = built.index;
     } else {
-      response.points = points && time('points', () => buildPointsJs(points, req.customSize));
       response.lines = lines && time('lines', () => buildLinesJs(lines, req.customSize, invert));
       response.polygons = polygons && time('polygons', () => buildPolygonsJs(polygons, req.customSize));
     }

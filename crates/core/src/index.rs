@@ -40,6 +40,15 @@ pub struct PackedIndex {
     data: Vec<f32>,
 }
 
+/// Working memory of a query, kept between queries so they do not allocate.
+#[derive(Default)]
+pub struct QueryScratch {
+    /// kind, seq, ref, distance
+    found: Vec<(u32, u32, u32, f64)>,
+    /// node position, level
+    stack: Vec<(usize, usize)>,
+}
+
 struct Item {
     bbox: [f32; 4],
     kind: u32,
@@ -274,14 +283,21 @@ impl PackedIndex {
     /// Appends `[ref, kind, seq, distance bits]` for each item within `radius`,
     /// deduplicated per geometry and sorted topmost first.
     pub fn query(&self, x: f64, y: f64, radius: f64, hits: &mut Vec<u32>) {
+        self.query_with(x, y, radius, hits, &mut QueryScratch::default());
+    }
+
+    /// `query` with working memory to reuse.
+    pub fn query_with(&self, x: f64, y: f64, radius: f64, hits: &mut Vec<u32>, scratch: &mut QueryScratch) {
         hits.clear();
         if self.num_items == 0 {
             return;
         }
-        let mut found: Vec<(u32, u32, u32, f64)> = Vec::new(); // kind, seq, ref, distance
+        let QueryScratch { found, stack } = scratch;
+        found.clear();
+        stack.clear();
         let n = self.num_items;
         let root = self.num_nodes - 1;
-        let mut stack: Vec<(usize, usize)> = vec![(root, self.levels - 1)];
+        stack.push((root, self.levels - 1));
 
         while let Some((node, level)) = stack.pop() {
             let end = (node + NODE_SIZE).min(self.word(HEADER + level) as usize);
@@ -313,7 +329,7 @@ impl PackedIndex {
             b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.3.total_cmp(&b.3))
         });
         let mut last: Option<(u32, u32)> = None;
-        for (kind, seq, r, d) in found {
+        for &(kind, seq, r, d) in found.iter() {
             if last == Some((kind, seq)) {
                 continue;
             }

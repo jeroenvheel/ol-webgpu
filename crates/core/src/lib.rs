@@ -18,6 +18,7 @@ struct State {
     earcut: earcut::Earcut<f64>,
     index: index::PackedIndex,
     hits: Vec<u32>,
+    query: index::QueryScratch,
 }
 
 thread_local! {
@@ -26,6 +27,7 @@ thread_local! {
         earcut: earcut::Earcut::new(),
         index: index::PackedIndex::default(),
         hits: Vec::new(),
+        query: index::QueryScratch::default(),
     });
 }
 
@@ -196,8 +198,8 @@ pub unsafe extern "C" fn olgpu_index_load(ptr: *const f32, len: usize) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn olgpu_index_query(x: f64, y: f64, radius: f64) -> usize {
     STATE.with_borrow_mut(|s| {
-        let State { index, hits, .. } = s;
-        index.query(x, y, radius, hits);
+        let State { index, hits, query, .. } = s;
+        index.query_with(x, y, radius, hits, query);
         hits.len() / 4
     })
 }

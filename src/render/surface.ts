@@ -88,9 +88,23 @@ export abstract class Surface {
   }
 }
 
-/** Layers share a canvas only when this matches: the backend plus the options fixed per canvas. */
-export function surfaceType(backend: 'webgpu' | 'webgl2', antialias: boolean, preserveDrawingBuffer: boolean): string {
-  return `${backend}/${antialias ? 1 : 0}/${preserveDrawingBuffer ? 1 : 0}`;
+/** What is fixed per canvas: the backend and the options its context is created with. */
+export interface SurfaceSpec {
+  backend: 'webgpu' | 'webgl2';
+  /** Multisample antialiasing. */
+  antialias: boolean;
+  /** Keep the drawing buffer after compositing (needed for map export). */
+  preserveDrawingBuffer: boolean;
+}
+
+/** The spec for a layer's options; the defaults of the two options are here and nowhere else. */
+export function surfaceSpec(backend: SurfaceSpec['backend'], options: {antialias?: boolean; preserveDrawingBuffer?: boolean}): SurfaceSpec {
+  return {backend, antialias: options.antialias ?? false, preserveDrawingBuffer: options.preserveDrawingBuffer ?? true};
+}
+
+/** Layers share a canvas only when this matches. */
+export function surfaceType(spec: SurfaceSpec): string {
+  return `${spec.backend}/${spec.antialias ? 1 : 0}/${spec.preserveDrawingBuffer ? 1 : 0}`;
 }
 
 const surfaces = new Map<string, Surface>();

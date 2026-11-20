@@ -4,6 +4,8 @@
  * 32-bit indices, on a canvas shared with the layers next to it.
  */
 import type {FrameState} from 'ol/Map.js';
+import type Layer from 'ol/layer/Layer.js';
+import type VectorSource from 'ol/source/Vector.js';
 import {create as createTransform} from 'ol/transform.js';
 import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js';
 import {TEXT_OVERLAY_GLSL, type TextImage} from '../render/textOverlay.js';
@@ -12,10 +14,9 @@ import type {GlyphAtlas} from '../text/atlas.js';
 import {INSTANCE_ATTRIBUTES, INSTANCE_FLOATS, type LabelSet} from '../text/layout.js';
 import {LABEL_GLSL, LABEL_UNIFORMS, LABEL_UNIFORM_FLOATS, QUAD, writeLabelUniforms} from '../text/shaders.js';
 import type {BufferSet} from '../worker/protocol.js';
-import {surfaceType} from '../render/surface.js';
 import {linkProgram, uploadCanvas} from '../webgl2/program.js';
 import {WebGL2Surface} from '../webgl2/surface.js';
-import BaseGpuVectorRenderer, {type UploadedSet} from './BaseGpuVectorRenderer.js';
+import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
 
 interface GLBuffers {
   index: WebGLBuffer;
@@ -81,8 +82,8 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   private text: {program: WebGLProgram; texture: WebGLTexture; version: number; sampler: WebGLUniformLocation; matrix: WebGLUniformLocation} | null = null;
   /**
    * Offscreen image of the layer, for layers composited onto the shared
-   * canvas with an opacity below 1 or with labels (as ol does for every
-   * layer); multisampled into a renderbuffer first when antialiasing.
+   * canvas with an opacity below 1 or with a text image (as ol does for
+   * every layer); multisampled into a renderbuffer first when antialiasing.
    */
   private offscreen: {
     width: number;
@@ -91,6 +92,10 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     framebuffer: WebGLFramebuffer;
     msaa: {renderbuffer: WebGLRenderbuffer; framebuffer: WebGLFramebuffer} | null;
   } | null = null;
+
+  constructor(layer: Layer<VectorSource>, options: GpuVectorRendererOptions) {
+    super(layer, options, 'webgl2');
+  }
 
   /** @internal Called by the shared surface. */
   onContextLost() {
@@ -156,10 +161,6 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       }
     }
     this.offscreen = null;
-  }
-
-  protected surfaceType(): string {
-    return surfaceType('webgl2', this.antialias, this.preserveDrawingBuffer);
   }
 
   protected createSurface(key: string, className: string): WebGL2Surface {
@@ -387,17 +388,13 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     const gl = this.gl!;
     const surface = this.surface!;
     const {width, height} = surface.canvas;
-    const b = this.buffers;
     const text = this.textImage(frameState);
     const labels = this.labelFrame;
-    if (!text && !labels && !(b && [b.polygons, b.lines, b.points].some((set) => set && set.gpu.indexCount > 0))) {
-      return gl; // nothing to draw: the surface clears at the end of the frame if needed
+    const plan = this.framePlan(opacity, !!text);
+    if (!plan) {
+      return gl;
     }
-
-    // With full opacity and no labels the layer draws straight onto the
-    // shared canvas (blending each feature over the canvas gives the same
-    // result as compositing the layer image); otherwise into its own image.
-    const offscreen = opacity < 1 || text ? this.offscreenTarget(width, height) : null;
+    const offscreen = plan.offscreen ? this.offscreenTarget(width, height) : null;
     if (offscreen) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, offscreen.msaa?.framebuffer ?? offscreen.framebuffer);
       gl.viewport(0, 0, width, height);
@@ -410,14 +407,15 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
 
-    if (b) {
+    if (plan.draws.length) {
+      const invert = this.buffers!.invertVerticesTransform;
       for (const world of worlds) {
         this.worldTransform(frameState, world, worldWidth, this.transform);
-        const values = this.uniformState.compute(frameState, this.transform, b.invertVerticesTransform, height);
+        const values = this.uniformState.compute(frameState, this.transform, invert, height);
         for (const p of this.programs) {
-          this.drawSet(p.fill, b.polygons, values);
-          this.drawSet(p.stroke, b.lines, values);
-          this.drawSet(p.symbol, b.points, values);
+          for (const {kind, set} of plan.draws) {
+            this.drawSet(p[kind], set, values);
+          }
         }
       }
     }

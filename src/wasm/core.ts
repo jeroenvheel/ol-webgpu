@@ -71,19 +71,78 @@ export class Core {
   }
 
   /** Copies `data` into wasm memory, runs `fn(ptr, len)`, then frees it. */
-  private withInput<T>(data: Float32Array, fn: (ptr: number, len: number) => T): T {
-    const bytes = data.byteLength;
+  private withInput<T>(data: Float32Array | null, fn: (ptr: number, len: number) => T): T {
+    const bytes = data?.byteLength ?? 0;
     const ptr = bytes ? this.ex.olgpu_alloc(bytes) : 0;
-    if (bytes) {
+    if (data && bytes) {
       new Float32Array(this.ex.memory.buffer, ptr, data.length).set(data);
     }
     try {
-      return fn(ptr, data.length);
+      return fn(ptr, data?.length ?? 0);
     } finally {
       if (bytes) {
         this.ex.olgpu_free(ptr, bytes);
       }
     }
+  }
+
+  /**
+   * Everything a rebuild needs from the instructions of a layer, with each
+   * array copied into wasm memory once: the hit index (when
+   * `indexTransform` is given), then the buffers of lines and polygons.
+   * Point instances are the point instructions themselves, so those are
+   * not built here (see `buildPointsJs`).
+   */
+  buildAll(
+    points: Float32Array | null,
+    lines: Float32Array | null,
+    polygons: Float32Array | null,
+    customSize: number,
+    toWorld: Transform,
+    indexTransform: ArrayLike<number> | null,
+    refOffset = 0,
+    timings: Record<string, number> = {},
+  ): {lines: GeneratedBuffers | null; polygons: GeneratedBuffers | null; index: Float32Array | null} {
+    const ex = this.ex;
+    const time = <T>(name: string, fn: () => T): T => {
+      const t0 = performance.now();
+      const result = fn();
+      timings[name] = performance.now() - t0;
+      return result;
+    };
+    return this.withInput(lines, (lp, ll) =>
+      this.withInput(polygons, (gp, gl) => {
+        const t = indexTransform;
+        const index =
+          t &&
+          time('index', () =>
+            this.withInput(points, (pp, pl) => {
+              ex.olgpu_index_build(pp, pl, lp, ll, gp, gl, customSize, refOffset, t[0], t[1], t[2], t[3], t[4], t[5]);
+              return this.readIndex();
+            }),
+          );
+        const w = toWorld;
+        return {
+          index,
+          lines:
+            lines &&
+            time('lines', () => {
+              ex.olgpu_build_lines(lp, ll, customSize, w[0], w[1], w[2], w[3], w[4], w[5]);
+              return this.readOutputs();
+            }),
+          polygons:
+            polygons &&
+            time('polygons', () => {
+              ex.olgpu_build_polygons(gp, gl, customSize);
+              return this.readOutputs();
+            }),
+        };
+      }),
+    );
+  }
+
+  private readIndex(): Float32Array {
+    return new Float32Array(this.ex.memory.buffer, this.ex.olgpu_out_ptr(4), this.ex.olgpu_out_len(4)).slice();
   }
 
   private readOutputs(): GeneratedBuffers {
@@ -127,20 +186,15 @@ export class Core {
     refOffset: number,
     transform: ArrayLike<number> = [1, 0, 0, 1, 0, 0],
   ): Float32Array {
-    const empty = new Float32Array(0);
     const t = transform;
-    this.withInput(points ?? empty, (pp, pl) =>
-      this.withInput(lines ?? empty, (lp, ll) =>
-        this.withInput(polygons ?? empty, (gp, gl) =>
+    this.withInput(points, (pp, pl) =>
+      this.withInput(lines, (lp, ll) =>
+        this.withInput(polygons, (gp, gl) =>
           this.ex.olgpu_index_build(pp, pl, lp, ll, gp, gl, customSize, refOffset, t[0], t[1], t[2], t[3], t[4], t[5]),
         ),
       ),
     );
-    return new Float32Array(
-      this.ex.memory.buffer,
-      this.ex.olgpu_out_ptr(4),
-      this.ex.olgpu_out_len(4),
-    ).slice();
+    return this.readIndex();
   }
 
   loadIndex(serialized: Float32Array): boolean {
@@ -162,12 +216,7 @@ export class Core {
 
   /** Hits within `radius` of (x, y) in index space, topmost first. */
   queryIndex(x: number, y: number, radius: number): IndexHit[] {
-    const count = this.ex.olgpu_index_query(x, y, radius);
-    if (!count) {
-      return [];
-    }
-    const words = new Uint32Array(this.ex.memory.buffer, this.ex.olgpu_out_ptr(3), count * 4);
-    const floats = new Float32Array(words.buffer, words.byteOffset, count * 4);
+    const {count, words, floats} = this.queryIndexRaw(x, y, radius);
     const hits: IndexHit[] = new Array(count);
     for (let i = 0; i < count; i++) {
       hits[i] = {

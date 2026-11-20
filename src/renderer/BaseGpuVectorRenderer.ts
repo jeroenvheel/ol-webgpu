@@ -36,7 +36,7 @@ import {Picker} from '../render/picking.js';
 import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
 import GpuText, {type LabelFrame, resolveFrameLabels} from '../text/GpuText.js';
 import {type StylePasses, buildStylePasses} from '../render/stylePasses.js';
-import {type Surface, acquireSurface, releaseSurface} from '../render/surface.js';
+import {type Surface, type SurfaceSpec, acquireSurface, releaseSurface, surfaceSpec, surfaceType} from '../render/surface.js';
 import {UniformState, makeProjectionTransform} from '../render/uniforms.js';
 import {type Core, loadCore} from '../wasm/core.js';
 import {WorkerClient, type WorkerOptions} from '../worker/client.js';
@@ -62,6 +62,22 @@ export interface GpuVectorRendererOptions extends WorkerOptions {
   text?: 'gpu' | 'canvas';
   /** Declutter group for GPU text (false: labels may overlap). */
   declutter?: boolean | string | number;
+}
+
+/** The sub passes of a style pass and the buffers each draws, in draw order. */
+export const KINDS = [
+  ['fill', 'polygons'],
+  ['stroke', 'lines'],
+  ['symbol', 'points'],
+] as const;
+export type Kind = (typeof KINDS)[number][0];
+
+/** What a frame draws, the same for both backends. */
+export interface FramePlan<B> {
+  /** The buffers with something in them, in draw order. */
+  draws: Array<{kind: Kind; set: UploadedSet<B>}>;
+  /** Draw into the layer's own image first and composite that, instead of straight onto the canvas. */
+  offscreen: boolean;
 }
 
 export interface UploadedSet<B> {
@@ -137,6 +153,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   protected buffers: Uploaded<B> | null = null;
   /** Canvas shared with neighbouring layers of the same backend (set in prepareFrame). */
   protected surface: S | null = null;
+  protected readonly spec: SurfaceSpec;
   protected readonly preserveDrawingBuffer: boolean;
   protected readonly antialias: boolean;
   /** Last rebuild statistics. */
@@ -168,16 +185,22 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   gpuText: GpuText | null = null;
   /** The labels to draw in the current frame. */
   protected labelFrame: LabelFrame | null = null;
+  // `ready` (what `rendercomplete` waits for) follows from these, see `updateReady`
   /** Buffers are being built for the current view. */
   private building = false;
+  /** The buffers have text whose first image from ol's text worker has not arrived. */
+  private awaitingText = false;
+  /** The backend cannot draw yet (the WebGPU device is being requested). */
+  protected backendPending = false;
 
-  constructor(layer: Layer<VectorSource>, options: GpuVectorRendererOptions) {
+  constructor(layer: Layer<VectorSource>, options: GpuVectorRendererOptions, backend: SurfaceSpec['backend']) {
     super(layer);
     this.style = options.style;
     this.variables = options.variables;
     this.hitDetection = !options.disableHitDetection;
-    this.preserveDrawingBuffer = options.preserveDrawingBuffer ?? true;
-    this.antialias = options.antialias ?? false;
+    this.spec = surfaceSpec(backend, options);
+    this.preserveDrawingBuffer = this.spec.preserveDrawingBuffer;
+    this.antialias = this.spec.antialias;
     this.passes = buildStylePasses(this.style, this.variables);
     this.uniformState = new UniformState(this.passes.uniforms);
     this.worker = WorkerClient.shared(options);
@@ -216,11 +239,6 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
    * the layer opacity; returns the rendering context for render events.
    */
   protected abstract draw(frameState: FrameState, worlds: number[], worldWidth: number, opacity: number): unknown;
-  /**
-   * Layers share a canvas only when this matches: the backend plus every
-   * option that is fixed per canvas (context attributes, sample count).
-   */
-  protected abstract surfaceType(): string;
   protected abstract createSurface(key: string, className: string): S;
   /** The renderer moved to another canvas (`previous` is still alive until this returns). */
   protected abstract surfaceChanged(previous: S | null): void;
@@ -242,7 +260,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
    * (`getSurfaceType`), so no renderers are created for hidden layers.
    */
   private surfaceKey(frameState: FrameState): string {
-    return surfaceKeys(frameState).get(this.getLayer()) ?? `${frameState.mapId}/${this.surfaceType()}/${getUid(this)}`;
+    return surfaceKeys(frameState).get(this.getLayer()) ?? `${frameState.mapId}/${surfaceType(this.spec)}/${getUid(this)}`;
   }
 
   private updateSurface(frameState: FrameState) {
@@ -322,11 +340,23 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   // --- frame -----------------------------------------------------------
 
+  /** Sets `ready` from the state it follows from; the only place that does. */
+  protected updateReady() {
+    const ready = !this.building && !this.awaitingText && !this.backendPending && !this.gpuText?.pending;
+    if (ready && !this.ready) {
+      this.framesSinceReady = 0;
+    }
+    this.ready = ready;
+  }
+
   override prepareFrame(frameState: FrameState): boolean {
     this.updateSurface(frameState);
-    if (!this.prepareBackend(frameState)) {
-      return false;
-    }
+    const prepared = this.prepareBackend(frameState) && this.prepareData(frameState);
+    this.updateReady();
+    return prepared;
+  }
+
+  private prepareData(frameState: FrameState): boolean {
     if (!this.initialFeaturesAdded) {
       this.addInitialFeatures(frameState);
       this.initialFeaturesAdded = true;
@@ -361,19 +391,15 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       this.rebuild(frameState);
       this.previousExtent = frameExtent.slice();
     }
-    if (this.gpuText) {
-      this.gpuText.prepare(frameState, source);
-      // rendercomplete waits for the first labels, as it does for the buffers
-      this.ready = !this.building && !this.gpuText.pending;
-    }
+    this.gpuText?.prepare(frameState, source);
     return true;
   }
 
   private rebuild(frameState: FrameState) {
     const generation = ++this.generation;
     this.building = true;
-    this.ready = false;
     this.framesSinceReady = 0;
+    this.updateReady();
     const t0 = performance.now();
     const transform = makeProjectionTransform(frameState, createTransform(), true);
     const p = this.passes;
@@ -417,6 +443,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         }
         this.disposeBuffers();
         const up = (set: BufferSet | null) => (set ? {cpu: set, gpu: this.upload(set)} : null);
+        // with text, rendercomplete waits for the first image for these instructions (see requestText)
+        this.awaitingText = !!key;
         this.buffers = {
           polygons: up(response.polygons),
           lines: up(response.lines),
@@ -433,16 +461,15 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
           }
         }
         this.stats = {engine: response.engine, instructions: instructionsTime, worker: response.timings, total: performance.now() - t0};
-        // with labels, stay not-ready (no rendercomplete) until the first
-        // text image for these instructions has arrived (see requestText)
         this.building = false;
-        this.ready = !key && !this.gpuText?.pending;
+        this.updateReady();
         this.getLayer()?.changed();
       })
       .catch((e) => {
         console.error('ol-webgpu: buffer generation failed', e);
         this.building = false;
-        this.ready = true;
+        this.awaitingText = false;
+        this.updateReady();
       });
   }
 
@@ -463,10 +490,10 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       if (!updated || this.disposed || text !== this.textOverlay) {
         return;
       }
-      const firstImage = !this.ready && generation === this.generation && key !== null && key === this.buffers?.textKey;
+      const firstImage = this.awaitingText && generation === this.generation && key !== null && key === this.buffers?.textKey;
       if (firstImage) {
-        this.ready = true;
-        this.framesSinceReady = 0;
+        this.awaitingText = false;
+        this.updateReady();
       } else if (this.skipNextTextRender) {
         this.skipNextTextRender = false;
         return;
@@ -540,6 +567,26 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     }
   }
 
+  /** What this frame draws (null: nothing, the surface clears at the end of the frame if needed). */
+  protected framePlan(opacity: number, hasTextImage: boolean): FramePlan<B> | null {
+    const b = this.buffers;
+    const draws: FramePlan<B>['draws'] = [];
+    for (const [kind, name] of KINDS) {
+      const set = b?.[name];
+      if (set && set.cpu.indices.length > 0) {
+        draws.push({kind, set});
+      }
+    }
+    if (!draws.length && !hasTextImage && !this.labelFrame) {
+      return null;
+    }
+    // With full opacity the layer draws straight onto the shared canvas:
+    // blending each feature over the canvas gives the same result as
+    // compositing the layer image. A text image is composited as ol does it,
+    // which needs the layer's own image.
+    return {draws, offscreen: opacity < 1 || hasTextImage};
+  }
+
   /** World → clip transform for one rendered world copy. */
   protected worldTransform(frameState: FrameState, world: number, worldWidth: number, out: Transform): Transform {
     makeProjectionTransform(frameState, out);
@@ -605,8 +652,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   /** Frees the GPU buffers; the CPU copies stay for `reuploadBuffers`. */
   protected releaseBuffers() {
-    const b = this.buffers;
-    for (const set of b ? [b.polygons, b.lines, b.points] : []) {
+    for (const [, name] of KINDS) {
+      const set = this.buffers?.[name];
       if (set) {
         this.release(set.gpu);
       }
@@ -624,11 +671,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   /** Re-uploads all buffers from their CPU copies (after context/device loss). */
   protected reuploadBuffers() {
-    const b = this.buffers;
-    if (!b) {
-      return;
-    }
-    for (const set of [b.polygons, b.lines, b.points]) {
+    for (const [, name] of KINDS) {
+      const set = this.buffers?.[name];
       if (set) {
         set.gpu = this.upload(set.cpu);
       }

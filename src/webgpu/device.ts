@@ -45,6 +45,24 @@ export function getDevice(): Promise<GPUDevice> {
  */
 let frame: {device: GPUDevice; encoder: GPUCommandEncoder} | null = null;
 let epoch = 0;
+/** Resources the recorded frame may still use: destroyed once it is submitted. */
+const doomed: Array<{destroy(): void}> = [];
+
+/**
+ * Destroys a buffer or texture that is being replaced. The frame recorded
+ * so far may still draw with it, so it goes after that frame is submitted
+ * (at once when nothing is recorded).
+ */
+export function destroyAfterSubmit(resource: {destroy(): void} | null | undefined) {
+  if (!resource) {
+    return;
+  }
+  if (frame) {
+    doomed.push(resource);
+  } else {
+    resource.destroy();
+  }
+}
 
 /**
  * Increases with every submit. A canvas texture from `getCurrentTexture`
@@ -68,8 +86,7 @@ export function frameEncoder(d: GPUDevice): GPUCommandEncoder {
 
 /**
  * Submits the recorded frame. Called when the map has composed a frame (so a
- * canvas read in the same task sees it), before destroying resources the
- * frame may use, and from a microtask as a fallback.
+ * canvas read in the same task sees it) and from a microtask as a fallback.
  */
 export function flushSubmits() {
   const f = frame;
@@ -77,6 +94,9 @@ export function flushSubmits() {
   epoch++;
   if (f) {
     f.device.queue.submit([f.encoder.finish()]);
+  }
+  for (const resource of doomed.splice(0)) {
+    resource.destroy();
   }
 }
 
