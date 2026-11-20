@@ -1,6 +1,6 @@
 {
   "name": "ol-webgpu",
-  "version": "0.1.0-beta.0",
+  "version": "0.1.0-beta.1",
   "description": "WebGL2 and WebGPU vector layers for OpenLayers, with a Rust/WebAssembly geometry core",
   "type": "module",
   "license": "BSD-2-Clause",
@@ -10,7 +10,16 @@
   },
   "homepage": "https://github.com/jeroenvheel/ol-webgpu#readme",
   "bugs": "https://github.com/jeroenvheel/ol-webgpu/issues",
-  "keywords": ["openlayers", "ol", "webgpu", "webgl2", "webassembly", "rust", "map", "vector"],
+  "keywords": [
+    "openlayers",
+    "ol",
+    "webgpu",
+    "webgl2",
+    "webassembly",
+    "rust",
+    "map",
+    "vector"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
