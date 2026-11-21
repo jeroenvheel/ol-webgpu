@@ -38,7 +38,7 @@ import GpuText, {type LabelFrame, resolveFrameLabels} from '../text/GpuText.js';
 import {type StylePasses, buildStylePasses} from '../render/stylePasses.js';
 import {type Surface, type SurfaceSpec, acquireSurface, releaseSurface, surfaceSpec, surfaceType} from '../render/surface.js';
 import {UniformState, makeProjectionTransform} from '../render/uniforms.js';
-import {type Core, loadCore} from '../wasm/core.js';
+import {type Core, LARGE_MEMORY_BYTES, loadCore} from '../wasm/core.js';
 import {WorkerClient, type WorkerOptions} from '../worker/client.js';
 import type {BufferSet, BuildResponse} from '../worker/protocol.js';
 
@@ -81,7 +81,9 @@ export interface FramePlan<B> {
 }
 
 export interface UploadedSet<B> {
-  cpu: BufferSet;
+  /** The data, kept when the backend may have to upload it again (see `keepCpuCopies`). */
+  cpu: BufferSet | null;
+  indexCount: number;
   gpu: B;
 }
 
@@ -104,8 +106,12 @@ export interface RebuildStats {
 
 let mainThreadCore: Promise<Core> | null = null;
 
-/** Canvas group keys of the last frame's layers (computed once per frame, for all layers). */
-let groupKeys: {frameState: FrameState; keys: Map<unknown, string>} | null = null;
+/**
+ * Canvas group keys of a frame's layers (computed once per frame, for all
+ * layers). Weak: a frame state leads to its map, layers and features, which
+ * must not outlive the map because it was the last one to render.
+ */
+const groupKeys = new WeakMap<FrameState, Map<unknown, string>>();
 
 /**
  * Same grouping as ol's WebGL layers (renderer/webgl/Layer.js): consecutive
@@ -114,8 +120,9 @@ let groupKeys: {frameState: FrameState; keys: Map<unknown, string>} | null = nul
  * (`getSurfaceType`), so no renderers are created for hidden layers.
  */
 function surfaceKeys(frameState: FrameState): Map<unknown, string> {
-  if (groupKeys?.frameState === frameState) {
-    return groupKeys.keys;
+  const known = groupKeys.get(frameState);
+  if (known) {
+    return known;
   }
   const keys = new Map<unknown, string>();
   const groups: Record<string, number> = {};
@@ -138,7 +145,7 @@ function surfaceKeys(frameState: FrameState): Map<unknown, string> {
     keys.set(layer, key);
     previous = {type, className, key};
   }
-  groupKeys = {frameState, keys};
+  groupKeys.set(frameState, keys);
   return keys;
 }
 
@@ -185,6 +192,13 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   gpuText: GpuText | null = null;
   /** The labels to draw in the current frame. */
   protected labelFrame: LabelFrame | null = null;
+  /**
+   * Whether the uploaded data is also kept in memory, to upload it again
+   * at once when the context is lost or the layer moves to another canvas.
+   * Without it the buffers are built again then, which takes a moment, and
+   * the memory of a second copy of all buffers is saved.
+   */
+  protected readonly keepCpuCopies: boolean = true;
   // `ready` (what `rendercomplete` waits for) follows from these, see `updateReady`
   /** Buffers are being built for the current view. */
   private building = false;
@@ -232,7 +246,14 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   protected abstract prepareBackend(frameState: FrameState): boolean;
   /** Compile programs / pipelines for the current `passes`. */
   protected abstract applyPasses(): void;
-  protected abstract upload(set: BufferSet): B;
+  /**
+   * Uploads the buffers of one geometry kind. `reuse` is the previous
+   * upload of that kind, which is no longer drawn: its GPU buffers are
+   * written again where they are large enough, and released otherwise.
+   * A rebuild then allocates nothing, where new buffers for every rebuild
+   * pile up in the GPU process, which gives freed memory back late.
+   */
+  protected abstract upload(set: BufferSet, reuse?: B): B;
   protected abstract release(gpu: B): void;
   /**
    * Draw all worlds over what earlier layers drew on the shared canvas, with
@@ -441,14 +462,28 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
           }
           return;
         }
+        // the GPU buffers of the previous build go to the new one (see `upload`)
+        const old = this.buffers;
+        this.buffers = null;
         this.disposeBuffers();
-        const up = (set: BufferSet | null) => (set ? {cpu: set, gpu: this.upload(set)} : null);
+        if (old?.textKey) {
+          this.textOverlay?.dispose(old.textKey);
+        }
+        const up = (set: BufferSet | null, previous: UploadedSet<B> | null | undefined) => {
+          if (!set) {
+            if (previous) {
+              this.release(previous.gpu);
+            }
+            return null;
+          }
+          return {cpu: this.keepCpuCopies ? set : null, indexCount: set.indices.length, gpu: this.upload(set, previous?.gpu)};
+        };
         // with text, rendercomplete waits for the first image for these instructions (see requestText)
         this.awaitingText = !!key;
         this.buffers = {
-          polygons: up(response.polygons),
-          lines: up(response.lines),
-          points: up(response.points),
+          polygons: up(response.polygons, old?.polygons),
+          lines: up(response.lines, old?.lines),
+          points: up(response.points, old?.points),
           invertVerticesTransform: invert,
           textKey: key,
         };
@@ -573,7 +608,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     const draws: FramePlan<B>['draws'] = [];
     for (const [kind, name] of KINDS) {
       const set = b?.[name];
-      if (set && set.cpu.indices.length > 0) {
+      if (set && set.indexCount > 0) {
         draws.push({kind, set});
       }
     }
@@ -669,11 +704,23 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.picker?.clear();
   }
 
-  /** Re-uploads all buffers from their CPU copies (after context/device loss). */
+  /**
+   * Makes the buffers usable again after their GPU objects are gone
+   * (context or device lost, another canvas): uploaded from the CPU copies,
+   * or built again when there are none.
+   */
   protected reuploadBuffers() {
+    if (!this.buffers) {
+      return;
+    }
+    if (!this.keepCpuCopies) {
+      this.disposeBuffers();
+      this.previousExtent = createEmpty();
+      return;
+    }
     for (const [, name] of KINDS) {
-      const set = this.buffers?.[name];
-      if (set) {
+      const set = this.buffers[name];
+      if (set?.cpu) {
         set.gpu = this.upload(set.cpu);
       }
     }
@@ -682,6 +729,11 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   override disposeInternal() {
     liveRenderers.delete(this as BaseGpuVectorRenderer<unknown>);
     this.disposeBuffers();
+    const core = this.picker?.core;
+    if (core && core.indexCount === 0 && core.memoryBytes > LARGE_MEMORY_BYTES) {
+      // wasm memory only grows: the next layer gets a new, small instance
+      mainThreadCore = null;
+    }
     this.textOverlay?.terminate();
     this.textOverlay = null;
     this.gpuText?.dispose();

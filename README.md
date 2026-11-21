@@ -244,6 +244,7 @@ npm run dev                   # examples on http://localhost:5180 (compare.html,
 npm test                      # unit tests (vitest): golden buffers, shader translation
 npm run test:rust             # cargo tests of both crates
 npm run test:rendering        # screenshots, hit detection, text, labels, export and shared canvas checks in Chromium
+npm run test:memory           # leak checks: repeats what a layer does and counts what stays alive
 npm run bench                 # benchmark, see bench/run.js for options
 npm run build                 # dist/ (ES module + worker + wasm + .d.ts)
 npm run test:dist             # production app build against dist/, checked in Chromium

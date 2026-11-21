@@ -24,6 +24,8 @@ interface GLBuffers {
   instance: WebGLBuffer | null;
   indexCount: number;
   instanceFloats: number;
+  /** Bytes allocated for the index, vertex and instance buffer. */
+  capacity: [number, number, number];
   /** VAO per program, created lazily. */
   vaos: Map<WebGLProgram, WebGLVertexArrayObject>;
 }
@@ -44,6 +46,15 @@ function bindAtlas(gl: WebGL2RenderingContext, atlas: GlyphAtlas, set: LabelSet)
     entry.version = atlas.version;
     entry.canvas = atlas.canvas;
     uploadCanvas(gl, atlas.canvas);
+  }
+}
+
+/** Deletes the atlas texture of a context whose last layer is leaving. */
+function dropAtlasTexture(surface: WebGL2Surface | null) {
+  const entry = surface && surface.users <= 1 ? atlasTextures.get(surface.gl) : null;
+  if (surface && entry) {
+    surface.gl.deleteTexture(entry.texture);
+    atlasTextures.delete(surface.gl);
   }
 }
 
@@ -179,6 +190,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       // move to the new context: free everything in the old one, upload again below
       this.releaseBuffers();
       this.deleteGLResources();
+      dropAtlasTexture(previous);
       previous.members.delete(this);
     }
     const surface = this.surface!;
@@ -238,22 +250,42 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     return {pass, program, uniforms};
   }
 
-  protected upload(set: BufferSet): GLBuffers {
+  protected upload(set: BufferSet, reuse?: GLBuffers): GLBuffers {
     const gl = this.gl!;
-    const make = (target: number, data: ArrayBufferView) => {
-      const b = gl.createBuffer()!;
-      gl.bindBuffer(target, b);
-      gl.bufferData(target, data, gl.STATIC_DRAW);
-      return b;
+    const capacity: [number, number, number] = [0, 0, 0];
+    // writes `data` into the buffer on hand when it fits (and is not much too large), into new storage otherwise
+    const fill = (slot: number, target: number, data: ArrayBufferView, buffer: WebGLBuffer | null): WebGLBuffer => {
+      const size = data.byteLength;
+      const had = buffer && reuse ? reuse.capacity[slot] : 0;
+      buffer ??= gl.createBuffer()!;
+      gl.bindBuffer(target, buffer);
+      if (size <= had && size * 2 >= had) {
+        gl.bufferSubData(target, 0, data);
+        capacity[slot] = had;
+      } else {
+        gl.bufferData(target, data, gl.STATIC_DRAW);
+        capacity[slot] = size;
+      }
+      return buffer;
     };
     gl.bindVertexArray(null);
+    const instanced = set.instances.length > 0;
+    let vaos = reuse?.vaos ?? new Map<WebGLProgram, WebGLVertexArrayObject>();
+    if (reuse && !!reuse.instance !== instanced) {
+      // the vertex arrays were made for other buffers
+      vaos.forEach((vao) => gl.deleteVertexArray(vao));
+      vaos = new Map();
+      gl.deleteBuffer(reuse.instance);
+      reuse.instance = null;
+    }
     return {
-      index: make(gl.ELEMENT_ARRAY_BUFFER, set.indices),
-      vertex: make(gl.ARRAY_BUFFER, set.vertices),
-      instance: set.instances.length ? make(gl.ARRAY_BUFFER, set.instances) : null,
+      index: fill(0, gl.ELEMENT_ARRAY_BUFFER, set.indices, reuse?.index ?? null),
+      vertex: fill(1, gl.ARRAY_BUFFER, set.vertices, reuse?.vertex ?? null),
+      instance: instanced ? fill(2, gl.ARRAY_BUFFER, set.instances, reuse?.instance ?? null) : null,
       indexCount: set.indices.length,
       instanceFloats: set.instances.length,
-      vaos: new Map(),
+      capacity,
+      vaos,
     };
   }
 
@@ -262,12 +294,23 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     if (!gl) {
       return;
     }
-    gl.deleteBuffer(b.index);
-    gl.deleteBuffer(b.vertex);
-    if (b.instance) {
-      gl.deleteBuffer(b.instance);
-    }
+    // the vertex arrays first: a buffer lives on while one still refers to it
+    gl.bindVertexArray(null);
     b.vaos.forEach((vao) => gl.deleteVertexArray(vao));
+    b.vaos.clear();
+    // Emptied before they are deleted: the driver gives the storage of a
+    // deleted buffer back late, and with large layers the memory of several
+    // rebuilds would pile up in the GPU process.
+    const free = (target: number, buffer: WebGLBuffer | null) => {
+      if (buffer) {
+        gl.bindBuffer(target, buffer);
+        gl.bufferData(target, 0, gl.STATIC_DRAW);
+        gl.deleteBuffer(buffer);
+      }
+    };
+    free(gl.ELEMENT_ARRAY_BUFFER, b.index);
+    free(gl.ARRAY_BUFFER, b.vertex);
+    free(gl.ARRAY_BUFFER, b.instance);
   }
 
   private vao(prog: Program, b: GLBuffers): WebGLVertexArrayObject {
@@ -585,6 +628,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
 
   override disposeInternal() {
     this.deleteGLResources();
+    dropAtlasTexture(this.surface);
     this.surface?.members.delete(this);
     super.disposeInternal(); // releases the buffers, then the shared surface
     this.gl = null;

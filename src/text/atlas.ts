@@ -48,6 +48,8 @@ export const DROP_BINS = 8;
 const WIDTH = 2048;
 const INITIAL_HEIGHT = 512;
 const MAX_HEIGHT = 4096;
+/** Measured texts kept per font; more than this and they are measured again. */
+const MAX_MEASURED_TEXTS = 20000;
 const EMPTY: Glyph = {x: 0, y: 0, w: 0, h: 0, left: 0, top: 0, width: 0, height: 0, leftTexels: 0, topTexels: 0};
 
 /** Scripts whose letters join, stack or reorder: such text is drawn as a whole, not per grapheme. */
@@ -81,6 +83,14 @@ export class FontMetrics {
     private readonly atlas: GlyphAtlas,
     readonly font: string,
   ) {}
+
+  /** Forgets the measurements when there are too many (labels that keep changing, like times or counts). */
+  trim() {
+    if (this.advances.size > MAX_MEASURED_TEXTS) {
+      this.advances.clear();
+      this.pairs.clear();
+    }
+  }
 
   /** Advance width of a text. */
   advance(text: string): number {
@@ -186,6 +196,23 @@ export class GlyphAtlas {
     this.canvas = canvas;
     this.context = context;
     return context;
+  }
+
+  /**
+   * Keeps the caches of measured texts bounded. Called when a layout
+   * starts, so the measurements of one layout stay.
+   */
+  trim() {
+    this.fonts.forEach((metrics) => metrics.trim());
+    for (const font in this.widthCaches) {
+      let count = 0;
+      for (const _text in this.widthCaches[font]) {
+        if (++count > MAX_MEASURED_TEXTS) {
+          delete this.widthCaches[font];
+          break;
+        }
+      }
+    }
   }
 
   /** Called when the atlas starts over (fonts loaded or atlas full). */

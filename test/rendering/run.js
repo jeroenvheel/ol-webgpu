@@ -221,6 +221,7 @@ const EXPECTED_PICKS = {
   'filtered-out feature': [],
   'empty space': [],
   'big point overlapping polygon edge': ['big'],
+  'point of a second layer': ['other'],
   'rotated view: point': ['point'],
   'panned view: point': ['point'],
 };

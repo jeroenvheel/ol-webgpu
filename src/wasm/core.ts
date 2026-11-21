@@ -39,8 +39,10 @@ interface CoreExports {
     t4: number,
     t5: number,
   ): void;
+  olgpu_index_reset(): void;
   olgpu_index_load(ptr: number, len: number): number;
-  olgpu_index_query(x: number, y: number, radius: number): number;
+  olgpu_index_free(handle: number): void;
+  olgpu_index_query(handle: number, x: number, y: number, radius: number): number;
 }
 
 export interface GeneratedBuffers {
@@ -63,11 +65,25 @@ export const HIT_KIND_POINT = 2;
 
 export type WasmSource = URL | string | BufferSource | WebAssembly.Module;
 
+/**
+ * An instance whose memory grew past this is worth replacing by a new one
+ * once it holds nothing: wasm memory only grows, so a large build or index
+ * would otherwise be paid for as long as the page lives.
+ */
+export const LARGE_MEMORY_BYTES = 32 * 1024 * 1024;
+
 export class Core {
   private readonly ex: CoreExports;
+  /** Indexes loaded and not freed. */
+  indexCount = 0;
 
   constructor(instance: WebAssembly.Instance) {
     this.ex = instance.exports as unknown as CoreExports;
+  }
+
+  /** Size of the instance's memory. It only grows: freed memory is used again, not given back. */
+  get memoryBytes(): number {
+    return this.ex.memory.buffer.byteLength;
   }
 
   /** Copies `data` into wasm memory, runs `fn(ptr, len)`, then frees it. */
@@ -118,7 +134,9 @@ export class Core {
           time('index', () =>
             this.withInput(points, (pp, pl) => {
               ex.olgpu_index_build(pp, pl, lp, ll, gp, gl, customSize, refOffset, t[0], t[1], t[2], t[3], t[4], t[5]);
-              return this.readIndex();
+              const serialized = this.readIndex();
+              ex.olgpu_index_reset(); // its memory is free for the buffers built next
+              return serialized;
             }),
           );
         const w = toWorld;
@@ -197,17 +215,33 @@ export class Core {
     return this.readIndex();
   }
 
-  loadIndex(serialized: Float32Array): boolean {
-    return this.withInput(serialized, (p, l) => this.ex.olgpu_index_load(p, l) === 1);
+  /**
+   * Loads a serialized index and returns its handle (0: not a valid index).
+   * A Core holds any number of indexes: free each with `freeIndex`.
+   */
+  loadIndex(serialized: Float32Array): number {
+    const handle = this.withInput(serialized, (p, l) => this.ex.olgpu_index_load(p, l));
+    if (handle) {
+      this.indexCount++;
+    }
+    return handle;
+  }
+
+  freeIndex(handle: number) {
+    if (handle) {
+      this.ex.olgpu_index_free(handle);
+      this.indexCount--;
+    }
   }
 
   /**
    * Raw hits within `radius` of (x, y), topmost first, as views on wasm
    * memory: 4 words per hit (ref, kind, seq, distance as f32). Valid until
    * the next call into this Core.
+   * @param index handle from `loadIndex` (0: the index `buildIndex` made last)
    */
-  queryIndexRaw(x: number, y: number, radius: number): {count: number; words: Uint32Array; floats: Float32Array} {
-    const count = this.ex.olgpu_index_query(x, y, radius);
+  queryIndexRaw(x: number, y: number, radius: number, index = 0): {count: number; words: Uint32Array; floats: Float32Array} {
+    const count = this.ex.olgpu_index_query(index, x, y, radius);
     const ptr = this.ex.olgpu_out_ptr(3);
     const words = new Uint32Array(this.ex.memory.buffer, ptr, count * 4);
     const floats = new Float32Array(this.ex.memory.buffer, ptr, count * 4);
@@ -215,8 +249,8 @@ export class Core {
   }
 
   /** Hits within `radius` of (x, y) in index space, topmost first. */
-  queryIndex(x: number, y: number, radius: number): IndexHit[] {
-    const {count, words, floats} = this.queryIndexRaw(x, y, radius);
+  queryIndex(x: number, y: number, radius: number, index = 0): IndexHit[] {
+    const {count, words, floats} = this.queryIndexRaw(x, y, radius, index);
     const hits: IndexHit[] = new Array(count);
     for (let i = 0; i < count; i++) {
       hits[i] = {
@@ -241,19 +275,22 @@ export function defaultWasmUrl(): URL {
 
 /** Fetches (for a URL), compiles and instantiates a wasm module without imports. */
 export async function instantiateWasm(source: WasmSource, what = 'wasm'): Promise<WebAssembly.Instance> {
-  let module: WebAssembly.Module;
+  return WebAssembly.instantiate(await compileWasm(source, what), {});
+}
+
+/** Fetches (for a URL) and compiles a wasm module, for `loadCore` to make instances from. */
+export async function compileWasm(source: WasmSource, what = 'wasm'): Promise<WebAssembly.Module> {
   if (source instanceof WebAssembly.Module) {
-    module = source;
-  } else if (source instanceof URL || typeof source === 'string') {
+    return source;
+  }
+  if (source instanceof URL || typeof source === 'string') {
     const response = await fetch(source);
     if (!response.ok) {
       throw new Error(`ol-webgpu: could not load ${what} from ${source} (${response.status})`);
     }
-    module = await WebAssembly.compile(await response.arrayBuffer());
-  } else {
-    module = await WebAssembly.compile(source);
+    return WebAssembly.compile(await response.arrayBuffer());
   }
-  return WebAssembly.instantiate(module, {});
+  return WebAssembly.compile(source);
 }
 
 export async function loadCore(source: WasmSource = defaultWasmUrl()): Promise<Core> {

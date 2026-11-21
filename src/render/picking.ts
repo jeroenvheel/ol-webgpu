@@ -213,6 +213,8 @@ export interface MeasurableBatch {
 
 export class Picker {
   private state: IndexState | null = null;
+  /** This layer's index in the core, which holds those of all layers (0: none). */
+  private index = 0;
   private rules: CompiledRule[];
   private readonly ctx = newEvaluationContext();
   private readonly start = Date.now();
@@ -226,7 +228,7 @@ export class Picker {
   private styles: CompiledStyle[];
 
   constructor(
-    private readonly core: Core,
+    readonly core: Core,
     style: FlatStyleLike,
     private variables: Record<string, any>,
   ) {
@@ -372,10 +374,15 @@ export class Picker {
   }
 
   load(serialized: Float32Array, state: IndexState) {
-    this.state = this.core.loadIndex(serialized) ? state : null;
+    this.clear();
+    this.index = this.core.loadIndex(serialized);
+    this.state = this.index ? state : null;
   }
 
+  /** Frees the index (also when the layer is disposed: the core is shared). */
   clear() {
+    this.core.freeIndex(this.index);
+    this.index = 0;
     this.state = null;
   }
 
@@ -456,7 +463,7 @@ export class Picker {
       const x = (coordinate[0] - offset - state.center[0]) / state.resolution;
       const y = (coordinate[1] - state.center[1]) / state.resolution;
       // copy the (small) hit list: evaluating styles must not see it change
-      const {count, words, floats} = this.core.queryIndexRaw(x, y, radius);
+      const {count, words, floats} = this.core.queryIndexRaw(x, y, radius, this.index);
       const refs = words.slice(0, count * 4);
       const distances = floats.slice(0, count * 4);
       for (let i = 0; i < count; i++) {

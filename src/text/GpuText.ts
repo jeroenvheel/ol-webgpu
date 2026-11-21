@@ -271,6 +271,7 @@ export default class GpuText {
 
   private start(frameState: FrameState, source: VectorSource, want: LayoutKey): NonNullable<GpuText['job']> {
     const t0 = performance.now();
+    this.atlas.trim();
     const viewState = frameState.viewState;
     const view = frameState.extent!;
     const margin = HEADROOM * Math.max(getWidth(view), getHeight(view)) + 100 * viewState.resolution;
@@ -671,6 +672,9 @@ export function resolveFrameLabels(frameState: FrameState) {
       groups.set(text.declutter, occupancy);
     }
     cost += text.resolve(frameState, occupancy);
+  }
+  if (pacing.size > 64) {
+    pacing.clear(); // maps come and go: the entries of disposed ones are dropped here
   }
   pacing.set(mapId, {time: now, cost, view, labels});
 }

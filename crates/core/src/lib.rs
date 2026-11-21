@@ -16,7 +16,10 @@ use tessellate::Buffers;
 struct State {
     out: Buffers,
     earcut: earcut::Earcut<f64>,
+    /// The index built last (`olgpu_index_build`), which goes to another instance.
     index: index::PackedIndex,
+    /// The loaded indexes, one per layer; a handle is the position plus one.
+    loaded: Vec<Option<index::PackedIndex>>,
     hits: Vec<u32>,
     query: index::QueryScratch,
 }
@@ -26,6 +29,7 @@ thread_local! {
         out: Buffers::default(),
         earcut: earcut::Earcut::new(),
         index: index::PackedIndex::default(),
+        loaded: Vec::new(),
         hits: Vec::new(),
         query: index::QueryScratch::default(),
     });
@@ -171,35 +175,64 @@ pub unsafe extern "C" fn olgpu_index_build(
     });
 }
 
+/// Drops the index built last, after JS copied it (`olgpu_out_ptr(4)`).
+#[unsafe(no_mangle)]
+pub extern "C" fn olgpu_index_reset() {
+    STATE.with_borrow_mut(|s| s.index = index::PackedIndex::default());
+}
+
 /// Loads a serialized index previously read through `olgpu_out_ptr(4)`.
-/// Returns 1 on success, 0 if the data is not a valid index.
+/// Returns its handle for `olgpu_index_query` and `olgpu_index_free`, or 0
+/// if the data is not a valid index. Every layer has its own.
 ///
 /// # Safety
 /// `ptr` must point to `len` readable f32 values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn olgpu_index_load(ptr: *const f32, len: usize) -> u32 {
     let data = unsafe { slice_f32(ptr, len) };
-    STATE.with_borrow_mut(|s| match index::PackedIndex::from_data(data) {
-        Some(idx) => {
-            s.index = idx;
-            1
-        }
-        None => {
-            s.index = index::PackedIndex::default();
-            0
-        }
+    let Some(idx) = index::PackedIndex::from_data(data) else {
+        return 0;
+    };
+    STATE.with_borrow_mut(|s| {
+        let slot = match s.loaded.iter().position(Option::is_none) {
+            Some(slot) => slot,
+            None => {
+                s.loaded.push(None);
+                s.loaded.len() - 1
+            }
+        };
+        s.loaded[slot] = Some(idx);
+        slot as u32 + 1
     })
 }
 
-/// Finds entries within `radius` of (x, y), in index units. Results are read
+/// Frees an index loaded with `olgpu_index_load` (an unknown handle is ignored).
+#[unsafe(no_mangle)]
+pub extern "C" fn olgpu_index_free(handle: u32) {
+    STATE.with_borrow_mut(|s| {
+        if let Some(slot) = (handle as usize).checked_sub(1).and_then(|i| s.loaded.get_mut(i)) {
+            *slot = None;
+        }
+    });
+}
+
+/// Finds entries within `radius` of (x, y), in index units, in the index of
+/// `handle` (0: the index built last in this instance). Results are read
 /// with `olgpu_out_ptr(3)` as `[ref, kind, seq, distance(f32 bits)]` per hit,
 /// topmost first (points over lines over polygons, later over earlier).
 /// Returns the number of hits.
 #[unsafe(no_mangle)]
-pub extern "C" fn olgpu_index_query(x: f64, y: f64, radius: f64) -> usize {
+pub extern "C" fn olgpu_index_query(handle: u32, x: f64, y: f64, radius: f64) -> usize {
     STATE.with_borrow_mut(|s| {
-        let State { index, hits, query, .. } = s;
-        index.query_with(x, y, radius, hits, query);
+        let State { index, loaded, hits, query, .. } = s;
+        let index = match handle {
+            0 => Some(&*index),
+            _ => loaded.get(handle as usize - 1).and_then(Option::as_ref),
+        };
+        match index {
+            Some(index) => index.query_with(x, y, radius, hits, query),
+            None => hits.clear(),
+        }
         hits.len() / 4
     })
 }

@@ -145,6 +145,8 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   private readonly shaderWasmUrl?: string | URL;
   /** 4x MSAA when antialiasing is on; 1 (like ol's offscreen framebuffer) otherwise. */
   private readonly sampleCount: number;
+  // a lost device is rare, and the canvas a layer draws on does not matter to the device
+  protected override readonly keepCpuCopies = false;
   /** Called once if the device or shader translator cannot be initialized. */
   onInitError: ((error: unknown) => void) | null = null;
 
@@ -291,13 +293,21 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     return {pass, program, pipeline, layout, group: null, groupResources: []};
   }
 
-  protected upload(set: BufferSet): GPUBuffers {
+  protected upload(set: BufferSet, reuse?: GPUBuffers): GPUBuffers {
     const device = this.device;
     if (!device) {
-      // device not ready or lost: re-uploaded from the CPU copy later
+      // device lost: the buffers are built again when there is a new one
       return {index: null, vertex: null, instance: null, indexCount: 0, instanceFloats: 0};
     }
-    const make = (data: Uint32Array | Float32Array, usage: number) => {
+    if (reuse) {
+      flushSubmits(); // a frame recorded with these buffers is drawn before they change
+    }
+    const make = (data: Uint32Array | Float32Array, usage: number, old: GPUBuffer | null = null) => {
+      if (old && data.byteLength && data.byteLength <= old.size && data.byteLength * 2 >= old.size) {
+        device.queue.writeBuffer(old, 0, data);
+        return old;
+      }
+      old?.destroy();
       if (!data.byteLength) {
         return null;
       }
@@ -308,9 +318,9 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       return buffer;
     };
     return {
-      index: make(set.indices, GPUBufferUsage.INDEX),
-      vertex: make(set.vertices, GPUBufferUsage.VERTEX),
-      instance: make(set.instances, GPUBufferUsage.VERTEX),
+      index: make(set.indices, GPUBufferUsage.INDEX, reuse?.index),
+      vertex: make(set.vertices, GPUBufferUsage.VERTEX, reuse?.vertex),
+      instance: make(set.instances, GPUBufferUsage.VERTEX, reuse?.instance),
       indexCount: set.indices.length,
       instanceFloats: set.instances.length,
     };

@@ -41,8 +41,14 @@ const layer = new Layer({
   },
 });
 
+// a second layer: each layer has its own hit index
+const other = new Layer({
+  source: new VectorSource({features: [f('other', new Point([100, -110]), {})]}),
+  style: {'circle-radius': 8, 'circle-fill-color': '#ff00ff'},
+});
+
 const view = new View({center: [0, 0], resolution: 1});
-const map = new Map({target: 'map', layers: [layer], view, pixelRatio: 1});
+const map = new Map({target: 'map', layers: [layer, other], view, pixelRatio: 1});
 
 const settled = () => new Promise<void>((resolve) => {
   const check = () => {
@@ -79,6 +85,7 @@ const at = (x: number, y: number, hitTolerance = 0) => {
     'filtered-out feature': at(60, 60),
     'empty space': at(100, 100),
     'big point overlapping polygon edge': at(-32, -30),
+    'point of a second layer': at(100, -110),
   };
   view.setRotation(Math.PI / 4);
   await settled();

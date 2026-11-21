@@ -44,6 +44,7 @@
     "test": "vitest run",
     "test:rust": "cargo test --manifest-path crates/core/Cargo.toml && cargo test --manifest-path crates/shader/Cargo.toml",
     "test:rendering": "node test/rendering/run.js",
+    "test:memory": "node test/memory/run.js",
     "test:dist": "node test/consumer/run.js",
     "bench": "node bench/run.js",
     "fetch-upstream": "node tasks/fetch-upstream.js",

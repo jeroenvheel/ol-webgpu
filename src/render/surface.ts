@@ -85,6 +85,9 @@ export abstract class Surface {
   /** @internal */
   disposeSurface() {
     this.dispose();
+    // the backing store goes now, not when the canvas is collected
+    this.canvas.width = 0;
+    this.canvas.height = 0;
   }
 }
 
