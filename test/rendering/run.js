@@ -63,7 +63,7 @@ const server = await createServer({
   root: here,
   logLevel: 'warn',
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
-  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts']},
+  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'renderfeature.ts']},
   worker: {format: 'es'},
 });
 await server.listen();
@@ -349,6 +349,76 @@ if (args.shared !== 'false' && (!args.match || 'shared'.includes(args.match) || 
   }
 }
 
+// --- RenderFeatures (vector tile features) in a vector source -----------------
+/** What renderfeature.ts picks at its probe pixels; labels are hit-detectable with GPU text only. */
+const RENDER_FEATURE_PICKS = {
+  'polygon fill': ['poly'],
+  'polygon hole': [],
+  'multipolygon, first part': ['multi'],
+  'multipolygon, second part': ['multi'],
+  'multipolygon, hole': [],
+  'line vertex': ['line'],
+  'multilinestring, second part': ['mline'],
+  point: ['pt'],
+  'multipoint, third point': ['mpt'],
+  'label of the point': {gpu: ['pt'], canvas: []},
+  'empty space': [],
+};
+let renderFeatureFailures = 0;
+if (args.renderfeature !== 'false' && (!args.match || 'renderfeature'.includes(args.match) || args.match.includes('renderfeature'))) {
+  console.log('\nRenderFeatures (renderfeature.ts), compared with the same scene of ol/Feature:');
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    for (const text of ['gpu', 'canvas']) {
+      const runs = {};
+      for (const kind of ['feature', 'render']) {
+        errors.length = 0;
+        await page.goto(`${base}renderfeature.html?layer=${layer}&text=${text}&kind=${kind}`);
+        let r = null;
+        try {
+          await page.waitForFunction(() => window.__renderFeature, null, {timeout: 30_000, polling: 50});
+          r = await page.evaluate(() => window.__renderFeature);
+          r.shot = PNG.sync.read(await page.screenshot({path: join(reportDir, `renderfeature-${layer}-${text}-${kind}.png`)}));
+        } catch {
+          // reported below
+        }
+        runs[kind] = {r, problems: errors.filter((e) => !e.includes('powerPreference')).join(' | ').slice(0, 300)};
+      }
+      const {feature, render} = runs;
+      const problems = [];
+      if (!feature.r || !render.r) {
+        problems.push(`timed out ${feature.problems} ${render.problems}`.trim());
+      } else {
+        const mismatch = compare(render.r.shot, feature.r.shot, join(reportDir, `renderfeature-${layer}-${text}-diff.png`));
+        if (mismatch > 0.001) {
+          problems.push(`${(mismatch * 100).toFixed(2)}% of the image differs from ol/Feature`);
+        }
+        for (const [name, expected] of Object.entries(RENDER_FEATURE_PICKS)) {
+          const want = JSON.stringify(Array.isArray(expected) ? expected : expected[text]);
+          for (const kind of ['feature', 'render']) {
+            const got = JSON.stringify(runs[kind].r.picks[name] ?? null);
+            if (got !== want) {
+              problems.push(`${kind}: ${name} picked ${got}, expected ${want}`);
+            }
+          }
+        }
+        if (!render.r.ofKind) {
+          problems.push('a pick returned something other than the RenderFeature');
+        }
+        if (render.r.count !== 6) {
+          problems.push(`${render.r.count} RenderFeatures in the source`);
+        }
+        for (const kind of ['feature', 'render']) {
+          if (runs[kind].problems) {
+            problems.push(`${kind}: ${runs[kind].problems}`);
+          }
+        }
+      }
+      renderFeatureFailures += problems.length ? 1 : 0;
+      console.log(`  ${`${layer}, ${text} text`.padEnd(24)} ${problems.length ? `FAIL ${problems.join('; ')}` : 'ok  '}`);
+    }
+  }
+}
+
 // --- GPU text against ol's Canvas vector layer --------------------------------
 /**
  * Scenarios of gputext.ts with the share of pixels that may differ from the
@@ -438,6 +508,6 @@ writeFileSync(join(reportDir, 'results.json'), JSON.stringify(results, null, 2))
 
 const failures = results.filter((r) => r.case && !r.known && ['webgl2', 'webgpu'].some((l) => r[l] && !r[l].pass));
 console.log(
-  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures, ${textFailures} text overlay failures, ${exportFailures} export failures, ${sharedFailures} shared canvas failures, ${gpuTextFailures} GPU text failures (report: ${reportDir})`,
+  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures, ${textFailures} text overlay failures, ${exportFailures} export failures, ${sharedFailures} shared canvas failures, ${renderFeatureFailures} RenderFeature failures, ${gpuTextFailures} GPU text failures (report: ${reportDir})`,
 );
-process.exitCode = failures.length || pickFailures || textFailures || exportFailures || sharedFailures || gpuTextFailures ? 1 : 0;
+process.exitCode = failures.length || pickFailures || textFailures || exportFailures || sharedFailures || renderFeatureFailures || gpuTextFailures ? 1 : 0;
