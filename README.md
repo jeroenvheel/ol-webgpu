@@ -243,8 +243,9 @@ npm run sync-upstream-tests   # copy ol's WebGLVector rendering cases + data int
 npm run dev                   # examples on http://localhost:5180 (compare.html, bench.html)
 npm test                      # unit tests (vitest): golden buffers, shader translation
 npm run test:rust             # cargo tests of both crates
-npm run test:rendering        # screenshots, hit detection, text, labels, export and shared canvas checks in Chromium
+npm run test:rendering        # screenshots, hit detection, text, labels, export, shared canvas and RenderFeature checks in Chromium
 npm run test:memory           # leak checks: repeats what a layer does and counts what stays alive
+npm run test:memory -- --big  # one big layer step by step, from ol/Feature and from RenderFeatures
 npm run bench                 # benchmark, see bench/run.js for options
 npm run build                 # dist/ (ES module + worker + wasm + .d.ts)
 npm run test:dist             # production app build against dist/, checked in Chromium
@@ -280,7 +281,7 @@ built from the tagged sources. Check the contents with `npm pack --dry-run`.
 **CI.** GitHub Actions (`.github/workflows/ci.yml`) runs on every push to
 `main` and on pull requests (Ubuntu, SwiftShader): wasm build, typecheck,
 unit and Rust tests, a check that the synced upstream cases are current, all
-rendering, hit detection, text, export and shared canvas tests with WebGPU
+rendering, hit detection, text, export, shared canvas and RenderFeature tests with WebGPU
 required, the package
 build and the dist smoke test. On failure, the screenshots and diffs are
 uploaded as the `rendering-report` artifact.
@@ -382,6 +383,20 @@ features, rotation, panning). WebGL2 and WebGPU pass all 14. ol's
 `WebGLVector` fails two by design (it ignores `hitTolerance` and returns
 features hidden by a style `filter`), and is flaky right after a rebuild
 because its GPU hit buffer is rendered asynchronously.
+
+**RenderFeatures.** Vector tile formats read features as `ol/render/Feature`
+(RenderFeature), which a vector source can hold as well. `test/rendering/renderfeature.ts`
+builds one scene twice, from `ol/Feature` and from RenderFeatures as
+`ol/format/MVT` makes them (a polygon with several outer rings is one
+`'Polygon'`, split by ring orientation): points, multipoints, lines,
+multilines, a polygon with a hole and a multipolygon, with labels at a point
+and along a line. On both backends, with GPU and with canvas text, the two
+screenshots are identical, `forEachFeatureAtPixel` picks the same ids at 11
+pixels (fills, holes, lines, points, a label), and returns the RenderFeatures
+themselves. `test/unit/renderfeature.test.ts` checks that RenderFeatures give
+the same render instructions, Rust/WASM buffers and text styles as Features.
+`npm run test:memory` runs each of its leak checks with both kinds of
+feature, and `--big` compares what a big layer costs with each.
 
 **Package.** `npm run test:dist` builds a small app against `dist/` for
 production and checks in Chromium that WebGPU, WebGL2 and the runtime

@@ -3,8 +3,15 @@
 // and WebGPU objects that are alive, and the maps, layers and features that
 // are left after everything is disposed.
 //
+// Each scenario runs with ol/Feature and with RenderFeatures (ol/render/Feature,
+// as vector tile formats read them).
+//
 // Usage: npm run test:memory -- [--layers=webgl2,webgpu] [--cycles=12]
-//        [--only=scenario,scenario] [--channel=msedge|chrome]
+//        [--features=feature,render] [--only=scenario,scenario] [--channel=msedge|chrome]
+//        npm run test:memory -- --big [--layers=...] [--features=...]
+// --big measures one big layer step by step instead (300k points, 200k lines,
+// 50k polygons): the features alone, the drawn layer, rebuilds, and what is
+// left after disposing, with each kind of feature side by side.
 // On Windows the private memory of the browser's renderer and GPU processes
 // is printed too: wasm memory, array buffers and workers are not in the heap.
 import {execFileSync} from 'node:child_process';
@@ -25,6 +32,7 @@ const args = Object.fromEntries(
 );
 const layers = (args.layers ?? 'webgl2,webgpu').split(',');
 const cycles = Number(args.cycles ?? 12);
+const kinds = (args.features ?? 'feature,render').split(',');
 /** Cycles before the first measurement: caches fill and code is compiled. */
 const WARM_UP = 3;
 /** Heap growth per cycle above this fails a scenario (leaked features or buffers are far more). */
@@ -146,7 +154,8 @@ const mb = (n) => (n / 1048576).toFixed(1).padStart(7);
 const LIVE = ['gpuBuffers', 'gpuTextures', 'glBuffers', 'glTextures', 'glPrograms', 'glVaos', 'glFramebuffers', 'workers', 'renderers', 'canvases'];
 let failures = 0;
 
-for (const layer of layers) {
+/** Opens the memory page for a layer and a kind of feature, with what the checks need to measure it. */
+async function openPage(layer, kind) {
   const page = await browser.newPage({viewport: {width: 600, height: 450}});
   page.on('pageerror', (e) => {
     failures++;
@@ -159,7 +168,7 @@ for (const layer of layers) {
     }
   });
   await page.addInitScript(counters);
-  await page.goto(`${base}memory.html?layer=${layer}`, {waitUntil: 'networkidle'});
+  await page.goto(`${base}memory.html?layer=${layer}&features=${kind}`, {waitUntil: 'networkidle'});
   await page.waitForFunction(() => window.__memory);
 
   const measure = async () => ({
@@ -180,10 +189,36 @@ for (const layer of layers) {
     const {result} = await cdp.send('Runtime.callFunctionOn', {objectId: objects.objectId, functionDeclaration: 'function () { return this.length; }', returnByValue: true});
     return result.value;
   };
+  // ol keeps one RenderFeature of its own (`textFeature` in ol/render/webgl/textUtil.js):
+  // instances are counted against what is alive on the page before any scenario
+  const CLASSES = ['Feature', 'RenderFeature', 'Map', 'Layer'];
+  const baseline = {};
+  for (const name of CLASSES) {
+    baseline[name] = await alive(name);
+  }
+  /** What of the library and of ol is still alive beyond the page's own; after disposing everything all must be 0. */
+  const leftovers = async () => {
+    const end = await measure();
+    const left = [];
+    for (const name of CLASSES) {
+      left.push([name, (await alive(name)) - baseline[name]]);
+    }
+    const leaked = left.some(([, count]) => count > 0) || end.renderers > 0 || end.canvases > 0 || end.glBuffers > 0 || end.gpuBuffers > 0;
+    const text =
+      `${left.map(([name, count]) => `${count} ${name}`).join(', ')}, ${end.renderers} renderers, ${end.canvases} canvases, ` +
+      `${end.glBuffers + end.gpuBuffers} buffers; heap ${mb(end.heap).trim()} MB, main wasm ${mb(end.wasm).trim()} MB`;
+    return {leaked, text: `${text}${Object.values(baseline).some(Boolean) ? ` (not counted, alive on the empty page: ${CLASSES.filter((n) => baseline[n]).map((n) => `${baseline[n]} ${n}`).join(', ')})` : ''}`};
+  };
+  return {page, measure, leftovers};
+}
+
+/** Repeats each scenario and checks that nothing grows; then that nothing is left. */
+async function leakChecks(layer, kind) {
+  const {page, measure, leftovers} = await openPage(layer, kind);
   const run = (name) => page.evaluate((n) => window.__memory.run(n), name);
 
   const start = await measure();
-  console.log(`\n${layer}: ${cycles} cycles per scenario after ${WARM_UP} to warm up; empty page: heap ${mb(start.heap).trim()} MB`);
+  console.log(`\n${layer}, ${kind === 'render' ? 'RenderFeatures' : 'ol/Feature'}: ${cycles} cycles per scenario after ${WARM_UP} to warm up; empty page: heap ${mb(start.heap).trim()} MB`);
   console.log('     scenario              heap MB before -> after   per cycle | renderer process MB | GPU process MB   | main wasm MB | alive after (change)');
   const names = (await page.evaluate(() => window.__memory.names)).filter((n) => !args.only || args.only.split(',').includes(n));
   for (const name of names) {
@@ -209,18 +244,63 @@ for (const layer of layers) {
   }
 
   await page.evaluate(() => window.__memory.end());
-  const end = await measure();
-  const left = [];
-  for (const name of ['Feature', 'Map', 'Layer']) {
-    left.push([name, await alive(name)]);
-  }
-  const leaked = left.some(([, count]) => count > 0) || end.renderers > 0 || end.canvases > 0 || end.glBuffers > 0 || end.gpuBuffers > 0;
+  const {leaked, text} = await leftovers();
   failures += leaked ? 1 : 0;
-  console.log(
-    `${leaked ? 'FAIL' : 'ok  '} after disposing everything: ${left.map(([name, count]) => `${count} ${name}`).join(', ')}, ${end.renderers} renderers, ${end.canvases} canvases, ` +
-      `${end.glBuffers + end.gpuBuffers} buffers; heap ${mb(end.heap).trim()} MB, main wasm ${mb(end.wasm).trim()} MB`,
-  );
+  console.log(`${leaked ? 'FAIL' : 'ok  '} after disposing everything: ${text}`);
   await page.close();
+}
+
+/** The big layer step by step: memory after each step, for the table of each kind side by side. */
+async function bigLayer(layer, kind) {
+  const {page, measure, leftovers} = await openPage(layer, kind);
+  const rows = [['empty page', await measure(), 0]];
+  const step = async (label, name) => {
+    const t0 = performance.now();
+    await page.evaluate((n) => window.__memory.big(n), name);
+    const ms = performance.now() - t0;
+    rows.push([label, await measure(), ms]);
+  };
+  await step('features made', 'features');
+  await step('layer drawn', 'map');
+  for (let i = 1; i <= 4; i++) {
+    await step(`rebuild ${i} (pan)`, 'pan');
+  }
+  await step('map disposed', 'dispose');
+  await step('features dropped', 'drop');
+  const {leaked, text} = await leftovers();
+  failures += leaked ? 1 : 0;
+  await page.close();
+  return {rows, leaked, text};
+}
+
+if (args.big === 'true') {
+  console.log('Big layer: 300k points, 200k lines, 50k polygons. MB after each step (heap | renderer process | GPU process), and the time of the step.');
+  for (const layer of layers) {
+    const results = {};
+    for (const kind of kinds) {
+      results[kind] = await bigLayer(layer, kind);
+    }
+    console.log(`\n${layer}`);
+    console.log(`  ${'step'.padEnd(20)} ${kinds.map((k) => (k === 'render' ? 'RenderFeature' : 'ol/Feature').padEnd(42)).join(' ')}`);
+    const steps = results[kinds[0]].rows.map(([label]) => label);
+    steps.forEach((label, i) => {
+      const cells = kinds.map((k) => {
+        const [, m, ms] = results[k].rows[i];
+        return `${mb(m.heap)} | ${mb(m.renderer)} | ${mb(m.gpu)}  ${ms ? `${(ms / 1000).toFixed(1).padStart(5)} s` : '       '}`;
+      });
+      console.log(`  ${label.padEnd(20)} ${cells.join('   ')}`);
+    });
+    for (const kind of kinds) {
+      const r = results[kind];
+      console.log(`${r.leaked ? 'FAIL' : 'ok  '} ${kind === 'render' ? 'RenderFeature' : 'ol/Feature'}, after disposing everything: ${r.text}`);
+    }
+  }
+} else {
+  for (const layer of layers) {
+    for (const kind of kinds) {
+      await leakChecks(layer, kind);
+    }
+  }
 }
 
 await browser.close();

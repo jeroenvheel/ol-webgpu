@@ -1,24 +1,31 @@
 /**
- * Memory test page (`?layer=webgl2|webgpu`): scenarios that repeat one
- * thing a layer does, so the runner can see whether memory or GPU objects
- * grow with the repetitions. `window.__memory.run(name)` runs one cycle of
+ * Memory test page (`?layer=webgl2|webgpu&features=feature|render`):
+ * scenarios that repeat one thing a layer does, so the runner can see
+ * whether memory or GPU objects grow with the repetitions. With
+ * `features=render` every scenario uses RenderFeatures (`ol/render/Feature`,
+ * as vector tile formats read them) instead of `ol/Feature`s. `window.__memory.run(name)` runs one cycle of
  * a scenario; `window.__memory.live()` counts what the library keeps.
  */
 import Feature from 'ol/Feature.js';
 import Map from 'ol/Map.js';
 import View from 'ol/View.js';
 import Point from 'ol/geom/Point.js';
+import RenderFeature from 'ol/render/Feature.js';
 import WebGLVectorLayer from 'ol/layer/WebGLVector.js';
 import VectorSource from 'ol/source/Vector.js';
 import {makeLines, makePlaces, makePoints, makePolygons} from '../../examples/synthetic.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
+import {toRenderFeatures} from './renderFeatures.js';
 import {frame, renderersSettled} from './settled.js';
 
 const params = new URLSearchParams(location.search);
 const which = params.get('layer');
 const Layer: any = which === 'webgpu' ? WebGPUVectorLayer : which === 'ol' ? WebGLVectorLayer : WebGL2VectorLayer;
+const render = params.get('features') === 'render';
+/** The features of a scenario, as RenderFeatures with `features=render`. */
+const as = (list: Feature[]): any[] => (render ? toRenderFeatures(list) : list);
 
 const shapes = {
   'fill-color': ['match', ['get', 'kind'], 0, '#a6cee3', 1, '#b2df8a', '#fdbf6f'],
@@ -37,7 +44,7 @@ const labels = {
   'text-stroke-width': 3,
 };
 
-const features = () => [...makePoints(8000), ...makeLines(3000), ...makePolygons(2000)];
+const features = () => as([...makePoints(8000), ...makeLines(3000), ...makePolygons(2000)]);
 
 async function settle(map: Map) {
   map.render();
@@ -81,14 +88,14 @@ const scenarios: Record<string, () => Promise<void>> = {
   },
   /** The same with labels drawn on the GPU, decluttered. */
   async lifecycleLabels() {
-    const layers = [new Layer({source: new VectorSource({features: makePlaces(4000)}), style: labels, declutter: true})];
+    const layers = [new Layer({source: new VectorSource({features: as(makePlaces(4000))}), style: labels, declutter: true})];
     const map = makeMap(layers);
     await settle(map);
     dispose(map, layers);
   },
   /** The same with ol's text worker. */
   async lifecycleCanvasText() {
-    const layers = [new Layer({source: new VectorSource({features: makePlaces(1000)}), style: labels, text: 'canvas'})];
+    const layers = [new Layer({source: new VectorSource({features: as(makePlaces(1000))}), style: labels, text: 'canvas'})];
     const map = makeMap(layers);
     await settle(map);
     dispose(map, layers);
@@ -131,7 +138,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   /** Features are added to the source and removed again. */
   async features() {
     const k = await keep('shapes', () => [new Layer({source: new VectorSource({features: features()}), style: shapes})]);
-    const extra = makePoints(3000, 100 + step++);
+    const extra = as(makePoints(3000, 100 + step++));
     k.sources[0].addFeatures(extra);
     await settle(k.map);
     extra.forEach((f) => k.sources[0].removeFeature(f));
@@ -139,7 +146,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   },
   /** Labels are laid out again after the view moves, with other texts each time. */
   async labelsPan() {
-    const k = await keep('labels', () => [new Layer({source: new VectorSource({features: makePlaces(20000)}), style: labels, declutter: true})]);
+    const k = await keep('labels', () => [new Layer({source: new VectorSource({features: as(makePlaces(20000))}), style: labels, declutter: true})]);
     step++;
     k.map.getView().setCenter([(step % 7) * 6e5, (step % 5) * 4e5]);
     k.map.getView().setZoom(4 + (step % 3));
@@ -155,7 +162,7 @@ const scenarios: Record<string, () => Promise<void>> = {
     for (let i = 0; i < 400; i++) {
       list.push(new Feature({geometry: new Point([((i % 20) - 10) * 4e5, (Math.floor(i / 20) - 10) * 3e5]), name: `nr ${batch}-${i} é${String.fromCharCode(0x4e00 + ((batch * 400 + i) % 5000))}`}));
     }
-    source.addFeatures(list);
+    source.addFeatures(as(list));
     await settle(k.map);
   },
   /** Many picks. */
@@ -181,7 +188,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   async big(stepName: 'features' | 'map' | 'pan' | 'dispose' | 'drop') {
     const w = window as any;
     if (stepName === 'features') {
-      w.__big = {features: [...makePoints(300000), ...makeLines(200000), ...makePolygons(50000)]};
+      w.__big = {features: as([...makePoints(300000), ...makeLines(200000), ...makePolygons(50000)])};
     } else if (stepName === 'map') {
       const layers = [new Layer({source: new VectorSource({features: w.__big.features, useSpatialIndex: false}), style: shapes})];
       w.__big.layers = layers;
@@ -199,6 +206,6 @@ const scenarios: Record<string, () => Promise<void>> = {
     }
   },
   /** Classes whose instances the runner counts after everything is disposed. */
-  classes: {Feature, Map, Layer},
+  classes: {Feature, RenderFeature, Map, Layer},
   live: () => ({renderers: liveRenderers.size, canvases: document.querySelectorAll('canvas').length}),
 };
