@@ -13,9 +13,11 @@
  * black for a light one. A cell is therefore also keyed by whether its fill
  * and its halo are light.
  *
- * One atlas is shared by all layers of the page. When it is full it starts
- * over with a new `generation`; label sets built for an older generation are
- * laid out again.
+ * One atlas is shared by all layers of the page. When it starts over (a web
+ * font of the labels arrived, or it is full of cells no label needs any
+ * more) it gets a new page with a new `generation`. Label sets built for an
+ * older generation are laid out again, and drawn from the page they were
+ * made for until then.
  */
 import {getFontParameters} from 'ol/css.js';
 import {textHeights} from 'ol/render/canvas.js';
@@ -35,6 +37,31 @@ export interface Glyph {
   /** Texels from the cell's left edge to the pen position, and from its top to the line centre. */
   leftTexels: number;
   topTexels: number;
+  /** The last layout that took the cell (see `AtlasUse`). */
+  used?: number;
+}
+
+/** The canvas of one generation of the atlas. Label sets keep the page their cells are on. */
+export interface AtlasPage {
+  /** Increases when the atlas starts over: the cells of earlier pages are not on this one. */
+  generation: number;
+  /** Replaced by a higher one, with the same cells, when the page grows. */
+  canvas: HTMLCanvasElement;
+  /** Increases whenever the canvas content changes (the backends upload again). */
+  version: number;
+}
+
+/** What one layout takes from the atlas. */
+export interface AtlasUse {
+  id: number;
+  /** Texels of the cells the layout uses, each counted once, with those that did not fit. */
+  area: number;
+}
+
+let nextUseId = 1;
+
+export function createAtlasUse(): AtlasUse {
+  return {id: nextUseId++, area: 0};
 }
 
 /**
@@ -49,6 +76,10 @@ export const DROP_BINS = 8;
 const WIDTH = 2048;
 const INITIAL_HEIGHT = 512;
 const MAX_HEIGHT = 4096;
+/** Texels of cells that fit a page, with what the shelves leave unused. */
+const CAPACITY = WIDTH * MAX_HEIGHT * 0.85;
+/** A full atlas starts over at most this often. */
+const FULL_RESET_INTERVAL = 5000;
 /** Measured texts kept per font; more than this and they are measured again. */
 const MAX_MEASURED_TEXTS = 20000;
 const EMPTY: Glyph = {x: 0, y: 0, w: 0, h: 0, left: 0, top: 0, width: 0, height: 0, leftTexels: 0, topTexels: 0};
@@ -164,17 +195,25 @@ export class Face {
       g = this.atlas.draw(this, segment, shift / SUBPIXEL_BINS, drop / DROP_BINS);
       cells.set(segment, g);
     }
+    const use = this.atlas.use;
+    if (use && g.w > 0 && g.used !== use.id) {
+      g.used = use.id;
+      use.area += (g.w + 1) * (g.h + 1);
+    }
     return g;
   }
 }
 
 export class GlyphAtlas {
-  canvas!: HTMLCanvasElement;
+  /** The page cells are drawn on now. */
+  page!: AtlasPage;
   private context!: CanvasRenderingContext2D;
-  /** Increases whenever the canvas content changes (the backends upload again). */
-  version = 0;
-  /** Increases when the atlas starts over: cells handed out before are gone. */
-  generation = 0;
+  /** The layout that is taking cells (set by the layout while it runs). */
+  use: AtlasUse | null = null;
+  /** Texels the last layout of each user of the atlas took. */
+  private readonly demands = new Map<object, number>();
+  private lastFullReset = -Infinity;
+  private warnedFull = false;
   private shelfX = 0;
   private shelfY = 0;
   private shelfHeight = 0;
@@ -219,13 +258,27 @@ export class GlyphAtlas {
     return true;
   }
 
-  private use(font: string) {
+  private useFont(font: string) {
     const families = fontFamilies(font);
     if (families) {
       families.forEach((family) => this.families.add(family));
     } else {
       this.unknownFamilies = true;
     }
+  }
+
+  get canvas(): HTMLCanvasElement {
+    return this.page.canvas;
+  }
+
+  /** Increases whenever the canvas content changes. */
+  get version(): number {
+    return this.page.version;
+  }
+
+  /** Increases when the atlas starts over: cells handed out before are not on the new page. */
+  get generation(): number {
+    return this.page.generation;
   }
 
   private init(height: number): CanvasRenderingContext2D {
@@ -235,7 +288,7 @@ export class GlyphAtlas {
     const context = canvas.getContext('2d')!;
     context.fillStyle = '#000';
     context.fillRect(0, 0, WIDTH, height);
-    this.canvas = canvas;
+    this.page.canvas = canvas;
     this.context = context;
     return context;
   }
@@ -257,14 +310,19 @@ export class GlyphAtlas {
     }
   }
 
-  /** Called when the atlas starts over (fonts loaded or atlas full). */
+  /** Called when the atlas starts over (fonts of the labels loaded, or the atlas was full). */
   onReset(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
-  /** Forgets all cells and measurements. */
+  /**
+   * Forgets all cells and measurements and goes on with a new page. The page
+   * so far stays as it is, for the label sets that were made with it.
+   */
   reset() {
+    const previous = this.page as AtlasPage | undefined;
+    this.page = {generation: (previous?.generation ?? 0) + 1, version: (previous?.version ?? 0) + 1, canvas: null!};
     this.init(INITIAL_HEIGHT);
     this.faces.clear();
     this.fonts.clear();
@@ -280,18 +338,46 @@ export class GlyphAtlas {
     this.shelfY = 0;
     this.shelfHeight = 0;
     this.full = false;
-    this.generation++;
-    this.version++;
+    this.warnedFull = false;
     this.listeners.forEach((l) => l());
   }
 
-  /** A full atlas starts over once the layout that filled it has finished. */
-  resetIfFull(): boolean {
+  /**
+   * A layout has finished. When cells did not fit, the atlas starts over if
+   * that helps: when the last layouts of all its users together fit a page,
+   * so what fills it are cells of labels that are gone. Labels that need
+   * more than a page keep the cells they have; starting over would only
+   * leave out other glyphs.
+   * @param user whose layout it was (see `forget`)
+   * @param use what the layout took
+   * @return whether the atlas started over: the layout is to be made again
+   */
+  layoutDone(user: object, use: AtlasUse): boolean {
+    this.demands.set(user, use.area);
     if (!this.full) {
       return false;
     }
+    const now = performance.now();
+    if (now - this.lastFullReset < FULL_RESET_INTERVAL) {
+      return false;
+    }
+    let demand = 0;
+    this.demands.forEach((area) => (demand += area));
+    if (demand > CAPACITY) {
+      if (!this.warnedFull) {
+        this.warnedFull = true;
+        console.warn('ol-webgpu: the labels in view need more glyphs than the atlas holds; some glyphs are left out');
+      }
+      return false;
+    }
+    this.lastFullReset = now;
     this.reset();
     return true;
+  }
+
+  /** A user of the atlas is gone: its labels no longer count. */
+  forget(user: object) {
+    this.demands.delete(user);
   }
 
   private allocate(w: number, h: number): {x: number; y: number} | null {
@@ -315,7 +401,7 @@ export class GlyphAtlas {
     const at = {x: this.shelfX + 1, y: this.shelfY + 1};
     this.shelfX += w + 1;
     this.shelfHeight = Math.max(this.shelfHeight, h);
-    this.version++;
+    this.page.version++;
     return at;
   }
 
@@ -323,7 +409,7 @@ export class GlyphAtlas {
   measure(font: string, text: string): TextMetrics {
     const context = this.measureContext;
     if (this.measureFont !== font) {
-      this.use(font);
+      this.useFont(font);
       context.font = font;
       context.textBaseline = 'middle';
       context.textAlign = 'left';
@@ -376,6 +462,9 @@ export class GlyphAtlas {
     const h = ascent + descent;
     const at = this.allocate(w, h);
     if (!at) {
+      if (this.use) {
+        this.use.area += (w + 1) * (h + 1); // wanted all the same
+      }
       return EMPTY;
     }
     if (strokeWidth > 0) {

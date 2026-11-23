@@ -14,7 +14,7 @@ import {getWorldParameters} from 'ol/renderer/webgl/worldUtil.js';
 import type VectorSource from 'ol/source/Vector.js';
 import type {FlatStyleLike} from 'ol/style/flat.js';
 import {getUid} from 'ol/util.js';
-import {type GlyphAtlas, sharedAtlas} from './atlas.js';
+import {type AtlasPage, sharedAtlas} from './atlas.js';
 import {Occupancy, selectCandidates} from './declutter.js';
 import {LabelBuilder, type LabelSet, type LayoutOptions, MODE_DECLUTTER, MODE_NONE, partBox} from './layout.js';
 import {type TextEvaluator, buildTextEvaluator} from './style.js';
@@ -30,8 +30,6 @@ const HEADROOM = 0.25;
 /** While the view moves, decluttering that took longer than this runs at most every `RESOLVE_INTERVAL` ms. */
 const RESOLVE_SLOW = 3;
 const RESOLVE_INTERVAL = 120;
-/** A full atlas starts over at most this often, so a view that cannot fit does not loop. */
-const ATLAS_RESET_INTERVAL = 5000;
 
 /** Labels of one rendered world copy. */
 export interface LabelWorld {
@@ -52,7 +50,8 @@ export interface LabelWorld {
 /** What a backend draws for one frame. */
 export interface LabelFrame {
   set: LabelSet;
-  atlas: GlyphAtlas;
+  /** The atlas page with the glyphs of the set: an earlier one while labels are laid out for a new one. */
+  page: AtlasPage;
   worlds: LabelWorld[];
   worldWidth: number;
 }
@@ -128,7 +127,6 @@ export default class GpuText {
   private styleVersion = 0;
   private lastFrameTime = 0;
   private wasFading = false;
-  private lastAtlasReset = -Infinity;
   private readonly unlistenAtlas: () => void;
   /** Screen boxes of the shown labels, for hit detection. */
   private hitCache: {view: string; version: number; boxes: Float64Array; labels: Uint32Array} | null = null;
@@ -247,10 +245,8 @@ export default class GpuText {
       frameState.animate = true; // the atlas started over meanwhile: lay out again
       return;
     }
-    const now = performance.now();
-    if (now - this.lastAtlasReset > ATLAS_RESET_INTERVAL && this.atlas.resetIfFull()) {
-      // some glyphs did not fit: lay out again with an empty atlas
-      this.lastAtlasReset = now;
+    if (this.atlas.layoutDone(this, job.builder.use)) {
+      // some glyphs did not fit and starting over makes room: lay out again
       frameState.animate = true;
       return;
     }
@@ -501,7 +497,8 @@ export default class GpuText {
   /** The labels to draw for this frame (null: none), with fades advanced to the frame time. */
   frame(frameState: FrameState): LabelFrame | null {
     const set = this.set;
-    if (!set || !set.glyphCount || !this.worlds.length || set.generation !== this.atlas.generation) {
+    // a set of an earlier atlas generation is drawn from its own page until the new layout is there
+    if (!set || !set.glyphCount || !this.worlds.length) {
       return null;
     }
     const now = frameState.time;
@@ -534,7 +531,7 @@ export default class GpuText {
         frameState.animate = true;
       }
     }
-    return {set, atlas: this.atlas, worlds: this.worlds, worldWidth: this.worldWidth};
+    return {set, page: set.page, worlds: this.worlds, worldWidth: this.worldWidth};
   }
 
   // --- hit detection -------------------------------------------------------
@@ -586,6 +583,7 @@ export default class GpuText {
 
   dispose() {
     this.unlistenAtlas();
+    this.atlas.forget(this);
     this.job = null;
     this.next = null;
     this.set = null;

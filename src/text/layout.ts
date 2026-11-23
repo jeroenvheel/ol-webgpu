@@ -20,7 +20,7 @@ import {drawTextOnPath, rtlRegEx} from 'ol/geom/flat/textpath.js';
 import {measureAndCacheTextWidth, measureTextHeight} from 'ol/render/canvas.js';
 import type Text from 'ol/style/Text.js';
 import {getUid} from 'ol/util.js';
-import {DROP_BINS, type GlyphAtlas, SUBPIXEL_BINS, segments} from './atlas.js';
+import {type AtlasPage, type AtlasUse, DROP_BINS, type GlyphAtlas, SUBPIXEL_BINS, createAtlasUse, segments} from './atlas.js';
 import type {TextEvaluator} from './style.js';
 
 /**
@@ -83,7 +83,9 @@ export interface LabelSet {
   rotation: number;
   /** Atlas generation the glyph cells belong to. */
   generation: number;
-  /** Atlas version that has all the cells of the set. */
+  /** The atlas page the glyph cells are on. */
+  page: AtlasPage;
+  /** Version of the page that has all the cells of the set. */
   atlasVersion: number;
   instances: Float32Array;
   glyphCount: number;
@@ -221,7 +223,9 @@ export class LabelBuilder {
   private readonly uid: number[] = [];
   private parts: number[] = [];
   private hasLine = false;
-  private readonly generation: number;
+  private readonly page: AtlasPage;
+  /** What this layout takes from the atlas. */
+  readonly use: AtlasUse = createAtlasUse();
   private current: FeatureLike | null = null;
   private currentUid = 0;
   private currentIndex = 0;
@@ -236,7 +240,7 @@ export class LabelBuilder {
     private readonly atlas: GlyphAtlas,
     readonly options: LayoutOptions,
   ) {
-    this.generation = atlas.generation;
+    this.page = atlas.page;
     this.boxesOnly = !!options.boxesOnly;
     this.accept = options.accept ?? null;
   }
@@ -245,6 +249,7 @@ export class LabelBuilder {
   run(deadline: number): boolean {
     const features = this.features;
     const resolution = this.options.resolution;
+    this.atlas.use = this.use;
     while (this.index < features.length) {
       const feature = features[this.index++];
       this.current = feature;
@@ -260,12 +265,13 @@ export class LabelBuilder {
         break;
       }
     }
+    this.atlas.use = null;
     return this.index >= features.length;
   }
 
   /** Whether the atlas started over while laying out: the cells used so far are gone. */
   isStale(): boolean {
-    return this.generation !== this.atlas.generation;
+    return this.page !== this.atlas.page;
   }
 
   finish(): LabelSet {
@@ -292,8 +298,9 @@ export class LabelBuilder {
       origin: o.origin,
       resolution: o.resolution,
       rotation: o.rotation,
-      generation: this.generation,
-      atlasVersion: this.atlas.version,
+      generation: this.page.generation,
+      page: this.page,
+      atlasVersion: this.page.version,
       instances: this.instances.subarray(0, this.glyphCount * INSTANCE_FLOATS),
       glyphCount: this.glyphCount,
       count,

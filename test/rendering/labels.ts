@@ -146,14 +146,36 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
     await loadFont('Icons Of The Page');
     await settle();
     check('a font no label uses keeps the atlas', atlas.generation === generation, {before: generation, after: atlas.generation});
-    await loadFont('Label Font');
+    // so many labels that laying them out takes several frames
+    const many: Feature[] = [];
+    for (let i = 0; i < 40_000; i++) {
+      many.push(point(-120 + ((i * 37) % 240), -40 + ((i * 101) % 160), `n${i}`));
+    }
+    map.addLayer(
+      new Layer({
+        source: new VectorSource({features: many}),
+        style: {'text-value': ['get', 'name'], 'text-font': '10px "Label Font", sans-serif', 'text-fill-color': '#1e8449'},
+        declutter: 'many',
+      }),
+    );
     await settle();
+    const before = drawn(...upper).count;
+
+    await loadFont('Label Font');
+    // until the labels are laid out with the new font, the ones on screen stay
+    let fewest = Infinity;
+    let frames = 0;
+    for (; frames < 3 || !quiet(); frames++) {
+      fewest = Math.min(fewest, drawn(...upper).count);
+      await frame();
+    }
     const relaid = drawn(0, 180, 256, 256);
     check('a font of the labels starts the atlas over', atlas.generation === generation + 1 && relaid.count > 40 && relaid.alpha === 255, {
       before: generation,
       after: atlas.generation,
       relaid,
     });
+    check('labels stay on screen while the atlas starts over', before > 1000 && fewest > before * 0.5, {before, fewest, frames});
   } catch (e) {
     check('no error', false, String(e));
   }

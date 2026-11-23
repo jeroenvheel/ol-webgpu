@@ -10,7 +10,7 @@ import {create as createTransform} from 'ol/transform.js';
 import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js';
 import {TEXT_OVERLAY_GLSL, type TextImage} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
-import type {GlyphAtlas} from '../text/atlas.js';
+import type {AtlasPage} from '../text/atlas.js';
 import {INSTANCE_ATTRIBUTES, INSTANCE_FLOATS, type LabelSet} from '../text/layout.js';
 import {LABEL_GLSL, LABEL_UNIFORMS, LABEL_UNIFORM_FLOATS, QUAD, writeLabelUniforms} from '../text/shaders.js';
 import type {BufferSet} from '../worker/protocol.js';
@@ -30,30 +30,56 @@ interface GLBuffers {
   vaos: Map<WebGLProgram, WebGLVertexArrayObject>;
 }
 
-/** Glyph atlas texture, one per context (the atlas is shared by all layers). */
-const atlasTextures = new WeakMap<WebGL2RenderingContext, {texture: WebGLTexture; canvas: HTMLCanvasElement; version: number}>();
+/**
+ * Glyph atlas textures per context (the atlas is shared by all layers), one
+ * per atlas page: after the atlas started over, the layers draw from the
+ * page before until their labels are laid out again.
+ */
+interface AtlasTexture {
+  texture: WebGLTexture;
+  canvas: HTMLCanvasElement;
+  version: number;
+  /** When a layer last drew from it. */
+  used: number;
+}
+const atlasTextures = new WeakMap<WebGL2RenderingContext, Map<AtlasPage, AtlasTexture>>();
+/** Milliseconds after which the texture of a page no layer draws from is deleted. */
+const ATLAS_TEXTURE_IDLE = 2000;
 
-function bindAtlas(gl: WebGL2RenderingContext, atlas: GlyphAtlas, set: LabelSet) {
-  let entry = atlasTextures.get(gl);
-  if (!entry) {
-    entry = {texture: gl.createTexture()!, canvas: atlas.canvas, version: -1};
-    atlasTextures.set(gl, entry);
+function bindAtlas(gl: WebGL2RenderingContext, page: AtlasPage, set: LabelSet) {
+  let pages = atlasTextures.get(gl);
+  if (!pages) {
+    pages = new Map();
+    atlasTextures.set(gl, pages);
   }
+  const now = performance.now();
+  for (const [other, texture] of pages) {
+    if (other !== page && now - texture.used > ATLAS_TEXTURE_IDLE) {
+      gl.deleteTexture(texture.texture);
+      pages.delete(other);
+    }
+  }
+  let entry = pages.get(page);
+  if (!entry) {
+    entry = {texture: gl.createTexture()!, canvas: page.canvas, version: -1, used: now};
+    pages.set(page, entry);
+  }
+  entry.used = now;
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, entry.texture);
   // cells drawn since for a layout in progress are uploaded when a set needs them
-  if (entry.version < set.atlasVersion || entry.canvas !== atlas.canvas) {
-    entry.version = atlas.version;
-    entry.canvas = atlas.canvas;
-    uploadCanvas(gl, atlas.canvas);
+  if (entry.version < set.atlasVersion || entry.canvas !== page.canvas) {
+    entry.version = page.version;
+    entry.canvas = page.canvas;
+    uploadCanvas(gl, page.canvas);
   }
 }
 
-/** Deletes the atlas texture of a context whose last layer is leaving. */
+/** Deletes the atlas textures of a context whose last layer is leaving. */
 function dropAtlasTexture(surface: WebGL2Surface | null) {
-  const entry = surface && surface.users <= 1 ? atlasTextures.get(surface.gl) : null;
-  if (surface && entry) {
-    surface.gl.deleteTexture(entry.texture);
+  const pages = surface && surface.users <= 1 ? atlasTextures.get(surface.gl) : null;
+  if (surface && pages) {
+    pages.forEach((entry) => surface.gl.deleteTexture(entry.texture));
     atlasTextures.delete(surface.gl);
   }
 }
@@ -359,7 +385,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     }
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D, entry.texture);
-    const ready = !(source instanceof HTMLImageElement) || source.complete;
+    const ready = !(source instanceof HTMLImageElement) || (source.complete && source.naturalWidth > 0);
     if (ready && entry.source !== source) {
       entry.source = source;
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
@@ -536,7 +562,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       r.set = set.id;
     }
     gl.useProgram(r.program);
-    bindAtlas(gl, frame.atlas, set);
+    bindAtlas(gl, frame.page, set);
     gl.uniform1i(r.uniforms.u_atlas, 0);
     const u = this.labelUniforms;
     const used = new Set<number>();
@@ -572,7 +598,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
         gl.bindBuffer(gl.ARRAY_BUFFER, o.buffer);
         gl.bufferData(gl.ARRAY_BUFFER, w.opacity, gl.DYNAMIC_DRAW);
       }
-      writeLabelUniforms(u, 0, frameState, set, w.world * frame.worldWidth, frame.atlas.canvas.width, frame.atlas.canvas.height);
+      writeLabelUniforms(u, 0, frameState, set, w.world * frame.worldWidth, frame.page.canvas.width, frame.page.canvas.height);
       let at = 0;
       for (const [name, size] of LABEL_UNIFORMS) {
         const location = r.uniforms[name];

@@ -114,7 +114,15 @@ let shared: Promise<ShaderTranslator> | null = null;
 export function loadShaderTranslator(source: WasmSource = defaultShaderWasmUrl()): Promise<ShaderTranslator> {
   const load = async () => new ShaderTranslator(await instantiateWasm(source, 'shader wasm'));
   if (source instanceof URL && source.href === defaultShaderWasmUrl().href) {
-    shared ??= load();
+    if (!shared) {
+      const loading = (shared = load());
+      // a failed load (the network, mostly) is tried again by the next caller
+      loading.catch(() => {
+        if (shared === loading) {
+          shared = null;
+        }
+      });
+    }
     return shared;
   }
   return load();

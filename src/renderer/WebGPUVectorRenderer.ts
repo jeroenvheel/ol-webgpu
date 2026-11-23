@@ -10,11 +10,11 @@ import {create as createTransform} from 'ol/transform.js';
 import {type AttributeDesc, type SubPass, stride} from '../render/stylePasses.js';
 import {TEXT_OVERLAY_WGSL} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
-import type {GlyphAtlas} from '../text/atlas.js';
+import type {AtlasPage} from '../text/atlas.js';
 import {INSTANCE_ATTRIBUTES, INSTANCE_FLOATS, type LabelSet} from '../text/layout.js';
 import {LABEL_UNIFORM_FLOATS, LABEL_WGSL, QUAD, writeLabelUniforms} from '../text/shaders.js';
 import {type ShaderTranslator, type WgslProgram, loadShaderTranslator} from '../wasm/shader.js';
-import {destroyAfterSubmit, flushSubmits, frameEncoder, getDevice, onDeviceLost, preferredFormat} from '../webgpu/device.js';
+import {destroyAfterSubmit, flushSubmits, frameEncoder, getDevice, isWebGPUAvailable, onDeviceLost, preferredFormat} from '../webgpu/device.js';
 import {PREMULTIPLIED_BLEND, WebGPUSurface, compositePipeline} from '../webgpu/surface.js';
 import type {BufferSet} from '../worker/protocol.js';
 import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
@@ -44,18 +44,38 @@ interface DrawCall {
   slot: number;
 }
 
-/** Glyph atlas texture, one per device (the atlas is shared by all layers). */
+/**
+ * Glyph atlas textures per device (the atlas is shared by all layers), one
+ * per atlas page: after the atlas started over, the layers draw from the
+ * page before until their labels are laid out again.
+ */
 interface AtlasTexture {
   texture: GPUTexture;
   view: GPUTextureView;
   canvas: HTMLCanvasElement;
   version: number;
+  /** When a layer last drew from it. */
+  used: number;
 }
-const atlasTextures = new WeakMap<GPUDevice, AtlasTexture>();
+const atlasTextures = new WeakMap<GPUDevice, Map<AtlasPage, AtlasTexture>>();
+/** Milliseconds after which the texture of a page no layer draws from is destroyed. */
+const ATLAS_TEXTURE_IDLE = 2000;
 
-function atlasTexture(device: GPUDevice, atlas: GlyphAtlas, set: LabelSet): AtlasTexture {
-  let entry = atlasTextures.get(device);
-  const canvas = atlas.canvas;
+function atlasTexture(device: GPUDevice, page: AtlasPage, set: LabelSet): AtlasTexture {
+  let pages = atlasTextures.get(device);
+  if (!pages) {
+    pages = new Map();
+    atlasTextures.set(device, pages);
+  }
+  const now = performance.now();
+  for (const [other, texture] of pages) {
+    if (other !== page && now - texture.used > ATLAS_TEXTURE_IDLE) {
+      destroyAfterSubmit(texture.texture);
+      pages.delete(other);
+    }
+  }
+  let entry = pages.get(page);
+  const canvas = page.canvas;
   if (!entry || entry.canvas !== canvas) {
     destroyAfterSubmit(entry?.texture);
     const texture = device.createTexture({
@@ -64,12 +84,13 @@ function atlasTexture(device: GPUDevice, atlas: GlyphAtlas, set: LabelSet): Atla
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
       label: 'ol-webgpu glyph atlas',
     });
-    entry = {texture, view: texture.createView(), canvas, version: -1};
-    atlasTextures.set(device, entry);
+    entry = {texture, view: texture.createView(), canvas, version: -1, used: now};
+    pages.set(page, entry);
   }
+  entry.used = now;
   // cells drawn since for a layout in progress are uploaded when a set needs them
   if (entry.version < set.atlasVersion) {
-    entry.version = atlas.version;
+    entry.version = page.version;
     device.queue.copyExternalImageToTexture({source: canvas}, {texture: entry.texture}, [canvas.width, canvas.height]);
   }
   return entry;
@@ -147,8 +168,14 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   private readonly sampleCount: number;
   // a lost device is rare, and the canvas a layer draws on does not matter to the device
   protected override readonly keepCpuCopies = false;
-  /** Called once if the device or shader translator cannot be initialized. */
+  /**
+   * Called once if the device or shader translator cannot be initialized.
+   * Without it, the renderer tries again (see `retryInit`).
+   */
   onInitError: ((error: unknown) => void) | null = null;
+  /** Failed attempts to initialize in a row. */
+  private initFailures = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(layer: Layer<VectorSource>, options: WebGPURendererOptions) {
     super(layer, options, 'webgpu');
@@ -196,8 +223,9 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     if (this.initError) {
       return false;
     }
-    // A layer in view waits for its device before the map reports rendercomplete.
-    this.backendPending = true;
+    // A layer in view waits for its device before the map reports rendercomplete
+    // (not for another attempt after a failed one: that may never succeed).
+    this.backendPending = this.initFailures === 0;
     this.initializing ??= (async () => {
       try {
         const [device, translator] = await Promise.all([
@@ -209,6 +237,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         this.format = preferredFormat();
         this.sampler = device.createSampler({minFilter: 'linear', magFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge'});
         this.zeroBuffer = device.createBuffer({size: 256, usage: GPUBufferUsage.VERTEX, label: 'ol-webgpu zeros'});
+        this.initFailures = 0;
         this.applyPasses();
         this.reuploadBuffers();
         this.getLayer()?.changed();
@@ -220,11 +249,33 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         if (this.onInitError) {
           this.onInitError(e);
         } else {
-          console.error(e);
+          if (this.initFailures === 0) {
+            console.error(e);
+          }
+          this.retryInit();
         }
       }
     })();
     return false;
+  }
+
+  /**
+   * No device or no shader translator: that may pass (the GPU process
+   * starts again after a crash, the network is back), so the layer tries
+   * again, after 1, 2, 4, ... up to 30 seconds. A browser without WebGPU
+   * stays without.
+   */
+  private retryInit() {
+    if (this.disposed || !isWebGPUAvailable()) {
+      return;
+    }
+    const delay = Math.min(30_000, 1000 * 2 ** this.initFailures++);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      this.initError = null;
+      this.initializing = null;
+      this.getLayer()?.changed(); // the next frame tries again
+    }, delay);
   }
 
   protected applyPasses() {
@@ -622,7 +673,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     const device = this.device!;
     const r = this.labelResources();
     const {set, worlds} = frame;
-    const atlas = atlasTexture(device, frame.atlas, set);
+    const atlas = atlasTexture(device, frame.page, set);
     if (r.set !== set.id || !r.instances) {
       destroyAfterSubmit(r.instances);
       r.instances = device.createBuffer({size: set.instances.byteLength, usage: GPUBufferUsage.VERTEX, mappedAtCreation: true, label: 'ol-webgpu glyphs'});
@@ -783,6 +834,9 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     flushSubmits();
     super.disposeInternal();
     this.unlistenLost();
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+    }
     this.offscreen?.texture.destroy();
     this.offscreen?.msaa?.texture.destroy();
     this.offscreen?.uniforms.destroy();

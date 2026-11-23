@@ -18,6 +18,7 @@ function labels(list: Array<[number, number, number, number, number?]>, resoluti
     resolution,
     rotation,
     generation: 1,
+    page: {generation: 1, version: 0, canvas: null!},
     atlasVersion: 0,
     instances: new Float32Array(0),
     glyphCount: 0,
