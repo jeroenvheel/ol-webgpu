@@ -507,14 +507,21 @@ let rebuildFailures = 0;
 if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) || args.match.includes('rebuild'))) {
   console.log('\nwhen buffers are built again (rebuild.ts):');
   const checks = {};
-  for (const layer of layers.filter((l) => l !== 'ol')) {
+  // each backend also with a worker that fails: the builds then run on the main thread
+  const runs = layers
+    .filter((l) => l !== 'ol')
+    .flatMap((layer) => [
+      {name: layer, query: `layer=${layer}`},
+      {name: `${layer}, no worker`, query: `layer=${layer}&worker=broken`},
+    ]);
+  for (const {name, query} of runs) {
     errors.length = 0;
-    await page.goto(`${base}rebuild.html?layer=${layer}`);
+    await page.goto(`${base}rebuild.html?${query}`);
     try {
       await page.waitForFunction(() => window.__rebuild, null, {timeout: 60_000, polling: 50});
-      checks[layer] = await page.evaluate(() => window.__rebuild);
+      checks[name] = await page.evaluate(() => window.__rebuild);
     } catch {
-      checks[layer] = {'page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
+      checks[name] = {'page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
     }
   }
   const checkNames = [...new Set(Object.values(checks).flatMap((c) => Object.keys(c)))];

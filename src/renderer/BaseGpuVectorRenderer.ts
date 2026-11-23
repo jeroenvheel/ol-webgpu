@@ -41,7 +41,7 @@ import {type StylePasses, buildStylePasses} from '../render/stylePasses.js';
 import {type Surface, type SurfaceSpec, acquireSurface, releaseSurface, surfaceSpec, surfaceType} from '../render/surface.js';
 import {UniformState, makeProjectionTransform} from '../render/uniforms.js';
 import {type Core, LARGE_MEMORY_BYTES, loadCore} from '../wasm/core.js';
-import {WorkerClient, type WorkerOptions} from '../worker/client.js';
+import {WorkerClient, WorkerFailedError, type WorkerOptions} from '../worker/client.js';
 import type {BufferSet, BuildResponse} from '../worker/protocol.js';
 
 export interface GpuVectorRendererOptions extends WorkerOptions {
@@ -442,11 +442,13 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         }
         this.previousExtent = frameExtent.slice();
       }
-      // One build at a time: its result is drawn first, and the frame after
-      // that starts the next one when the source changed in the meantime.
-      if (!this.building && this.needsRebuild(frameState, source, extentChanged)) {
-        this.rebuild(frameState, source.getRevision());
-      }
+    }
+    // One build at a time: its result is drawn first, and the frame after
+    // that starts the next one when the source changed in the meantime.
+    // While the view moves, only other features are a reason to build: a map
+    // that follows what it shows would otherwise never show it moving.
+    if (!this.building && (viewNotMoving ? this.needsRebuild(frameState, source, extentChanged) : this.featuresChanged(source))) {
+      this.rebuild(frameState, source.getRevision());
     }
     this.gpuText?.prepare(frameState, source);
     return true;
@@ -469,6 +471,15 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     }
     const {center, resolution} = frameState.viewState;
     return Math.hypot(center[0] - built.center[0], center[1] - built.center[1]) > MAX_DRIFT_PX * resolution;
+  }
+
+  /**
+   * Whether the buffers were built for other features than the source holds
+   * now. With ol's text worker the buffers wait for the view to rest, as in
+   * ol: it draws the text for the view of the build.
+   */
+  private featuresChanged(source: VectorSource): boolean {
+    return !this.textOverlay && this.built?.revision !== source.getRevision();
   }
 
   /** The buffers (also those being built) no longer fit: the next frame builds new ones. */
@@ -530,6 +541,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       indexTransform: this.hitDetection ? [size[0] / 2, 0, 0, size[1] / 2, 0, 0] : null,
     });
 
+    // without buffers the text image for these instructions is never shown
+    geometry.catch(() => textKey.then((key) => key && text?.dispose(key))).catch(() => {});
+
     Promise.all([geometry, textKey])
       .then(([response, key]: [BuildResponse, string | null]) => {
         if (generation !== this.generation || this.disposed) {
@@ -577,12 +591,20 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         this.getLayer()?.changed();
       })
       .catch((e) => {
-        console.error('ol-webgpu: buffer generation failed', e);
+        const workerFailed = e instanceof WorkerFailedError;
+        if (!workerFailed) {
+          console.error('ol-webgpu: buffer generation failed', e);
+        }
         if (generation !== this.generation || this.disposed) {
           return;
         }
         this.building = false;
         this.awaitingText = false;
+        if (workerFailed) {
+          // the build was lost with the worker: the next frame builds on the main thread
+          this.invalidate();
+          this.getLayer()?.changed();
+        }
         this.updateReady();
       });
   }

@@ -4,8 +4,8 @@
  * hit index, with the Rust/WASM core (JS fallback if wasm cannot load).
  */
 import {type Core, LARGE_MEMORY_BYTES, compileWasm, loadCore} from '../wasm/core.js';
-import {buildLinesJs, buildPointsJs, buildPolygonsJs} from './fallback.js';
-import type {BufferSet, BuildRequest, BuildResponse, InitMessage, ReadyMessage} from './protocol.js';
+import {responseTransferables, runBuild} from './build.js';
+import type {BuildRequest, InitMessage, ReadyMessage} from './protocol.js';
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -50,10 +50,6 @@ function recycleWhenIdle() {
   }, IDLE);
 }
 
-function transferables(set: BufferSet | null): ArrayBuffer[] {
-  return set ? [set.indices.buffer as ArrayBuffer, set.vertices.buffer as ArrayBuffer, set.instances.buffer as ArrayBuffer] : [];
-}
-
 self.onmessage = async (event: MessageEvent<BuildRequest | InitMessage>) => {
   const req = event.data;
   if (req.type === 'init') {
@@ -61,48 +57,7 @@ self.onmessage = async (event: MessageEvent<BuildRequest | InitMessage>) => {
     return;
   }
   await coreReady;
-  const timings: Record<string, number> = {};
-  const time = <T>(name: string, fn: () => T): T => {
-    const t0 = performance.now();
-    const r = fn();
-    timings[name] = performance.now() - t0;
-    return r;
-  };
-  const points = req.points ? new Float32Array(req.points) : null;
-  const lines = req.lines ? new Float32Array(req.lines) : null;
-  const polygons = req.polygons ? new Float32Array(req.polygons) : null;
-  const invert = req.invert as [number, number, number, number, number, number];
-
-  const response: BuildResponse = {
-    type: 'build',
-    id: req.id,
-    points: null,
-    lines: null,
-    polygons: null,
-    index: null,
-    engine: core ? 'wasm' : 'js',
-    timings,
-  };
-  try {
-    // the point instances are the point instructions, which go back as they came
-    response.points = points && time('points', () => buildPointsJs(points, req.customSize));
-    if (core) {
-      const built = core.buildAll(points, lines, polygons, req.customSize, invert, req.indexTransform, req.refOffset, timings);
-      response.lines = built.lines;
-      response.polygons = built.polygons;
-      response.index = built.index;
-    } else {
-      response.lines = lines && time('lines', () => buildLinesJs(lines, req.customSize, invert));
-      response.polygons = polygons && time('polygons', () => buildPolygonsJs(polygons, req.customSize));
-    }
-  } catch (e) {
-    response.error = String((e as Error)?.stack ?? e);
-  }
+  const response = runBuild(req, core);
   recycleWhenIdle();
-  self.postMessage(response, [
-    ...transferables(response.points),
-    ...transferables(response.lines),
-    ...transferables(response.polygons),
-    ...(response.index ? [response.index.buffer as ArrayBuffer] : []),
-  ]);
+  self.postMessage(response, responseTransferables(response));
 };

@@ -16,9 +16,26 @@ import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
+import {WorkerClient} from '../../src/worker/client.js';
 
 const params = new URLSearchParams(location.search);
 const Layer = params.get('layer') === 'webgpu' ? WebGPUVectorLayer : WebGL2VectorLayer;
+
+/**
+ * `&worker=broken`: the worker fails while it has the first build, as when
+ * its script cannot be loaded. Everything below must hold all the same.
+ */
+const brokenWorker = params.get('worker') === 'broken';
+if (brokenWorker) {
+  (window as any).Worker = class extends EventTarget {
+    postMessage(message: {type: string}) {
+      if (message.type === 'build') {
+        setTimeout(() => this.dispatchEvent(new ErrorEvent('error', {message: 'broken for the test'})));
+      }
+    }
+    terminate() {}
+  };
+}
 
 const named = (geometry: any, name: string, properties: Record<string, unknown> = {}) => new Feature({geometry, name, ...properties});
 const square = (x: number, y: number, size: number) => new Polygon([[[x, y], [x + size, y], [x + size, y + size], [x, y + size], [x, y]]]);
@@ -73,7 +90,9 @@ const names = (coordinate: number[]) => map.getFeaturesAtPixel(map.getPixelFromC
   try {
     await settle();
     const first = renderer().builds;
-    check('the first view builds once', first === 1, {builds: first});
+    // without the worker, the build it took with it is made again on the main thread
+    check('the first view builds once', first === (brokenWorker ? 2 : 1), {builds: first});
+    check('the builds run where expected', WorkerClient.shared().onMainThread === brokenWorker, {onMainThread: WorkerClient.shared().onMainThread});
 
     view.setCenter([30, 20]);
     await settle();
@@ -124,6 +143,24 @@ const names = (coordinate: number[]) => map.getFeaturesAtPixel(map.getPixelFromC
       builds: renderer().builds - before,
       beside: names([43, 25]),
       on: names([40, 25]),
+    });
+
+    // a feature that arrives while the view moves does not wait for it to rest
+    const moving = renderer().builds;
+    view.animate({center: [40, 20], duration: 1500});
+    await frame();
+    await frame();
+    source.addFeature(named(new Point([20, 40]), 'while moving', {radius: 6, color: '#7b3294', width: 1}));
+    let builtMoving = false;
+    while (view.getAnimating()) {
+      await frame();
+      builtMoving ||= renderer().builds > moving && renderer().ready && view.getAnimating();
+    }
+    await settle();
+    check('a feature added while the view moves is built before it rests', builtMoving && renderer().builds === moving + 1 && names([20, 40]).join() === 'while moving', {
+      builtMoving,
+      builds: renderer().builds - moving,
+      hit: names([20, 40]),
     });
 
     // 2^20 px away at this resolution: too far for the floats of this build
