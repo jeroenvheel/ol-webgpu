@@ -65,6 +65,26 @@ const server = await createServer({
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
   optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'renderfeature.ts', 'rebuild.ts']},
   worker: {format: 'es'},
+  plugins: [
+    {
+      // an image that takes a while, for the export test (export.ts)
+      name: 'slow-icon',
+      configureServer(devServer) {
+        devServer.middlewares.use('/slow-icon.png', (_req, res) => {
+          const png = new PNG({width: 32, height: 32});
+          png.data.fill(255); // opaque white
+          for (let i = 1; i < png.data.length; i += 4) {
+            png.data[i] = png.data[i + 1] = 0; // red
+          }
+          setTimeout(() => {
+            res.setHeader('Content-Type', 'image/png');
+            res.setHeader('Cache-Control', 'no-store');
+            res.end(PNG.sync.write(png));
+          }, 700);
+        });
+      },
+    },
+  ],
 });
 await server.listen();
 const base = server.resolvedUrls.local[0];
@@ -313,6 +333,22 @@ if (args.export !== 'false' && (!args.match || 'export'.includes(args.match) || 
       `  ${layer.padEnd(24)} ${ok ? 'ok  ' : 'FAIL'} ${r ? `exported ${r.drawn} px (empty layer ${r.empty}), shown ${shown} px, ${cleared} px after clearing` : `timed out ${errors.join(' | ').slice(0, 200)}`}`,
     );
   }
+  // an icon that loads late: rendercomplete waits for it
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    errors.length = 0;
+    await page.goto(`${base}export.html?layer=${layer}&icons=slow`);
+    let r = null;
+    try {
+      await page.waitForFunction(() => window.__export, null, {timeout: 30_000, polling: 50});
+      r = await page.evaluate(() => window.__export);
+    } catch {
+      // reported below
+    }
+    // a 32 x 32 px icon
+    const ok = r && r.icons > 900 && r.icons < 1200;
+    exportFailures += ok ? 0 : 1;
+    console.log(`  ${`${layer}, slow icon`.padEnd(24)} ${ok ? 'ok  ' : 'FAIL'} ${r ? `exported ${r.icons} px of the icon` : `timed out ${errors.join(' | ').slice(0, 200)}`}`);
+  }
 }
 
 // --- shared canvases: grouping, order and layer opacity ----------------------
@@ -513,6 +549,8 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
     .flatMap((layer) => [
       {name: layer, query: `layer=${layer}`},
       {name: `${layer}, no worker`, query: `layer=${layer}&worker=broken`},
+      // the WebGPU layer also with a device that is not there at first: it tries again
+      ...(layer === 'webgpu' ? [{name: 'webgpu, late device', query: 'layer=webgpu&device=late'}] : []),
     ]);
   for (const {name, query} of runs) {
     errors.length = 0;

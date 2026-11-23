@@ -56,6 +56,9 @@ export function makeProjectionTransform(frameState: FrameState, transform: Trans
 export class UniformState {
   private readonly startTime = Date.now();
 
+  /** Called for an image of the style that has not loaded yet, in each frame that would draw it. */
+  onPendingImage: ((image: HTMLImageElement) => void) | null = null;
+
   constructor(private styleUniforms: Record<string, UniformValue>) {}
 
   setStyleUniforms(u: Record<string, UniformValue>) {
@@ -100,6 +103,9 @@ export class UniformState {
         out.set(name, Float32Array.from(mat4FromTransform(tmpMat4, value as Transform)));
       } else if (value !== undefined && value !== null) {
         out.set(name, value);
+        if (this.onPendingImage && typeof HTMLImageElement !== 'undefined' && value instanceof HTMLImageElement && !value.complete) {
+          this.onPendingImage(value);
+        }
       }
     }
 

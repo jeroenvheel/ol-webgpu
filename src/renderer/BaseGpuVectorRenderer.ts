@@ -207,6 +207,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   gpuText: GpuText | null = null;
   /** The labels to draw in the current frame. */
   protected labelFrame: LabelFrame | null = null;
+  /** Images of the style that are still loading (see `awaitImage`). */
+  private readonly pendingImages = new Set<HTMLImageElement>();
   /**
    * Whether the uploaded data is also kept in memory, to upload it again
    * at once when the context is lost or the layer moves to another canvas.
@@ -233,6 +235,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.passes = buildStylePasses(this.style, this.variables);
     this.instructions = new InstructionBuilder(this.passes.customAttributes);
     this.uniformState = new UniformState(this.passes.uniforms);
+    this.uniformState.onPendingImage = (image) => this.awaitImage(image);
     this.worker = WorkerClient.shared(options);
     this.textMode = options.text ?? 'gpu';
     this.declutter = options.declutter ? String(options.declutter) : null;
@@ -348,6 +351,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.variables = variables;
     this.passes = buildStylePasses(style, variables);
     this.uniformState.setStyleUniforms(this.passes.uniforms);
+    this.pendingImages.clear();
     this.picker?.setStyle(style, variables);
     this.applyPasses();
     this.disposeBuffers();
@@ -391,9 +395,35 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   // --- frame -----------------------------------------------------------
 
+  /**
+   * An image of the style (an icon, a fill or stroke pattern) is still
+   * loading: the layer is drawn without it, is not ready (so
+   * `rendercomplete` and a map export wait for it) and is drawn again when
+   * the image is there.
+   */
+  private awaitImage(image: HTMLImageElement) {
+    if (this.pendingImages.has(image)) {
+      return;
+    }
+    this.pendingImages.add(image);
+    const done = () => {
+      image.removeEventListener('load', done);
+      image.removeEventListener('error', done);
+      // not for the images of a style that was replaced meanwhile
+      if (!this.pendingImages.delete(image) || this.disposed) {
+        return;
+      }
+      this.updateReady();
+      this.getLayer()?.changed();
+    };
+    image.addEventListener('load', done);
+    image.addEventListener('error', done);
+    this.updateReady();
+  }
+
   /** Sets `ready` from the state it follows from; the only place that does. */
   protected updateReady() {
-    const ready = !this.building && !this.awaitingText && !this.backendPending && !this.gpuText?.pending;
+    const ready = !this.building && !this.awaitingText && !this.backendPending && !this.gpuText?.pending && this.pendingImages.size === 0;
     if (ready && !this.ready) {
       this.framesSinceReady = 0;
     }
@@ -829,6 +859,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   override disposeInternal() {
     liveRenderers.delete(this as BaseGpuVectorRenderer<unknown>);
+    this.pendingImages.clear();
     this.disposeBuffers();
     const core = this.picker?.core;
     if (core && core.indexCount === 0 && core.memoryBytes > LARGE_MEMORY_BYTES) {

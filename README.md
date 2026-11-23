@@ -188,7 +188,12 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
   worker cannot start (its file is missing, or a Content Security Policy
   blocks it) or fails, a warning is logged and the buffers are built on the
   main thread from then on: the layers stay complete, but big builds block
-  the page while they run.
+  the page while they run. A `WebGPUVectorLayer` that gets no device (or no
+  shader translator) tries again after 1, 2, 4, ... up to 30 seconds, as long
+  as the browser has WebGPU; `GpuVectorLayer` goes to WebGL2 at once.
+- **Images of the style.** While an icon or a pattern image loads, the layer
+  is drawn without it and is not ready: `rendercomplete` (and so a map
+  export) waits for the image, and the layer is drawn again when it is there.
 
 ## Labels
 
@@ -224,9 +229,14 @@ two backends and GPU-evaluated styles.
   wide, growing to 4096 px high) is shared by all layers of the page. Text
   in scripts that need shaping (Arabic, Hebrew, Indic, combining marks) is
   drawn as a whole line. When a web font of the labels finishes loading, or
-  the atlas is full, it starts over and the labels are laid out again. Other
-  fonts of the page (an icon font, the fonts of the interface) change
-  nothing.
+  the atlas is full, it starts over on a new page and the labels are laid
+  out again; until then they are drawn as they were, from the page before.
+  Other fonts of the page (an icon font, the fonts of the interface) change
+  nothing. A full atlas only starts over when that helps: when the labels of
+  the last layout of every layer fit together, so it is full of glyphs of
+  labels that are gone (and at most every 5 seconds). Labels that need more
+  glyphs than the atlas holds keep the ones they have, and a warning is
+  logged.
 - **Layout.** Positions follow ol's Canvas text renderer: alignment,
   justification, baseline, offsets, rotation, scale, padding, background,
   several lines, polygon labels at the interior point (hidden when wider
@@ -384,12 +394,14 @@ WebGL2 and WebGPU give the same pixels. Rotated text is resampled a little diffe
 does it. In a rotated view Canvas also resamples upright labels, where GPU
 text keeps them on whole pixels; that is most of the last row.
 
-`test/rendering/labels.ts` checks 15 situations on both backends: hit
+`test/rendering/labels.ts` checks 16 situations on both backends: hit
 detection of labels (also with `hitTolerance`, and not for a label hidden by
 decluttering), a new layout after panning and zooming, style variables, a
 new style, added and removed features, the layer opacity, and web fonts
 that load: one no label uses leaves the atlas as it is, one of the labels
-makes it start over.
+makes it start over, and the labels of a layer with 40 000 features stay on
+screen for the frames it takes to lay them out again.
+`test/unit/atlas.test.ts` covers when a full atlas starts over.
 `test/unit/declutter.test.ts` covers the collision grid and the choice of
 the labels that get glyphs.
 
@@ -402,8 +414,9 @@ and without view rotation.
 **Map export.** `test/rendering/export.ts` reads the layer canvases with
 `drawImage` in a `rendercomplete` listener: the drawn layer must read back
 complete (14 400 px), an empty layer must read back empty, and after its
-features are removed the layer must disappear from the screen. Both backends
-pass.
+features are removed the layer must disappear from the screen. With an icon
+that the server sends after 700 ms, the first `rendercomplete` of the map
+must come with the icon drawn. Both backends pass.
 
 **Shared canvases.** `test/rendering/shared.ts` renders two layers, an ol
 canvas layer and a third layer, one of them with opacity 0.5 and overlapping
@@ -426,7 +439,9 @@ each take one build, that a feature added during an animation is built
 before the view rests, and that a view 2^20 pixels away builds again. All of
 it runs a second time with a worker that fails while it has the first
 build: the build is then made again on the main thread, and so are the
-following ones. `test/unit/worker.test.ts` covers the worker client.
+following ones. `test/unit/worker.test.ts` covers the worker client. The
+WebGPU layer runs a third time with no adapter at the first request: it
+tries again and then passes the same checks.
 `test/unit/instructions.test.ts` checks that the render instructions equal
 those of ol's generators float for float, also after features changed, were
 removed and added, and that attribute callbacks run once per feature.
@@ -544,8 +559,6 @@ view), which is not sliced yet.
     does not take space (`examples/labels-compare.html` shows the
     difference).
   - Hit detection uses the label's box, not its glyphs.
-  - When a web font of the labels finishes loading or the atlas is full, labels disappear
-    for the frames it takes to lay them out again.
   - Compared with ol's text worker (`WebGLVector`, `text: 'canvas'`) the
     pixels differ: translucent halos and backgrounds are blended as Canvas
     does, where ol's text post-process applies the alpha twice.

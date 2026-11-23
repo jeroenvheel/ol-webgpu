@@ -5,10 +5,15 @@
  * Results in window.__export; `window.__clearExport()` then removes the
  * features, so the runner can check from a screenshot that the canvas was
  * cleared and does not keep showing the old frame.
+ *
+ * `&icons=slow`: one layer with an icon that takes a while to load (the
+ * runner serves it late). `rendercomplete` must wait for it, so the export
+ * has the icon. Result in window.__export: {icons: pixels}.
  */
 import Feature from 'ol/Feature.js';
 import Map from 'ol/Map.js';
 import View from 'ol/View.js';
+import Point from 'ol/geom/Point.js';
 import Polygon from 'ol/geom/Polygon.js';
 import VectorSource from 'ol/source/Vector.js';
 import {frame, renderersSettled} from './settled.js';
@@ -23,7 +28,13 @@ const source = new VectorSource({
 });
 const drawn = new Layer({source, className: 'drawn', style: {'fill-color': '#d7191c'}});
 const empty = new Layer({source: new VectorSource(), className: 'empty', style: {'fill-color': '#2c7bb6'}});
-const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [drawn, empty], view: new View({center: [0, 0], resolution: 1})});
+const slowIcons = params.get('icons') === 'slow';
+const icons = new Layer({
+  source: new VectorSource({features: [new Feature(new Point([0, 0]))]}),
+  className: 'icons',
+  style: {'icon-src': `/slow-icon.png?${Date.now()}`, 'icon-width': 32, 'icon-height': 32},
+});
+const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: slowIcons ? [icons] : [drawn, empty], view: new View({center: [0, 0], resolution: 1})});
 
 const probe = document.createElement('canvas').getContext('2d', {willReadFrequently: true})!;
 function drawnPixels(className: string): number {
@@ -41,9 +52,15 @@ function drawnPixels(className: string): number {
 }
 
 const settled = () => renderersSettled();
-const renderComplete = () => new Promise((r) => map.once('rendercomplete', () => r({drawn: drawnPixels('drawn'), empty: drawnPixels('empty')})));
+const renderComplete = () =>
+  new Promise((r) => map.once('rendercomplete', () => r(slowIcons ? {icons: drawnPixels('icons')} : {drawn: drawnPixels('drawn'), empty: drawnPixels('empty')})));
 
 (async () => {
+  if (slowIcons) {
+    // the first rendercomplete of the map, as an app that exports would wait for
+    (window as any).__export = await renderComplete();
+    return;
+  }
   while (!settled()) {
     await frame();
   }

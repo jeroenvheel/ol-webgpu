@@ -37,6 +37,18 @@ if (brokenWorker) {
   };
 }
 
+/**
+ * `&device=late`: the first request for a WebGPU adapter gives none, as
+ * while the GPU process of the browser starts again. The layer tries again.
+ */
+const lateDevice = params.get('device') === 'late';
+if (lateDevice) {
+  const gpu = navigator.gpu;
+  const request = gpu.requestAdapter.bind(gpu);
+  let requests = 0;
+  gpu.requestAdapter = (options) => (requests++ === 0 ? Promise.resolve(null) : request(options));
+}
+
 const named = (geometry: any, name: string, properties: Record<string, unknown> = {}) => new Feature({geometry, name, ...properties});
 const square = (x: number, y: number, size: number) => new Polygon([[[x, y], [x + size, y], [x + size, y + size], [x, y + size], [x, y]]]);
 
@@ -88,6 +100,15 @@ const names = (coordinate: number[]) => map.getFeaturesAtPixel(map.getPixelFromC
   const results: Record<string, {ok: boolean; detail: string}> = {};
   const check = (name: string, ok: boolean, detail: unknown) => (results[name] = {ok, detail: typeof detail === 'string' ? detail : JSON.stringify(detail)});
   try {
+    if (lateDevice) {
+      // meanwhile the layer is ready (it does not hold back rendercomplete) and empty
+      for (let i = 0; !renderer()?.builds; i++) {
+        await frame();
+        if (i > 600) {
+          throw new Error('the layer did not try again for a device');
+        }
+      }
+    }
     await settle();
     const first = renderer().builds;
     // without the worker, the build it took with it is made again on the main thread
