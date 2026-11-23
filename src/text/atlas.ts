@@ -98,6 +98,30 @@ export function fontFamilies(font: string): string[] | null {
   return families ? families.map(familyName) : null;
 }
 
+const quantizedFonts = new Map<string, string>();
+
+/**
+ * A font with its pixel size in half pixels. Every font gets cells and
+ * measurements of its own, so a size that is computed (from a property or
+ * the zoom) would otherwise fill the atlas with fonts that look the same.
+ */
+export function quantizeFont(font: string): string {
+  let quantized = quantizedFonts.get(font);
+  if (quantized === undefined) {
+    quantized = font.replace(/(\d*\.\d+)px/g, (_match, size) => `${Math.max(0.5, Math.round(Number(size) * 2) / 2)}px`);
+    if (quantizedFonts.size > 1000) {
+      quantizedFonts.clear();
+    }
+    quantizedFonts.set(font, quantized);
+  }
+  return quantized;
+}
+
+/** A halo width in quarter pixels, for the same reason as `quantizeFont`. */
+export function quantizeStrokeWidth(width: number): number {
+  return Math.max(0, Math.round(width * 4) / 4);
+}
+
 export function needsShaping(text: string): boolean {
   return SHAPED.test(text);
 }

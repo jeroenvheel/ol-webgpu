@@ -18,6 +18,7 @@ export abstract class Surface {
   private needsClear = false;
   /** The canvas shows nothing (never drawn, cleared or resized). */
   protected blank = true;
+  private background: string | undefined;
 
   constructor(
     readonly key: string,
@@ -28,6 +29,14 @@ export abstract class Surface {
     canvas.style.left = '0'; // like ol's WebGL canvas: no explicit top
     canvas.className = className;
     this.canvas = canvas;
+  }
+
+  /** The colour behind what the layers draw (the `background` of the first layer on the canvas). */
+  setBackground(color: string | undefined) {
+    if (color !== this.background) {
+      this.background = color;
+      this.canvas.style.backgroundColor = color ?? '';
+    }
   }
 
   /** Sizes the canvas for a frame (a resize clears it). */

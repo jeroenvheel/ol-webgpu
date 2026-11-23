@@ -14,7 +14,8 @@ import ViewHint from 'ol/ViewHint.js';
 import type {Coordinate} from 'ol/coordinate.js';
 import {type EventsKey, listen, unlistenByKey} from 'ol/events.js';
 import {buffer as bufferExtent, createEmpty, equals as extentEquals} from 'ol/extent.js';
-import type Layer from 'ol/layer/Layer.js';
+import {asArray, toString as colorToString} from 'ol/color.js';
+import {type default as Layer, inView} from 'ol/layer/Layer.js';
 import type {Pixel} from 'ol/pixel.js';
 import {getTransformFromProjections, getUserProjection, toUserExtent, toUserResolution} from 'ol/proj.js';
 import {
@@ -113,6 +114,8 @@ export interface RebuildStats {
  * some ten levels next to the centre of the build, to get there.
  */
 const MAX_DRIFT_PX = 2 ** 19;
+/** How often a build that failed is made again before the layer waits for other features. */
+const MAX_BUILD_RETRIES = 3;
 
 let mainThreadCore: Promise<Core> | null = null;
 
@@ -122,12 +125,39 @@ let mainThreadCore: Promise<Core> | null = null;
  * must not outlive the map because it was the last one to render.
  */
 const groupKeys = new WeakMap<FrameState, Map<unknown, string>>();
+/** Background colour per canvas group of a frame (see `surfaceKeys`). */
+const groupBackgrounds = new WeakMap<FrameState, Map<string, string>>();
+
+/**
+ * The `background` of a layer for a frame, as ol's Canvas layers show it:
+ * behind the layer, with the layer's opacity, and only while the layer is
+ * visible.
+ */
+function layerBackground(state: FrameState['layerStatesArray'][number], frameState: FrameState): string | undefined {
+  let background = (state.layer as Layer).getBackground() as unknown;
+  if (typeof background === 'function') {
+    background = background(frameState.viewState.resolution);
+  }
+  if (!background || typeof background !== 'string' || !inView(state, frameState.viewState)) {
+    return undefined;
+  }
+  try {
+    const color = asArray(background);
+    return colorToString([color[0], color[1], color[2], color[3] * state.opacity]);
+  } catch {
+    return undefined; // not a colour: nothing to show
+  }
+}
 
 /**
  * Same grouping as ol's WebGL layers (renderer/webgl/Layer.js): consecutive
  * layers of one surface type with the same class name share a canvas; any
  * other layer in between starts a new group. Read from the layers
  * (`getSurfaceType`), so no renderers are created for hidden layers.
+ *
+ * A layer with a `background` is behind everything on its canvas (the
+ * background is the canvas element's, as with ol's Canvas layers), so it
+ * starts a new group unless the group so far has that background already.
  */
 function surfaceKeys(frameState: FrameState): Map<unknown, string> {
   const known = groupKeys.get(frameState);
@@ -135,8 +165,9 @@ function surfaceKeys(frameState: FrameState): Map<unknown, string> {
     return known;
   }
   const keys = new Map<unknown, string>();
+  const backgrounds = new Map<string, string>();
   const groups: Record<string, number> = {};
-  let previous: {type: string; className: string; key: string} | null = null;
+  let previous: {type: string; className: string; key: string; background: string | undefined} | null = null;
   for (const state of frameState.layerStatesArray) {
     const layer = state.layer as Layer & {getSurfaceType?: () => string};
     const type = layer.getSurfaceType?.();
@@ -145,17 +176,19 @@ function surfaceKeys(frameState: FrameState): Map<unknown, string> {
       continue;
     }
     const className = layer.getClassName();
-    let key: string;
-    if (previous && previous.type === type && previous.className === className) {
-      key = previous.key;
-    } else {
+    const background = layerBackground(state, frameState);
+    if (!previous || previous.type !== type || previous.className !== className || (background && background !== previous.background)) {
       groups[type] = (groups[type] ?? -1) + 1;
-      key = `${frameState.mapId}/${type}/${groups[type]}`;
+      const key: string = `${frameState.mapId}/${type}/${groups[type]}`;
+      previous = {type, className, key, background};
+      if (background) {
+        backgrounds.set(key, background);
+      }
     }
-    keys.set(layer, key);
-    previous = {type, className, key};
+    keys.set(layer, previous.key);
   }
   groupKeys.set(frameState, keys);
+  groupBackgrounds.set(frameState, backgrounds);
   return keys;
 }
 
@@ -182,7 +215,11 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   private readonly batch = new FeatureBatch();
   private sourceKeys: EventsKey[] | null = null;
-  private initialFeaturesAdded = false;
+  /** The source the batch and the listeners are of (the layer may get another one). */
+  private boundSource: VectorSource | null = null;
+  /** Builds that failed in a row (see `rebuild`). */
+  private buildFailures = 0;
+  private buildRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private previousExtent = createEmpty();
   private sourceRevision = -1;
   private generation = 0;
@@ -306,10 +343,12 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private updateSurface(frameState: FrameState) {
     const key = this.surfaceKey(frameState);
     if (this.surface?.key === key) {
+      this.surface.setBackground(groupBackgrounds.get(frameState)?.get(key));
       return;
     }
     const previous = this.surface;
     this.surface = acquireSurface(key, () => this.createSurface(key, this.getLayer().getClassName()));
+    this.surface.setBackground(groupBackgrounds.get(frameState)?.get(key));
     this.surfaceChanged(previous);
     if (previous) {
       releaseSurface(previous);
@@ -362,8 +401,27 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   // --- source ----------------------------------------------------------
 
-  private addInitialFeatures(frameState: FrameState) {
-    const source = this.getLayer().getSource();
+  /**
+   * Takes the features of the layer's source and follows its changes. With
+   * another source than before (`layer.setSource()`), nothing of the one
+   * before is kept or shown.
+   */
+  private bindSource(source: VectorSource | null, frameState: FrameState) {
+    this.sourceKeys?.forEach(unlistenByKey);
+    this.sourceKeys = null;
+    if (this.boundSource) {
+      this.batch.clear();
+      this.instructions.reset();
+      this.disposeBuffers();
+      this.gpuText?.clear();
+      this.labelFrame = null;
+      this.buildFailures = 0;
+    }
+    this.boundSource = source;
+    // a revision or an extent of the source before says nothing about this one
+    this.sourceRevision = -1;
+    this.previousExtent = createEmpty();
+    this.invalidate();
     if (!source) {
       return;
     }
@@ -438,12 +496,11 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   }
 
   private prepareData(frameState: FrameState): boolean {
-    if (!this.initialFeaturesAdded) {
-      this.addInitialFeatures(frameState);
-      this.initialFeaturesAdded = true;
-    }
     const layer = this.getLayer();
     const source = layer.getSource();
+    if (source !== this.boundSource) {
+      this.bindSource(source, frameState);
+    }
     const frameExtent = frameState.extent;
     if (!source || !frameExtent) {
       return true;
@@ -615,6 +672,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
             this.pendingIndex = {data: response.index, center, resolution, frameState};
           }
         }
+        this.buildFailures = 0;
         this.stats = {engine: response.engine, instructions: instructionsTime, worker: response.timings, total: performance.now() - t0};
         this.building = false;
         this.updateReady();
@@ -634,6 +692,17 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
           // the build was lost with the worker: the next frame builds on the main thread
           this.invalidate();
           this.getLayer()?.changed();
+        } else if (++this.buildFailures <= MAX_BUILD_RETRIES) {
+          // It may pass (memory that was short, mostly): the same build again after 1, 2
+          // and 4 seconds, then not until the features change. The layer is ready
+          // meanwhile, with the buffers it had.
+          this.buildRetryTimer = setTimeout(() => {
+            this.buildRetryTimer = null;
+            if (generation === this.generation && !this.disposed) {
+              this.invalidate();
+              this.getLayer()?.changed();
+            }
+          }, 1000 * 2 ** (this.buildFailures - 1));
         }
         this.updateReady();
       });
@@ -692,7 +761,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     );
     surface.beginFrame(frameState);
 
-    const [startWorld, endWorld, worldWidth] = getWorldParameters(frameState, layer);
+    // without a source there is nothing to repeat (and ol reads the source for the worlds)
+    const [startWorld, endWorld, worldWidth] = layer.getSource() ? getWorldParameters(frameState, layer) : [0, 1, 0];
     const worlds: number[] = [];
     let world = startWorld;
     do {
@@ -859,6 +929,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   override disposeInternal() {
     liveRenderers.delete(this as BaseGpuVectorRenderer<unknown>);
+    if (this.buildRetryTimer !== null) {
+      clearTimeout(this.buildRetryTimer);
+    }
     this.pendingImages.clear();
     this.disposeBuffers();
     const core = this.picker?.core;

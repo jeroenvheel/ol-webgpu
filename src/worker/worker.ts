@@ -58,6 +58,15 @@ self.onmessage = async (event: MessageEvent<BuildRequest | InitMessage>) => {
   }
   await coreReady;
   const response = runBuild(req, core);
+  if (response.error && core && module) {
+    // whatever went wrong (out of memory, mostly), the next build gets a new instance
+    coreReady = loadCore(module).then(
+      (c) => {
+        core = c;
+      },
+      () => {},
+    );
+  }
   recycleWhenIdle();
   self.postMessage(response, responseTransferables(response));
 };

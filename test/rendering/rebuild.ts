@@ -41,6 +41,36 @@ if (brokenWorker) {
  * `&device=late`: the first request for a WebGPU adapter gives none, as
  * while the GPU process of the browser starts again. The layer tries again.
  */
+/**
+ * `&build=fails`: the worker answers the first build with an error, as when
+ * memory is short. The layer makes the build again a second later.
+ */
+const failingBuild = params.get('build') === 'fails';
+if (failingBuild) {
+  const RealWorker = window.Worker;
+  let failed = false;
+  (window as any).Worker = class extends EventTarget {
+    private readonly worker: Worker;
+    constructor(url: URL, options: WorkerOptions) {
+      super();
+      this.worker = new RealWorker(url, options);
+      this.worker.addEventListener('message', (e) => this.dispatchEvent(new MessageEvent('message', {data: e.data})));
+    }
+    postMessage(message: {type: string; id: number}, transfer: Transferable[]) {
+      if (message.type === 'build' && !failed) {
+        failed = true;
+        const data = {type: 'build', id: message.id, points: null, lines: null, polygons: null, index: null, engine: 'wasm', timings: {}, error: 'failed for the test'};
+        setTimeout(() => this.dispatchEvent(new MessageEvent('message', {data})));
+        return;
+      }
+      this.worker.postMessage(message, transfer);
+    }
+    terminate() {
+      this.worker.terminate();
+    }
+  };
+}
+
 const lateDevice = params.get('device') === 'late';
 if (lateDevice) {
   const gpu = navigator.gpu;
@@ -100,19 +130,20 @@ const names = (coordinate: number[]) => map.getFeaturesAtPixel(map.getPixelFromC
   const results: Record<string, {ok: boolean; detail: string}> = {};
   const check = (name: string, ok: boolean, detail: unknown) => (results[name] = {ok, detail: typeof detail === 'string' ? detail : JSON.stringify(detail)});
   try {
-    if (lateDevice) {
+    const firstBuilds = brokenWorker || failingBuild ? 2 : 1;
+    if (lateDevice || failingBuild) {
       // meanwhile the layer is ready (it does not hold back rendercomplete) and empty
-      for (let i = 0; !renderer()?.builds; i++) {
+      for (let i = 0; (renderer()?.builds ?? 0) < firstBuilds; i++) {
         await frame();
         if (i > 600) {
-          throw new Error('the layer did not try again for a device');
+          throw new Error('the layer did not try again');
         }
       }
     }
     await settle();
     const first = renderer().builds;
     // without the worker, the build it took with it is made again on the main thread
-    check('the first view builds once', first === (brokenWorker ? 2 : 1), {builds: first});
+    check('the first view builds once', first === firstBuilds, {builds: first});
     check('the builds run where expected', WorkerClient.shared().onMainThread === brokenWorker, {onMainThread: WorkerClient.shared().onMainThread});
 
     view.setCenter([30, 20]);
@@ -184,11 +215,54 @@ const names = (coordinate: number[]) => map.getFeaturesAtPixel(map.getPixelFromC
       hit: names([20, 40]),
     });
 
+    // another source: its features and nothing of the one before, and back
+    const other = new VectorSource({features: [named(new Point([30, 5]), 'other', {radius: 8, color: '#008837', width: 1})]});
+    layer.setSource(other);
+    await settle();
+    const swapped = {old: names([40, 25]), new: names([30, 5])};
+    layer.setSource(null);
+    await settle();
+    let left = 0;
+    const emptied = image();
+    for (let i = 3; i < emptied.length; i += 4) {
+      left += emptied[i] > 0 ? 1 : 0;
+    }
+    layer.setSource(source);
+    await settle();
+    const back = {old: names([40, 25]), new: names([30, 5])};
+    check(
+      'another source replaces the features',
+      swapped.old.length === 0 && swapped.new.join() === 'other' && left === 0 && back.old.join() === 'point' && back.new.length === 0,
+      {swapped, 'pixels without a source': left, back},
+    );
+
     // 2^20 px away at this resolution: too far for the floats of this build
     const far = renderer().builds;
     view.setCenter([30 + 2 ** 19, 20]);
     await settle();
     check('a far view builds again', renderer().builds === far + 1, {builds: renderer().builds - far});
+
+    // the background of a layer is the colour of its canvas, with the layer's opacity
+    const canvases = () => [...document.querySelectorAll('#map canvas')].map((c) => (c as HTMLCanvasElement).style.backgroundColor);
+    layer.setBackground('#0000ff');
+    await settle();
+    const one = canvases();
+    const above = new Layer({source: new VectorSource({features: [named(new Point([0, 0]), 'above', {radius: 4, color: '#000000', width: 1})]}), style});
+    map.addLayer(above);
+    await settle();
+    const shared = canvases();
+    above.setBackground('rgba(255, 0, 0, 0.5)');
+    layer.setOpacity(0.5);
+    await settle();
+    const two = canvases();
+    layer.setVisible(false);
+    await settle();
+    const hidden = canvases();
+    check(
+      'a background is the colour of the canvas',
+      one.join('|') === 'rgb(0, 0, 255)' && shared.join('|') === 'rgb(0, 0, 255)' && two.join('|') === 'rgba(0, 0, 255, 0.5)|rgba(255, 0, 0, 0.5)' && hidden.join('|') === 'rgba(255, 0, 0, 0.5)',
+      {one, shared, two, hidden},
+    );
   } catch (e) {
     check('page finished', false, String((e as Error)?.stack ?? e));
   }

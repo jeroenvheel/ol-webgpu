@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {type AtlasUse, GlyphAtlas, createAtlasUse, fontFamilies} from '../../src/text/atlas.js';
+import {type AtlasUse, GlyphAtlas, createAtlasUse, fontFamilies, quantizeFont, quantizeStrokeWidth} from '../../src/text/atlas.js';
 
 /** Texels of one side of every glyph the fake canvas measures: 4 x 8 of them fill the atlas. */
 const GLYPH = 500;
@@ -58,6 +58,19 @@ describe('GlyphAtlas', () => {
   it('reads the families of a font', () => {
     expect(fontFamilies('bold 13px "Open Sans", sans-serif')).toEqual(['open sans', 'sans-serif']);
     expect(fontFamilies("italic 1.2em 'Noto Serif'")).toEqual(['noto serif']);
+  });
+
+  it('takes computed font sizes and halo widths in steps', () => {
+    expect(quantizeFont('bold 13px "Open Sans", sans-serif')).toBe('bold 13px "Open Sans", sans-serif');
+    expect(quantizeFont('12.5px sans-serif')).toBe('12.5px sans-serif');
+    expect(quantizeFont('12.3456px sans-serif')).toBe('12.5px sans-serif');
+    expect(quantizeFont('italic 12.2px/1.25 serif')).toBe('italic 12px/1.25 serif');
+    expect(quantizeFont('0.1px serif')).toBe('0.5px serif');
+    expect(quantizeFont('1.37em serif')).toBe('1.37em serif');
+    expect(quantizeStrokeWidth(3)).toBe(3);
+    expect(quantizeStrokeWidth(1.5)).toBe(1.5);
+    expect(quantizeStrokeWidth(1.6)).toBe(1.5);
+    expect(quantizeStrokeWidth(-1)).toBe(0);
   });
 
   it('starts over for a font of the labels only', () => {

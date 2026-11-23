@@ -150,6 +150,17 @@ export default class GpuText {
     this.styleVersion++;
   }
 
+  /** Forgets the labels: they are of a source the layer no longer has. */
+  clear() {
+    this.job = null;
+    this.next = null;
+    this.set = null;
+    this.setKey = null;
+    this.worlds = [];
+    this.hitCache = null;
+    this.shownVersion++;
+  }
+
   /** A layout is in progress and there are no labels to draw yet. */
   get pending(): boolean {
     return !!this.job && !this.set && !this.next;

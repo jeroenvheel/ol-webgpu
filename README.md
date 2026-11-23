@@ -194,6 +194,20 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
 - **Images of the style.** While an icon or a pattern image loads, the layer
   is drawn without it and is not ready: `rendercomplete` (and so a map
   export) waits for the image, and the layer is drawn again when it is there.
+- **Another source.** After `layer.setSource()` the layer shows the features
+  of the new source and nothing of the one before; without a source it
+  shows nothing.
+- **Background.** The `background` option of a layer (a colour, or a function
+  of the resolution) is the background colour of its canvas element, with
+  the layer's opacity and only while the layer is visible, as with ol's
+  Canvas layers. It is behind everything on that canvas, so a layer with a
+  background starts a canvas of its own unless the layers below it on the
+  shared canvas have the same one. Like ol's, it is CSS: a map export that
+  draws the canvases has to fill it in itself.
+- **A build that fails.** When the buffers of a layer cannot be built (out of
+  memory, mostly), the layer keeps what it shows, the worker gets a new wasm
+  instance, and the build is made again after 1, 2 and 4 seconds. After that
+  it waits until the features change.
 
 ## Labels
 
@@ -236,7 +250,9 @@ two backends and GPU-evaluated styles.
   the last layout of every layer fit together, so it is full of glyphs of
   labels that are gone (and at most every 5 seconds). Labels that need more
   glyphs than the atlas holds keep the ones they have, and a warning is
-  logged.
+  logged. Font sizes with a fraction are taken in half pixels and halo
+  widths in quarter pixels, so a size that is computed (from a property or
+  the zoom) does not get cells of its own for every value.
 - **Layout.** Positions follow ol's Canvas text renderer: alignment,
   justification, baseline, offsets, rotation, scale, padding, background,
   several lines, polygon labels at the interior point (hidden when wider
@@ -441,7 +457,10 @@ it runs a second time with a worker that fails while it has the first
 build: the build is then made again on the main thread, and so are the
 following ones. `test/unit/worker.test.ts` covers the worker client. The
 WebGPU layer runs a third time with no adapter at the first request: it
-tries again and then passes the same checks.
+tries again and then passes the same checks, and the WebGL2 layer once more
+with a first build that fails. The page also checks that another source
+replaces the features (and no source shows nothing), and that backgrounds
+end up on the canvases: shared, with the opacity, split when they differ.
 `test/unit/instructions.test.ts` checks that the render instructions equal
 those of ol's generators float for float, also after features changed, were
 removed and added, and that attribute callbacks run once per feature.

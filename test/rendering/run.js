@@ -549,6 +549,8 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
     .flatMap((layer) => [
       {name: layer, query: `layer=${layer}`},
       {name: `${layer}, no worker`, query: `layer=${layer}&worker=broken`},
+      // a first build that fails is made again (the same for both backends)
+      ...(layer === 'webgl2' ? [{name: 'webgl2, failed build', query: 'layer=webgl2&build=fails'}] : []),
       // the WebGPU layer also with a device that is not there at first: it tries again
       ...(layer === 'webgpu' ? [{name: 'webgpu, late device', query: 'layer=webgpu&device=late'}] : []),
     ]);

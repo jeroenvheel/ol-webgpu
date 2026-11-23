@@ -20,7 +20,17 @@ import {drawTextOnPath, rtlRegEx} from 'ol/geom/flat/textpath.js';
 import {measureAndCacheTextWidth, measureTextHeight} from 'ol/render/canvas.js';
 import type Text from 'ol/style/Text.js';
 import {getUid} from 'ol/util.js';
-import {type AtlasPage, type AtlasUse, DROP_BINS, type GlyphAtlas, SUBPIXEL_BINS, createAtlasUse, segments} from './atlas.js';
+import {
+  type AtlasPage,
+  type AtlasUse,
+  DROP_BINS,
+  type GlyphAtlas,
+  SUBPIXEL_BINS,
+  createAtlasUse,
+  quantizeFont,
+  quantizeStrokeWidth,
+  segments,
+} from './atlas.js';
 import type {TextEvaluator} from './style.js';
 
 /**
@@ -454,13 +464,13 @@ export class LabelBuilder {
     if (this.options.toView) {
       geometry = this.options.toView(geometry);
     }
-    const strokeWidth = stroke ? (strokeStyle!.getWidth() ?? 1) : 0;
+    const strokeWidth = stroke ? quantizeStrokeWidth(strokeStyle!.getWidth() ?? 1) : 0;
     const declutterMode = text.getDeclutterMode();
     const mode = declutterMode === 'obstacle' ? MODE_OBSTACLE : declutterMode === 'none' ? MODE_NONE : MODE_DECLUTTER;
     const type: string = geometry.getType();
     const style = {
       value,
-      font: text.getFont() || '10px sans-serif',
+      font: quantizeFont(text.getFont() || '10px sans-serif'),
       fill: fill ?? NONE,
       stroke: stroke ?? NONE,
       lightFill: isLight(fill),
@@ -557,7 +567,7 @@ export class LabelBuilder {
         lines.push({chunks: [], width: 0, height: 0});
         continue;
       }
-      const font = raw[i + 1] || style.font;
+      const font = raw[i + 1] ? quantizeFont(raw[i + 1]) : style.font;
       const width = atlas.metrics(font).advance(chunkText);
       const height = measureTextHeight(font);
       const line = lines[lines.length - 1];
