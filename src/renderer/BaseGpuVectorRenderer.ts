@@ -17,7 +17,6 @@ import {buffer as bufferExtent, createEmpty, equals as extentEquals} from 'ol/ex
 import type Layer from 'ol/layer/Layer.js';
 import type {Pixel} from 'ol/pixel.js';
 import {getTransformFromProjections, getUserProjection, toUserExtent, toUserResolution} from 'ol/proj.js';
-import MixedGeometryBatch from 'ol/render/webgl/MixedGeometryBatch.js';
 import {
   generateLineStringRenderInstructions,
   generatePointRenderInstructions,
@@ -33,6 +32,7 @@ import {type Transform, apply as applyTransform, create as createTransform, make
 import LabelsArray from 'ol/webgl/LabelsArray.js';
 import {toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
 import {create as createMat4} from 'ol/vec/mat4.js';
+import {FeatureBatch} from '../render/batch.js';
 import {InstructionBuilder} from '../render/instructions.js';
 import {Picker} from '../render/picking.js';
 import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
@@ -180,7 +180,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   /** Frames drawn since the last buffers became ready. */
   framesSinceReady = 0;
 
-  private readonly batch = new MixedGeometryBatch();
+  private readonly batch = new FeatureBatch();
   private sourceKeys: EventsKey[] | null = null;
   private initialFeaturesAdded = false;
   private previousExtent = createEmpty();

@@ -152,6 +152,13 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
   points with 7 attributes take about 30 ms instead of 150 ms. With
   `text: 'canvas'` the buffers follow the extent as in ol, because ol's text
   worker draws the text for the view of the build.
+- **Adding features.** The batch is ol's `MixedGeometryBatch` with the refs
+  kept another way (`src/render/batch.ts`): ol looks every added feature up
+  in a Map from uid to ref, which took half the time of adding features to
+  a big source. Here the ref comes from the entries and the features are in
+  an array at their ref: 200 000 points are added in about 70 ms instead of
+  230–430 ms. `test/unit/batch.test.ts` checks that it holds what ol's batch
+  holds.
 - **CPU hit detection.** WebGPU readback is asynchronous, but OpenLayers asks
   for hits synchronously, so picking uses a spatial index (built in Rust in the
   worker, queried by a main-thread wasm instance) plus the style's filter,
