@@ -11,6 +11,7 @@ import VectorSource from 'ol/source/Vector.js';
 import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
+import {sharedAtlas} from '../../src/text/atlas.js';
 
 const params = new URLSearchParams(location.search);
 const Layer = params.get('layer') === 'webgpu' ? WebGPUVectorLayer : WebGL2VectorLayer;
@@ -29,7 +30,7 @@ const layer = new Layer({source, style: style(), variables: {scale: 1}});
 // two labels on one spot: the second gives way
 const crowded = new Layer({
   source: new VectorSource({features: [point(0, -80, 'first'), point(0, -80, 'second')]}),
-  style: {'text-value': ['get', 'name'], 'text-font': '14px sans-serif', 'text-fill-color': '#7b241c'},
+  style: {'text-value': ['get', 'name'], 'text-font': '14px "Label Font", sans-serif', 'text-fill-color': '#7b241c'},
   declutter: true,
 });
 const view = new View({center: [0, 0], resolution: 1});
@@ -131,6 +132,28 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
     // one of the two crowded labels is shown, and stays the same one
     const crowd = drawn(0, 180, 256, 256);
     check('decluttering shows one of two labels', crowd.count > 40 && crowd.count < 400 && crowd.alpha === 255, crowd);
+
+    // web fonts that arrive: only those of the labels make the atlas start over
+    const atlas = sharedAtlas();
+    const loadFont = async (family: string) => {
+      const face = new FontFace(family, "url('data/fonts/ubuntu-regular-webfont.woff2') format('woff2')");
+      document.fonts.add(face);
+      await face.load();
+      await document.fonts.ready;
+      await frame();
+    };
+    const generation = atlas.generation;
+    await loadFont('Icons Of The Page');
+    await settle();
+    check('a font no label uses keeps the atlas', atlas.generation === generation, {before: generation, after: atlas.generation});
+    await loadFont('Label Font');
+    await settle();
+    const relaid = drawn(0, 180, 256, 256);
+    check('a font of the labels starts the atlas over', atlas.generation === generation + 1 && relaid.count > 40 && relaid.alpha === 255, {
+      before: generation,
+      after: atlas.generation,
+      relaid,
+    });
   } catch (e) {
     check('no error', false, String(e));
   }

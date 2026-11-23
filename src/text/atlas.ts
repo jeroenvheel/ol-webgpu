@@ -17,6 +17,7 @@
  * over with a new `generation`; label sets built for an older generation are
  * laid out again.
  */
+import {getFontParameters} from 'ol/css.js';
 import {textHeights} from 'ol/render/canvas.js';
 
 export interface Glyph {
@@ -54,6 +55,17 @@ const EMPTY: Glyph = {x: 0, y: 0, w: 0, h: 0, left: 0, top: 0, width: 0, height:
 
 /** Scripts whose letters join, stack or reorder: such text is drawn as a whole, not per grapheme. */
 const SHAPED = /[֐-ࣿऀ-႟ក-៿᠀-᢯ᨀ-᫿יִ-﷿ﹰ-ﻼ]|\p{M}|‍/u;
+
+/** A font family as fonts are compared by: without quotes, in lower case. */
+function familyName(family: string): string {
+  return family.trim().replace(/^['"]|['"]$/g, '').trim().toLowerCase();
+}
+
+/** The families a CSS font value names, or null when it cannot be read (a system font like `caption`). */
+export function fontFamilies(font: string): string[] | null {
+  const families = getFontParameters(font)?.families;
+  return families ? families.map(familyName) : null;
+}
 
 export function needsShaping(text: string): boolean {
   return SHAPED.test(text);
@@ -177,12 +189,42 @@ export class GlyphAtlas {
   private readonly scratch = document.createElement('canvas').getContext('2d')!;
   private readonly measureContext = document.createElement('canvas').getContext('2d')!;
   private measureFont = '';
+  /** The families of the fonts measured or drawn since the atlas started over. */
+  private readonly families = new Set<string>();
+  /** A font in use could not be read for its families: any font that loads may be one of its. */
+  private unknownFamilies = false;
 
   constructor() {
     this.reset();
     if (document.fonts?.addEventListener) {
-      // a web font became available: cells drawn with the fallback font are stale
-      document.fonts.addEventListener('loadingdone', () => this.reset());
+      document.fonts.addEventListener('loadingdone', (e) => this.fontsLoaded((e as FontFaceSetLoadEvent).fontfaces));
+    }
+  }
+
+  /**
+   * Web fonts became available: cells and measurements made with a fallback
+   * font in their place are stale, so the atlas starts over. Fonts no label
+   * uses (an icon font, the fonts of the page around the map) change nothing.
+   * @param faces the fonts that loaded (unknown: any font may have)
+   * @return whether the atlas started over
+   */
+  fontsLoaded(faces?: readonly {family: string}[] | null): boolean {
+    if (!this.unknownFamilies && this.families.size === 0) {
+      return false; // nothing measured or drawn yet
+    }
+    if (faces?.length && !this.unknownFamilies && !faces.some((face) => this.families.has(familyName(face.family)))) {
+      return false;
+    }
+    this.reset();
+    return true;
+  }
+
+  private use(font: string) {
+    const families = fontFamilies(font);
+    if (families) {
+      families.forEach((family) => this.families.add(family));
+    } else {
+      this.unknownFamilies = true;
     }
   }
 
@@ -228,6 +270,8 @@ export class GlyphAtlas {
     this.fonts.clear();
     this.widthCaches = {};
     this.measureFont = '';
+    this.families.clear();
+    this.unknownFamilies = false;
     // line heights ol measured before a web font arrived are stale too
     for (const font in textHeights) {
       delete textHeights[font];
@@ -279,6 +323,7 @@ export class GlyphAtlas {
   measure(font: string, text: string): TextMetrics {
     const context = this.measureContext;
     if (this.measureFont !== font) {
+      this.use(font);
       context.font = font;
       context.textBaseline = 'middle';
       context.textAlign = 'left';
