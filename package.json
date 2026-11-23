@@ -49,6 +49,7 @@
     "bench": "node bench/run.js",
     "fetch-upstream": "node tasks/fetch-upstream.js",
     "sync-upstream-tests": "node tasks/sync-upstream-tests.js",
+    "sync-local": "node tasks/sync-local.js",
     "build:examples": "vite build"
   },
   "peerDependencies": {
