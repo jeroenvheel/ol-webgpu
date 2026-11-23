@@ -111,12 +111,13 @@ const scenarios: Record<string, () => Promise<void>> = {
     k.layers[0] = next;
     await settle(k.map);
   },
-  /** The view moves, so the buffers are built again. */
+  /** The view moves and the source reports a change, so the buffers are built again. */
   async pan() {
     const k = await keep('shapes', () => [new Layer({source: new VectorSource({features: features()}), style: shapes})]);
     step++;
     k.map.getView().setCenter([(step % 7) * 4e5, (step % 5) * 3e5]);
     k.map.getView().setZoom(2 + (step % 3));
+    k.sources[0].changed(); // moving the view alone builds nothing
     await settle(k.map);
   },
   /** The style is replaced. */
@@ -197,6 +198,7 @@ const scenarios: Record<string, () => Promise<void>> = {
     } else if (stepName === 'pan') {
       step++;
       w.__big.map.getView().setCenter([(step % 7) * 4e5, (step % 5) * 3e5]);
+      w.__big.layers[0].getSource().changed(); // moving the view alone builds nothing
       await settle(w.__big.map);
     } else if (stepName === 'dispose') {
       dispose(w.__big.map, w.__big.layers);

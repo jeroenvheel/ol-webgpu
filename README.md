@@ -112,7 +112,7 @@ export const isWebGPUAvailable = () => false;
 ## How it works
 
 ```
-ol/source/Vector ──► MixedGeometryBatch ──► render instructions      (main thread, ol code)
+ol/source/Vector ──► MixedGeometryBatch ──► render instructions      (main thread)
                                               │
                                               ▼  transferred
                               worker: Rust/WASM (crates/core)
@@ -136,6 +136,22 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
 - **Same buffers as ol.** `crates/core/src/tessellate.rs` is a port of
   `ol/worker/webgl.js` + `bufferUtil.js`; golden tests check it against ol's
   JS for synthetic data and for `countries.json`.
+- **Buffers are built for the features, not for the view.** ol's layer
+  builds all buffers again each time the view comes to rest on another
+  extent. The buffers hold every feature of the source and are drawn through
+  the inverse of the transform they were built with, so here they are only
+  built again when the features changed, or when the view is so far from
+  where they were built (2^19 pixels of the current view) that 32 bit floats
+  would no longer place them exactly. Features are still loaded for each new
+  extent, as ol does. One build runs at a time per layer: features that
+  arrive in parts are drawn as they come, without builds whose result is
+  thrown away. The render instructions have ol's layout and values
+  (`src/render/instructions.ts`), but the style attributes of a feature are
+  computed once and kept until the feature changes, where ol's generators
+  call every attribute callback for every geometry on each build: 300 000
+  points with 7 attributes take about 30 ms instead of 150 ms. With
+  `text: 'canvas'` the buffers follow the extent as in ol, because ol's text
+  worker draws the text for the view of the build.
 - **CPU hit detection.** WebGPU readback is asynchronous, but OpenLayers asks
   for hits synchronously, so picking uses a spatial index (built in Rust in the
   worker, queried by a main-thread wasm instance) plus the style's filter,
@@ -383,6 +399,15 @@ features, rotation, panning). WebGL2 and WebGPU pass all 14. ol's
 `WebGLVector` fails two by design (it ignores `hitTolerance` and returns
 features hidden by a style `filter`), and is flaky right after a rebuild
 because its GPU hit buffer is rendered asynchronously.
+
+**When buffers are built.** `test/rendering/rebuild.ts` checks on both
+backends that panning and zooming build nothing, that the moved view picks
+the right features and is drawn exactly (0 differing pixels) like the same
+view with buffers built for it, that an added feature and a changed property
+each take one build, and that a view 2^20 pixels away builds again.
+`test/unit/instructions.test.ts` checks that the render instructions equal
+those of ol's generators float for float, also after features changed, were
+removed and added, and that attribute callbacks run once per feature.
 
 **RenderFeatures.** Vector tile formats read features as `ol/render/Feature`
 (RenderFeature), which a vector source can hold as well. `test/rendering/renderfeature.ts`

@@ -3,8 +3,9 @@
  * source events → MixedGeometryBatch → render instructions (ol) → worker
  * (Rust/WASM buffers + hit index) → backend upload → draw per world.
  *
- * The rebuild trigger and transforms mirror ol's WebGLVectorLayerRenderer
- * (ol 10.11) so both new layers redraw exactly when ol's layer would.
+ * The transforms mirror ol's WebGLVectorLayerRenderer (ol 10.11). Features
+ * are loaded when ol's layer would load them; the buffers are built less
+ * often than ol builds them (see `needsRebuild`).
  */
 import type {FeatureLike} from 'ol/Feature.js';
 import {getUid} from 'ol/util.js';
@@ -32,6 +33,7 @@ import {type Transform, apply as applyTransform, create as createTransform, make
 import LabelsArray from 'ol/webgl/LabelsArray.js';
 import {toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
 import {create as createMat4} from 'ol/vec/mat4.js';
+import {InstructionBuilder} from '../render/instructions.js';
 import {Picker} from '../render/picking.js';
 import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
 import GpuText, {type LabelFrame, resolveFrameLabels} from '../text/GpuText.js';
@@ -104,6 +106,14 @@ export interface RebuildStats {
   total: number;
 }
 
+/**
+ * How far, in pixels of the current view, the view centre may be from where
+ * the buffers were built. A 32 bit float places a feature that far away to
+ * about 0.05 pixel; it takes hundreds of screens of panning, or zooming in
+ * some ten levels next to the centre of the build, to get there.
+ */
+const MAX_DRIFT_PX = 2 ** 19;
+
 let mainThreadCore: Promise<Core> | null = null;
 
 /**
@@ -165,6 +175,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   protected readonly antialias: boolean;
   /** Last rebuild statistics. */
   stats: RebuildStats | null = null;
+  /** Buffer builds started so far (for tests and benchmarks). */
+  builds = 0;
   /** Frames drawn since the last buffers became ready. */
   framesSinceReady = 0;
 
@@ -174,6 +186,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private previousExtent = createEmpty();
   private sourceRevision = -1;
   private generation = 0;
+  /** What the buffers, or those being built, were made for (null: build them again). */
+  private built: {revision: number; center: number[]} | null = null;
+  private instructions: InstructionBuilder;
   private readonly hitDetection: boolean;
   private picker: Picker | null = null;
   /** Latest index, kept until the main-thread wasm (and so the picker) is ready. */
@@ -216,6 +231,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.preserveDrawingBuffer = this.spec.preserveDrawingBuffer;
     this.antialias = this.spec.antialias;
     this.passes = buildStylePasses(this.style, this.variables);
+    this.instructions = new InstructionBuilder(this.passes.customAttributes);
     this.uniformState = new UniformState(this.passes.uniforms);
     this.worker = WorkerClient.shared(options);
     this.textMode = options.text ?? 'gpu';
@@ -336,7 +352,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.applyPasses();
     this.disposeBuffers();
     this.updateTextMode();
-    this.previousExtent = createEmpty(); // force a rebuild: the attribute layout changed
+    this.instructions = new InstructionBuilder(this.passes.customAttributes);
+    this.invalidate(); // the attribute layout changed
   }
 
   // --- source ----------------------------------------------------------
@@ -353,9 +370,22 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.batch.addFeatures(source.getFeatures(), projectionTransform);
     this.sourceKeys = [
       listen(source, VectorEventType.ADDFEATURE, (e: any) => e.feature && this.batch.addFeature(e.feature, projectionTransform)),
-      listen(source, VectorEventType.CHANGEFEATURE, (e: any) => e.feature && this.batch.changeFeature(e.feature, projectionTransform)),
-      listen(source, VectorEventType.REMOVEFEATURE, (e: any) => e.feature && this.batch.removeFeature(e.feature)),
-      listen(source, VectorEventType.CLEAR, () => this.batch.clear()),
+      listen(source, VectorEventType.CHANGEFEATURE, (e: any) => {
+        if (e.feature) {
+          this.instructions.forget(this.batch, e.feature);
+          this.batch.changeFeature(e.feature, projectionTransform);
+        }
+      }),
+      listen(source, VectorEventType.REMOVEFEATURE, (e: any) => {
+        if (e.feature) {
+          this.instructions.forget(this.batch, e.feature);
+          this.batch.removeFeature(e.feature);
+        }
+      }),
+      listen(source, VectorEventType.CLEAR, () => {
+        this.batch.clear();
+        this.instructions.reset();
+      }),
     ];
   }
 
@@ -398,27 +428,61 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       this.skipNextTextRender = false; // as in ol: these changes need a fresh text image
     }
 
-    if (viewNotMoving && (extentChanged || sourceChanged)) {
-      const resolution = frameState.viewState.resolution;
-      const projection = frameState.viewState.projection;
-      const renderBuffer = (layer as any).getRenderBuffer?.() ?? 0;
-      const extent = bufferExtent(frameExtent, renderBuffer * resolution);
-      const userProjection = getUserProjection();
-      if (userProjection) {
-        source.loadFeatures(toUserExtent(extent, userProjection), toUserResolution(resolution, projection), userProjection);
-      } else {
-        source.loadFeatures(extent, resolution, projection);
+    if (viewNotMoving) {
+      if (extentChanged || sourceChanged) {
+        const resolution = frameState.viewState.resolution;
+        const projection = frameState.viewState.projection;
+        const renderBuffer = (layer as any).getRenderBuffer?.() ?? 0;
+        const extent = bufferExtent(frameExtent, renderBuffer * resolution);
+        const userProjection = getUserProjection();
+        if (userProjection) {
+          source.loadFeatures(toUserExtent(extent, userProjection), toUserResolution(resolution, projection), userProjection);
+        } else {
+          source.loadFeatures(extent, resolution, projection);
+        }
+        this.previousExtent = frameExtent.slice();
       }
-      this.rebuild(frameState);
-      this.previousExtent = frameExtent.slice();
+      // One build at a time: its result is drawn first, and the frame after
+      // that starts the next one when the source changed in the meantime.
+      if (!this.building && this.needsRebuild(frameState, source, extentChanged)) {
+        this.rebuild(frameState, source.getRevision());
+      }
     }
     this.gpuText?.prepare(frameState, source);
     return true;
   }
 
-  private rebuild(frameState: FrameState) {
+  /**
+   * The buffers hold every feature of the source and are drawn through the
+   * inverse of the transform they were built with, so another extent alone
+   * needs no new buffers. They are built again when the features changed,
+   * and when the view is so far from where they were built that 32 bit
+   * floats no longer place them exactly.
+   */
+  private needsRebuild(frameState: FrameState, source: VectorSource, extentChanged: boolean): boolean {
+    const built = this.built;
+    if (!built || built.revision !== source.getRevision()) {
+      return true;
+    }
+    if (this.textOverlay) {
+      return extentChanged; // ol's text worker draws the text for the view of the build
+    }
+    const {center, resolution} = frameState.viewState;
+    return Math.hypot(center[0] - built.center[0], center[1] - built.center[1]) > MAX_DRIFT_PX * resolution;
+  }
+
+  /** The buffers (also those being built) no longer fit: the next frame builds new ones. */
+  private invalidate() {
+    this.built = null;
+    this.generation++; // the result of a running build is dropped
+    this.building = false;
+  }
+
+  private rebuild(frameState: FrameState, revision: number) {
     const generation = ++this.generation;
+    this.builds++;
     this.building = true;
+    this.built ={revision, center: frameState.viewState.center.slice()};
     this.framesSinceReady = 0;
     this.updateReady();
     const t0 = performance.now();
@@ -429,9 +493,21 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     const empty = this.batch.isEmpty();
     // like ol: text needs the instructions of every geometry type
     const text = this.textOverlay;
-    const polygons = (p.hasFill || text) && !empty ? generatePolygonRenderInstructions(this.batch.polygonBatch, new Float32Array(0), labels, custom, transform) : null;
-    const lines = (p.hasStroke || text) && !empty ? generateLineStringRenderInstructions(this.batch.lineStringBatch, new Float32Array(0), labels, custom, transform) : null;
-    const points = (p.hasSymbol || text) && !empty ? generatePointRenderInstructions(this.batch.pointBatch, new Float32Array(0), labels, custom, transform) : null;
+    // ol's text worker reads the labels array, which only ol's generators fill
+    const kept = text ? null : this.instructions;
+    const batch = this.batch;
+    const polygons =
+      (p.hasFill || text) && !empty
+        ? (kept?.polygons(batch.polygonBatch, transform) ?? generatePolygonRenderInstructions(batch.polygonBatch, new Float32Array(0), labels, custom, transform))
+        : null;
+    const lines =
+      (p.hasStroke || text) && !empty
+        ? (kept?.lines(batch.lineStringBatch, transform) ?? generateLineStringRenderInstructions(batch.lineStringBatch, new Float32Array(0), labels, custom, transform))
+        : null;
+    const points =
+      (p.hasSymbol || text) && !empty
+        ? (kept?.points(batch.pointBatch, transform) ?? generatePointRenderInstructions(batch.pointBatch, new Float32Array(0), labels, custom, transform))
+        : null;
     const instructionsTime = performance.now() - t0;
     const invert = makeInverse(createTransform(), transform);
     const size = frameState.size;
@@ -502,6 +578,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       })
       .catch((e) => {
         console.error('ol-webgpu: buffer generation failed', e);
+        if (generation !== this.generation || this.disposed) {
+          return;
+        }
         this.building = false;
         this.awaitingText = false;
         this.updateReady();
@@ -715,7 +794,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     }
     if (!this.keepCpuCopies) {
       this.disposeBuffers();
-      this.previousExtent = createEmpty();
+      this.invalidate();
       return;
     }
     for (const [, name] of KINDS) {

@@ -63,7 +63,7 @@ const server = await createServer({
   root: here,
   logLevel: 'warn',
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
-  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'renderfeature.ts']},
+  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'renderfeature.ts', 'rebuild.ts']},
   worker: {format: 'es'},
 });
 await server.listen();
@@ -502,12 +502,40 @@ if (args.gputext !== 'false' && (!args.match || 'gputext'.includes(args.match) |
   results.push({gpuText: checks});
 }
 
+// --- when buffers are built again ---------------------------------------------
+let rebuildFailures = 0;
+if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) || args.match.includes('rebuild'))) {
+  console.log('\nwhen buffers are built again (rebuild.ts):');
+  const checks = {};
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    errors.length = 0;
+    await page.goto(`${base}rebuild.html?layer=${layer}`);
+    try {
+      await page.waitForFunction(() => window.__rebuild, null, {timeout: 60_000, polling: 50});
+      checks[layer] = await page.evaluate(() => window.__rebuild);
+    } catch {
+      checks[layer] = {'page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
+    }
+  }
+  const checkNames = [...new Set(Object.values(checks).flatMap((c) => Object.keys(c)))];
+  for (const name of checkNames) {
+    const cells = Object.entries(checks).map(([layer, c]) => {
+      const r = c[name];
+      rebuildFailures += r?.ok ? 0 : 1;
+      return `${layer}: ${r?.ok ? 'ok' : `FAIL ${r?.detail ?? 'missing'}`}`;
+    });
+    console.log(`  ${name.padEnd(40)} ${cells.join('   ')}`);
+  }
+  results.push({rebuild: checks});
+}
+
 await browser.close();
 await server.close();
 writeFileSync(join(reportDir, 'results.json'), JSON.stringify(results, null, 2));
 
 const failures = results.filter((r) => r.case && !r.known && ['webgl2', 'webgpu'].some((l) => r[l] && !r[l].pass));
 console.log(
-  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures, ${textFailures} text overlay failures, ${exportFailures} export failures, ${sharedFailures} shared canvas failures, ${renderFeatureFailures} RenderFeature failures, ${gpuTextFailures} GPU text failures (report: ${reportDir})`,
+  `\n${results.filter((r) => r.case).length} cases, ${failures.length} unexpected rendering failures, ${pickFailures} hit detection failures, ${textFailures} text overlay failures, ${exportFailures} export failures, ${sharedFailures} shared canvas failures, ${renderFeatureFailures} RenderFeature failures, ${gpuTextFailures} GPU text failures, ${rebuildFailures} rebuild failures (report: ${reportDir})`,
 );
-process.exitCode = failures.length || pickFailures || textFailures || exportFailures || sharedFailures || renderFeatureFailures || gpuTextFailures ? 1 : 0;
+process.exitCode =
+  failures.length || pickFailures || textFailures || exportFailures || sharedFailures || renderFeatureFailures || gpuTextFailures || rebuildFailures ? 1 : 0;
