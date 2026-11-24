@@ -36,11 +36,15 @@ const tmpTransform = createTransform();
 const tmpMat4 = createMat4();
 
 /** World to clip-space transform for a frame (Helper.makeProjectionTransform). */
-export function makeProjectionTransform(frameState: FrameState, transform: Transform, ignoreRotation = false): Transform {
+export function makeProjectionTransform(
+  frameState: FrameState,
+  transform: Transform,
+  ignoreRotation = false,
+  center: number[] = frameState.viewState.center,
+): Transform {
   const size = frameState.size;
   const rotation = ignoreRotation ? 0 : frameState.viewState.rotation;
   const resolution = frameState.viewState.resolution;
-  const center = frameState.viewState.center;
   return composeTransform(
     transform,
     0,
@@ -51,6 +55,18 @@ export function makeProjectionTransform(frameState: FrameState, transform: Trans
     -center[0],
     -center[1],
   );
+}
+
+/**
+ * How many worlds `x` is from the world of the projection (0 when the
+ * projection does not wrap): the world copy that `x` is in.
+ */
+export function worldOf(x: number, projection: FrameState['viewState']['projection']): number {
+  const extent = projection.getExtent();
+  if (!extent || !projection.canWrapX()) {
+    return 0;
+  }
+  return Math.floor((x - extent[0]) / (extent[2] - extent[0]));
 }
 
 export class UniformState {

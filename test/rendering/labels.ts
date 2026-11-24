@@ -7,6 +7,7 @@ import Feature from 'ol/Feature.js';
 import Map from 'ol/Map.js';
 import View from 'ol/View.js';
 import LineString from 'ol/geom/LineString.js';
+import {getWidth} from 'ol/extent.js';
 import Point from 'ol/geom/Point.js';
 import VectorSource from 'ol/source/Vector.js';
 import {frame, renderersSettled} from './settled.js';
@@ -154,6 +155,40 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
       leastAlpha === 255 && leastCount > crowd.count * 0.9 && reloaded.count === crowd.count && names([128, 208]).join() === 'first',
       {before: crowd, leastAlpha, leastCount, frames: reloadFrames, after: reloaded},
     );
+
+    // five worlds to the east the labels are where they are in the world of the features
+    {
+      const pixels = () => {
+        map.renderSync();
+        const canvas = document.querySelector('#map canvas') as HTMLCanvasElement;
+        probe.canvas.width = canvas.width;
+        probe.canvas.height = canvas.height;
+        probe.drawImage(canvas, 0, 0);
+        return probe.getImageData(0, 0, canvas.width, canvas.height).data;
+      };
+      const centre = view.getCenter()!;
+      // away from the centre of the view, where the rounding of the anchor and of the origin do not cancel
+      const offside = point(centre[0] + 37, centre[1] + 40, 'offside');
+      crowded.getSource()!.addFeature(offside);
+      await settle();
+      const here = pixels();
+      view.setCenter([centre[0] + 5 * getWidth(view.getProjection().getExtent()), centre[1]]);
+      await settle();
+      // laid out there, not only moved there
+      crowded.getSource()!.changed();
+      await settle();
+      const there = pixels();
+      let inked = 0;
+      let differing = 0;
+      for (let i = 3; i < here.length; i += 4) {
+        inked += here[i] > 128 ? 1 : 0;
+        differing += Math.abs(here[i] - there[i]) > 8 ? 1 : 0;
+      }
+      check('labels five worlds away are where they belong', inked > 40 && differing === 0, {inked, differing});
+      view.setCenter(centre);
+      crowded.getSource()!.removeFeature(offside);
+      await settle();
+    }
 
     // a label along a line stays upright while the view turns (it is laid out again when the view rests)
     {

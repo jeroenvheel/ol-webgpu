@@ -11,6 +11,7 @@ import View from 'ol/View.js';
 import LineString from 'ol/geom/LineString.js';
 import Point from 'ol/geom/Point.js';
 import Polygon from 'ol/geom/Polygon.js';
+import {getWidth} from 'ol/extent.js';
 import VectorSource from 'ol/source/Vector.js';
 import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
@@ -241,6 +242,34 @@ const names = (coordinate: number[]) => map.getFeaturesAtPixel(map.getPixelFromC
     view.setCenter([30 + 2 ** 19, 20]);
     await settle();
     check('a far view builds again', renderer().builds === far + 1, {builds: renderer().builds - far});
+
+    // the same place five worlds to the east: drawn and hit as in the world of the features
+    const worldWidth = getWidth(view.getProjection().getExtent());
+    view.setCenter([30, 20]);
+    await settle();
+    const here = image();
+    view.setCenter([30 + 5 * worldWidth, 20]);
+    await settle();
+    const there = image();
+    let worldsDrawn = 0;
+    let worldsDiffer = 0;
+    for (let i = 0; i < here.length; i += 4) {
+      worldsDrawn += here[i + 3] > 0 ? 1 : 0;
+      for (let c = 0; c < 4; c++) {
+        if (Math.abs(here[i + c] - there[i + c]) > 8) {
+          worldsDiffer++;
+          break;
+        }
+      }
+    }
+    const farHits = {point: names([40 + 5 * worldWidth, 25]), beside: names([40 + 5 * worldWidth, 45]), line: names([10 + 5 * worldWidth, 90])};
+    check(
+      'five worlds away is drawn and hit exactly',
+      worldsDrawn > 1000 && worldsDiffer === 0 && farHits.point.join() === 'point' && farHits.beside.length === 0 && farHits.line.join() === 'line',
+      {drawn: worldsDrawn, differ: worldsDiffer, farHits},
+    );
+    view.setCenter([30 + 2 ** 19, 20]);
+    await settle();
 
     // the background of a layer is the colour of its canvas, with the layer's opacity
     const canvases = () => [...document.querySelectorAll('#map canvas')].map((c) => (c as HTMLCanvasElement).style.backgroundColor);

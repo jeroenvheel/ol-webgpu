@@ -14,6 +14,7 @@ import {getWorldParameters} from 'ol/renderer/webgl/worldUtil.js';
 import type VectorSource from 'ol/source/Vector.js';
 import type {FlatStyleLike} from 'ol/style/flat.js';
 import {getUid} from 'ol/util.js';
+import {worldOf} from '../render/uniforms.js';
 import {type AtlasPage, sharedAtlas} from './atlas.js';
 import {Occupancy, selectCandidates} from './declutter.js';
 import {LabelBuilder, type LabelSet, type LayoutOptions, MODE_DECLUTTER, MODE_NONE, partBox, reads} from './layout.js';
@@ -323,8 +324,10 @@ export default class GpuText {
     // a stable order, so labels keep their place between layouts
     const list = sortByUid([...features]);
     const measuring = !!this.declutter;
+    // the anchors are 32 bit floats relative to the origin: in the world the features are in
+    const originWorld = source.getWrapX() && full ? worldOf(viewState.center[0], projection) : 0;
     const options: LayoutOptions = {
-      origin: [viewState.center[0], viewState.center[1]],
+      origin: [viewState.center[0] - (originWorld ? originWorld * getWidth(full) : 0), viewState.center[1]],
       resolution: viewState.resolution,
       rotation: viewState.rotation,
       pixelRatio: frameState.pixelRatio,

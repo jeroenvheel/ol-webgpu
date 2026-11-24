@@ -40,7 +40,7 @@ import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.
 import GpuText, {type LabelFrame, resolveFrameLabels} from '../text/GpuText.js';
 import {type StylePasses, buildStylePasses} from '../render/stylePasses.js';
 import {type Surface, type SurfaceSpec, acquireSurface, releaseSurface, surfaceSpec, surfaceType} from '../render/surface.js';
-import {UniformState, makeProjectionTransform} from '../render/uniforms.js';
+import {UniformState, makeProjectionTransform, worldOf} from '../render/uniforms.js';
 import {type Core, LARGE_MEMORY_BYTES, loadCore} from '../wasm/core.js';
 import {WorkerClient, WorkerFailedError, type WorkerOptions} from '../worker/client.js';
 import type {BufferSet, BuildResponse} from '../worker/protocol.js';
@@ -556,8 +556,30 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     if (this.textOverlay) {
       return extentChanged; // ol's text worker draws the text for the view of the build
     }
-    const {center, resolution} = frameState.viewState;
+    const resolution = frameState.viewState.resolution;
+    const center = this.buildCenter(frameState);
     return Math.hypot(center[0] - built.center[0], center[1] - built.center[1]) > MAX_DRIFT_PX * resolution;
+  }
+
+  /**
+   * The centre that buffers for this frame are built around: the centre of
+   * the view, in the world of the projection. The buffers hold 32 bit floats
+   * relative to it, and the features are in that world: around a centre some
+   * worlds further they would be placed pixels off (16 px five worlds away
+   * at a resolution of 1). The world copy under the view is drawn through
+   * the transform of the frame, which is computed in doubles.
+   */
+  private buildCenter(frameState: FrameState): number[] {
+    const center = frameState.viewState.center.slice();
+    const projection = frameState.viewState.projection;
+    // ol's text worker draws the text for the view as it is
+    if (!this.textOverlay && this.getLayer().getSource()?.getWrapX()) {
+      const world = worldOf(center[0], projection);
+      if (world) {
+        center[0] -= world * getWidth(projection.getExtent());
+      }
+    }
+    return center;
   }
 
   /**
@@ -580,11 +602,12 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     const generation = ++this.generation;
     this.builds++;
     this.building = true;
-    this.built ={revision, center: frameState.viewState.center.slice()};
+    const center = this.buildCenter(frameState);
+    this.built = {revision, center};
     this.framesSinceReady = 0;
     this.updateReady();
     const t0 = performance.now();
-    const transform = makeProjectionTransform(frameState, createTransform(), true);
+    const transform = makeProjectionTransform(frameState, createTransform(), true, center);
     const p = this.passes;
     const labels = new LabelsArray();
     const custom = p.customAttributes as any;
@@ -609,7 +632,6 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     const instructionsTime = performance.now() - t0;
     const invert = makeInverse(createTransform(), transform);
     const size = frameState.size;
-    const center = frameState.viewState.center.slice();
     const resolution = frameState.viewState.resolution;
 
     // the text worker gets copies, before the buffers are transferred below
