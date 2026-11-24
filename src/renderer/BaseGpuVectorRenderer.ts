@@ -11,9 +11,9 @@ import type {FeatureLike} from 'ol/Feature.js';
 import {getUid} from 'ol/util.js';
 import type {FrameState} from 'ol/Map.js';
 import ViewHint from 'ol/ViewHint.js';
-import type {Coordinate} from 'ol/coordinate.js';
+import {type Coordinate, wrapX} from 'ol/coordinate.js';
 import {type EventsKey, listen, unlistenByKey} from 'ol/events.js';
-import {buffer as bufferExtent, createEmpty, equals as extentEquals} from 'ol/extent.js';
+import {buffer as bufferExtent, createEmpty, equals as extentEquals, getWidth} from 'ol/extent.js';
 import {asArray, toString as colorToString} from 'ol/color.js';
 import {type default as Layer, inView} from 'ol/layer/Layer.js';
 import type {Pixel} from 'ol/pixel.js';
@@ -839,19 +839,37 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     return !!this.picker?.loaded && this.picker.isMeasured(frameState);
   }
 
-  private pickFeatures(coordinate: Coordinate, frameState: FrameState, hitTolerance: number): FeatureLike[] {
-    return [...this.iteratePicks(coordinate, frameState, hitTolerance)];
-  }
-
+  /**
+   * The features at a coordinate of the map. On a map that shows the world
+   * more than once, ol's map renderer asks three times for one pixel: for
+   * the coordinate in the world of the projection, and one world to the west
+   * and to the east of it (for features that cross the edge of the world).
+   * So each call answers for its coordinate alone, or features would be
+   * reported up to three times. Labels are placed per world on screen: they
+   * are looked for in the call for the world of the projection only, in
+   * every world that is drawn.
+   */
   private *iteratePicks(coordinate: Coordinate, frameState: FrameState, hitTolerance: number): Generator<FeatureLike> {
     if (!this.hitDetection) {
       throw new Error('`forEachFeatureAtCoordinate` cannot be used on an ol-webgpu layer with `disableHitDetection: true`.');
     }
     // labels are drawn over the geometries
-    const labelled = this.gpuText?.pick(applyTransform(frameState.coordinateToPixelTransform, coordinate.slice()), frameState, hitTolerance) ?? [];
-    yield* labelled;
+    const labelled: FeatureLike[] = [];
+    const projection = frameState.viewState.projection;
+    const extent = projection.getExtent();
+    if (this.gpuText && (!projection.canWrapX() || !extent || (coordinate[0] >= extent[0] && coordinate[0] < extent[2]))) {
+      for (const offset of this.lastWorlds) {
+        const pixel = applyTransform(frameState.coordinateToPixelTransform, [coordinate[0] + offset, coordinate[1]]);
+        for (const feature of this.gpuText.pick(pixel, frameState, hitTolerance)) {
+          if (!labelled.includes(feature)) {
+            labelled.push(feature);
+            yield feature;
+          }
+        }
+      }
+    }
     if (this.picker) {
-      for (const feature of this.picker.pick(coordinate, frameState, hitTolerance, (ref) => this.batch.getFeatureFromRef(ref), this.lastWorlds)) {
+      for (const feature of this.picker.pick(coordinate, frameState, hitTolerance, (ref) => this.batch.getFeatureFromRef(ref))) {
         if (!labelled.includes(feature)) {
           yield feature;
         }
@@ -880,8 +898,23 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     if (!frameState) {
       return Promise.resolve([]);
     }
+    // as ol's map renderer asks: in the world of the projection, and one world to both sides
     const coordinate = applyTransform(frameState.pixelToCoordinateTransform, pixel.slice());
-    return Promise.resolve(this.pickFeatures(coordinate, frameState, 0));
+    const projection = frameState.viewState.projection;
+    const wraps = projection.canWrapX() && !!projection.getExtent();
+    const width = wraps ? getWidth(projection.getExtent()) : 0;
+    if (wraps && this.getLayer().getSource()?.getWrapX()) {
+      wrapX(coordinate, projection);
+    }
+    const features: FeatureLike[] = [];
+    for (const offset of wraps ? [0, -width, width] : [0]) {
+      for (const feature of this.iteratePicks([coordinate[0] + offset, coordinate[1]], frameState, 0)) {
+        if (!features.includes(feature)) {
+          features.push(feature);
+        }
+      }
+    }
+    return Promise.resolve(features);
   }
 
   // --- cleanup ---------------------------------------------------------

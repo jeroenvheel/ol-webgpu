@@ -78,8 +78,21 @@ const huge = new Layer({
   style: {'circle-radius': ['get', 'size'], 'circle-fill-color': '#00ff0080'},
 });
 
-const view = new View({center: [0, 0], resolution: 1});
-const map = new Map({target: 'map', layers: [layer, other, displaced, pins, huge], view, pixelRatio: 1});
+// A point with a label below it, for a view that shows the world more than once.
+const wrapped = new Layer({
+  source: new VectorSource({features: [f('wrapped', new Point([0, 0]), {})]}),
+  style: {
+    'circle-radius': 5,
+    'circle-fill-color': '#ff00ff',
+    'text-value': 'wrapped',
+    'text-font': '12px sans-serif',
+    'text-fill-color': '#000000',
+    'text-offset-y': 30,
+  },
+});
+
+const view = new View({center: [0, 0], resolution: 1, multiWorld: true, maxResolution: 40075016.68557849 / 100});
+const map = new Map({target: 'map', layers: [layer, other, displaced, pins, huge, wrapped], view, pixelRatio: 1});
 
 const settled = () => new Promise<void>((resolve) => {
   const check = () => {
@@ -146,5 +159,27 @@ const at = (x: number, y: number, hitTolerance = 0) => {
   await settled();
   results['a symbol of 150 px, 140 px from its point'] = at(99, 99);
   results['a symbol of 150 px, 160 px from its point'] = at(113, 113);
+
+  // the world is 100 px wide: the point is at the centre and 100 px to both sides
+  view.setCenter([0, 0]);
+  view.setResolution(40075016.68557849 / 100);
+  await settled();
+  const only = (x: number, y: number) => {
+    const ids: string[] = [];
+    map.forEachFeatureAtPixel(
+      [128 + x, 128 - y],
+      (feature) => {
+        ids.push(String(feature.getId()));
+      },
+      {layerFilter: (l) => l === wrapped},
+    );
+    return ids;
+  };
+  results['several worlds: the point'] = only(0, 0);
+  results['several worlds: the point in the next world'] = only(100, 0);
+  results['several worlds: between the points'] = only(50, 0);
+  results['several worlds: the label'] = only(0, -30);
+  results['several worlds: the label in the next world'] = only(-100, -30);
+  results['several worlds: layer.getFeatures() in the next world'] = await (async () => (await wrapped.getFeatures([228, 128])).map((feature: any) => String(feature.getId())))().catch(() => ['not implemented']);
   (window as any).__pick = results;
 })();

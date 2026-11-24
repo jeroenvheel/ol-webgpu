@@ -441,11 +441,13 @@ features. It checks that the first two share a canvas (3 canvases in map
 order) and compares the screenshot with ol's `WebGLVector` layers: 0.00%
 differing pixels on both backends, with and without `antialias`.
 
-**Hit detection.** `test/rendering/picking.ts` checks 25 situations (symbol
+**Hit detection.** `test/rendering/picking.ts` checks 31 situations (symbol
 radius, stroke width, polygon fill and holes, `hitTolerance`, filtered-out
 features, rotation, panning, and symbols and strokes that are not drawn on
 their geometry: a displaced circle, a stroke with an offset, an icon
-anchored at its bottom, a symbol of 150 px). WebGL2 and WebGPU pass all 25. ol's
+anchored at its bottom, a symbol of 150 px; and a view that shows the world
+more than once, where a feature and its label are reported once). WebGL2
+and WebGPU pass all 31. ol's
 `WebGLVector` fails two by design (it ignores `hitTolerance` and returns
 features hidden by a style `filter`), and is flaky right after a rebuild
 because its GPU hit buffer is rendered asynchronously.

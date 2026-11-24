@@ -254,6 +254,12 @@ const EXPECTED_PICKS = {
   'displaced circle, rotated view: at its point': [],
   'a symbol of 150 px, 140 px from its point': ['huge'],
   'a symbol of 150 px, 160 px from its point': [],
+  'several worlds: the point': ['wrapped'],
+  'several worlds: the point in the next world': ['wrapped'],
+  'several worlds: between the points': [],
+  'several worlds: the label': ['wrapped'],
+  'several worlds: the label in the next world': ['wrapped'],
+  'several worlds: layer.getFeatures() in the next world': ['wrapped'],
 };
 let pickFailures = 0;
 if (args.picking !== 'false' && (!args.match || args.match === 'picking')) {

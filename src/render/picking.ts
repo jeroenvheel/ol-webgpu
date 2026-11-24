@@ -562,16 +562,16 @@ export class Picker {
   }
 
   /**
-   * Features under `coordinate`, topmost first, produced lazily so callers
-   * can stop at the first one.
-   * @param worlds x offsets of the world copies rendered this frame
+   * Features at `coordinate`, topmost first, produced lazily so callers can
+   * stop at the first one. Only at this coordinate: for a map that shows the
+   * world more than once, the caller asks for the same place in each world
+   * (as ol's map renderer does).
    */
   *pick(
     coordinate: Coordinate,
     frameState: FrameState,
     hitTolerance: number,
     getFeature: (ref: number) => FeatureLike | undefined,
-    worlds: number[],
   ): Generator<FeatureLike> {
     const state = this.state;
     if (!state) {
@@ -585,8 +585,8 @@ export class Picker {
     const cos = Math.cos(rotation);
     const sin = Math.sin(rotation);
     const seen = new Set<FeatureLike>();
-    for (const offset of worlds) {
-      const x = (coordinate[0] - offset - state.center[0]) / state.resolution;
+    {
+      const x = (coordinate[0] - state.center[0]) / state.resolution;
       const y = (coordinate[1] - state.center[1]) / state.resolution;
       // copy the (small) hit list: evaluating styles must not see it change
       const {count, words, floats} = this.core.queryIndexRaw(x, y, radius, this.index);
