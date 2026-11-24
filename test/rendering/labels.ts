@@ -133,6 +133,26 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
     const crowd = drawn(0, 180, 256, 256);
     check('decluttering shows one of two labels', crowd.count > 40 && crowd.count < 400 && crowd.alpha === 255, crowd);
 
+    // the same features as new objects, as a source that loads them again: the label stays
+    const crowdedSource = crowded.getSource()!;
+    crowdedSource.clear();
+    crowdedSource.addFeatures([point(0, -80, 'first'), point(0, -80, 'second')]);
+    let leastAlpha = 255;
+    let leastCount = Infinity;
+    let reloadFrames = 0;
+    for (; reloadFrames < 5 || !quiet(); reloadFrames++) {
+      const d = drawn(0, 180, 256, 256);
+      leastAlpha = Math.min(leastAlpha, d.alpha);
+      leastCount = Math.min(leastCount, d.count);
+      await frame();
+    }
+    const reloaded = drawn(0, 180, 256, 256);
+    check(
+      'a label stays when its feature is loaded again',
+      leastAlpha === 255 && leastCount > crowd.count * 0.9 && reloaded.count === crowd.count && names([128, 208]).join() === 'first',
+      {before: crowd, leastAlpha, leastCount, frames: reloadFrames, after: reloaded},
+    );
+
     // web fonts that arrive: only those of the labels make the atlas start over
     const atlas = sharedAtlas();
     const loadFont = async (family: string) => {
@@ -158,10 +178,13 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
         declutter: 'many',
       }),
     );
+    const manyStart = performance.now();
     await settle();
+    const manyMs = performance.now() - manyStart;
     const before = drawn(...upper).count;
 
     await loadFont('Label Font');
+    const relayStart = performance.now();
     // until the labels are laid out with the new font, the ones on screen stay
     let fewest = Infinity;
     let frames = 0;
@@ -169,6 +192,8 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
       fewest = Math.min(fewest, drawn(...upper).count);
       await frame();
     }
+    // how long 40 000 labels take, for the report
+    (window as any).__labelTimes = {first: Math.round(manyMs), again: Math.round(performance.now() - relayStart), frames};
     const relaid = drawn(0, 180, 256, 256);
     check('a font of the labels starts the atlas over', atlas.generation === generation + 1 && relaid.count > 40 && relaid.alpha === 255, {
       before: generation,

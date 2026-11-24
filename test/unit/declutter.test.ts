@@ -25,6 +25,7 @@ function labels(list: Array<[number, number, number, number, number?]>, resoluti
     count,
     features: list.map(() => ({}) as any),
     keys: Float64Array.from(list, (_l, i) => 100 + i),
+    content: Float64Array.from(list, (_l, i) => 100 + i),
     glyphStart: new Uint32Array(count),
     glyphEnd: new Uint32Array(count),
     partStart: range(0),

@@ -538,6 +538,10 @@ if (args.gputext !== 'false' && (!args.match || 'gputext'.includes(args.match) |
     try {
       await page.waitForFunction(() => window.__labels, null, {timeout: 60_000, polling: 50});
       checks[layer] = await page.evaluate(() => window.__labels);
+      const times = await page.evaluate(() => window.__labelTimes);
+      if (times) {
+        console.log(`  [${layer}] 40 000 labels: ${times.first} ms until they are shown, ${times.again} ms (${times.frames} frames) to lay them out again`);
+      }
     } catch {
       checks[layer] = {'page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
     }

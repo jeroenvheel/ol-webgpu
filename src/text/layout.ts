@@ -103,6 +103,12 @@ export interface LabelSet {
   features: FeatureLike[];
   /** Identity of a label across layouts: feature uid and its index among the feature's labels. */
   keys: Float64Array;
+  /**
+   * What a label says and where (see `contentKey`): the identity of a label
+   * whose feature is another object than before, as after a source loaded
+   * its features again.
+   */
+  content: Float64Array;
   glyphStart: Uint32Array;
   glyphEnd: Uint32Array;
   partStart: Uint32Array;
@@ -224,6 +230,7 @@ export class LabelBuilder {
   private glyphCount = 0;
   private readonly labelFeatures: FeatureLike[] = [];
   private readonly keys: number[] = [];
+  private readonly content: number[] = [];
   private readonly glyphStart: number[] = [];
   private readonly glyphEnd: number[] = [];
   private readonly partStart: number[] = [];
@@ -316,6 +323,7 @@ export class LabelBuilder {
       count,
       features: this.labelFeatures,
       keys: Float64Array.from(this.keys),
+      content: Float64Array.from(this.content),
       glyphStart: Uint32Array.from(this.glyphStart),
       glyphEnd: Uint32Array.from(this.glyphEnd),
       partStart: Uint32Array.from(this.partStart),
@@ -354,6 +362,7 @@ export class LabelBuilder {
     replace(this.glyphEnd, glyphEnd);
     replace(this.labelFeatures, take(this.labelFeatures));
     replace(this.keys, take(this.keys));
+    replace(this.content, take(this.content));
     replace(this.partStart, take(this.partStart));
     replace(this.partEnd, take(this.partEnd));
     replace(this.mode, take(this.mode));
@@ -428,9 +437,10 @@ export class LabelBuilder {
     return !this.accept || this.accept.has(this.currentKey);
   }
 
-  private beginLabel(mode: number, zIndex: number) {
+  private beginLabel(mode: number, zIndex: number, value: string | string[], x: number, y: number) {
     this.labelFeatures.push(this.current!);
     this.keys.push(this.currentKey);
+    this.content.push(contentKey(value, x, y));
     this.glyphStart.push(this.glyphCount);
     this.partStart.push(this.parts.length / PART_DOUBLES);
     this.mode.push(mode);
@@ -673,7 +683,7 @@ export class LabelBuilder {
       return;
     }
     const {quads, box, rotation, rotateWithView, corner} = layout;
-    this.beginLabel(style.mode, style.zIndex);
+    this.beginLabel(style.mode, style.zIndex, style.value, x, y);
     const [x0, y0, x1, y1] = box;
     if (layout.background) {
       this.rect(x, y, x0, y0, x1 - x0, y1 - y0, layout.background, rotation, rotateWithView);
@@ -793,7 +803,8 @@ export class LabelBuilder {
     const ay = oy - my * resolution;
     const metrics = atlas.metrics(font);
     const face = atlas.face(font, s, raster, style.lightFill, style.lightHalo);
-    this.beginLabel(style.mode, style.zIndex);
+    // a line label is where its line starts: its own place depends on the view
+    this.beginLabel(style.mode, style.zIndex, plain, path[begin], path[begin + 1]);
     // per glyph: part offset x, y, offset x, y, size w, h, atlas cell x, y, w, h, angle
     const glyphs: number[] = [];
     for (const part of parts) {
@@ -825,6 +836,37 @@ export class LabelBuilder {
     }
     this.endLabel();
   }
+}
+
+const keyDoubles = new Float64Array(2);
+const keyWords = new Uint32Array(keyDoubles.buffer);
+
+/**
+ * A number for the text of a label and its place on the map (53 bits of a
+ * hash: two labels with the same number are the same label, in practice).
+ */
+export function contentKey(value: string | string[], x: number, y: number): number {
+  // FNV-1a, twice with other parameters
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  const mix = (n: number) => {
+    a = Math.imul(a ^ n, 0x01000193);
+    b = Math.imul(b ^ n, 0x85ebca6b) ^ (b >>> 13);
+  };
+  const parts = typeof value === 'string' ? [value] : value;
+  for (let p = 0; p < parts.length; p++) {
+    const text = String(parts[p]);
+    for (let i = 0; i < text.length; i++) {
+      mix(text.charCodeAt(i));
+    }
+    mix(0x10000);
+  }
+  keyDoubles[0] = x;
+  keyDoubles[1] = y;
+  for (let i = 0; i < 4; i++) {
+    mix(keyWords[i]);
+  }
+  return (a >>> 0) * 0x200000 + (b >>> 11);
 }
 
 interface TextValues {

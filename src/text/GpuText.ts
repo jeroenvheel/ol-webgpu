@@ -344,7 +344,8 @@ export default class GpuText {
    * keep their fade state) and matches the world copies the frame shows.
    */
   begin(layer: unknown, frameState: FrameState) {
-    let carried: Map<number, Map<number, number>> | null = null;
+    // per world, how visible the labels are: by their key and by what they say and where
+    let carried: Map<number, [Map<number, number>, Map<number, number>]> | null = null;
     const next = this.next;
     if (next) {
       this.next = null;
@@ -353,12 +354,14 @@ export default class GpuText {
       if (previous) {
         for (const w of this.worlds) {
           const alphas = new Map<number, number>();
+          const same = new Map<number, number>();
           for (let i = 0; i < previous.count; i++) {
             if (w.alpha[i] > 0) {
               alphas.set(previous.keys[i], w.alpha[i]);
+              same.set(previous.content[i], w.alpha[i]);
             }
           }
-          carried.set(w.world, alphas);
+          carried.set(w.world, [alphas, same]);
         }
       }
       this.set = next.set;
@@ -383,8 +386,11 @@ export default class GpuText {
         if (!this.declutter) {
           alpha.fill(1);
         } else if (from) {
+          // A label of another feature object that says the same at the same place
+          // is the label that was there (a source that loaded its features again).
+          const [alphas, same] = from;
           for (let i = 0; i < set.count; i++) {
-            alpha[i] = from.get(set.keys[i]) ?? 0;
+            alpha[i] = alphas.get(set.keys[i]) ?? same.get(set.content[i]) ?? 0;
           }
         }
         w = {
