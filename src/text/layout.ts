@@ -111,6 +111,17 @@ export interface LabelSet {
   content: Float64Array;
   glyphStart: Uint32Array;
   glyphEnd: Uint32Array;
+  /**
+   * A label along a line that is kept upright has its glyphs twice: from
+   * `glyphStart` as it reads for the rotation of the layout, and from
+   * `glyphMid` in the other direction, for a view that has turned since
+   * (see `reads`). `glyphMid` is `glyphEnd` for all other labels.
+   */
+  glyphMid: Uint32Array;
+  /** Per label x, y: from the end of its text on the line to its start (pixels of the layout, y down); 0, 0 without a second direction. */
+  along: Float32Array;
+  /** Some labels have their glyphs twice (see `glyphMid`). */
+  twoWay: boolean;
   partStart: Uint32Array;
   partEnd: Uint32Array;
   mode: Uint8Array;
@@ -233,6 +244,12 @@ export class LabelBuilder {
   private readonly content: number[] = [];
   private readonly glyphStart: number[] = [];
   private readonly glyphEnd: number[] = [];
+  private readonly glyphMid: number[] = [];
+  private readonly along: number[] = [];
+  /** Of the label in the making: where its second direction starts (-1: none), and its `along`. */
+  private currentMid = -1;
+  private currentAlong: [number, number] = [0, 0];
+  private twoWay = false;
   private readonly partStart: number[] = [];
   private readonly partEnd: number[] = [];
   private readonly mode: number[] = [];
@@ -326,6 +343,9 @@ export class LabelBuilder {
       content: Float64Array.from(this.content),
       glyphStart: Uint32Array.from(this.glyphStart),
       glyphEnd: Uint32Array.from(this.glyphEnd),
+      glyphMid: Uint32Array.from(this.glyphMid),
+      along: Float32Array.from(this.along),
+      twoWay: this.twoWay,
       partStart: Uint32Array.from(this.partStart),
       partEnd: Uint32Array.from(this.partEnd),
       mode: Uint8Array.from(this.mode),
@@ -348,18 +368,24 @@ export class LabelBuilder {
     const take = <T>(values: T[]): T[] => Array.from(draw, (i) => values[i]);
     const glyphStart: number[] = [];
     const glyphEnd: number[] = [];
+    const glyphMid: number[] = [];
+    const along: number[] = [];
     let at = 0;
     for (const i of draw) {
       const from = this.glyphStart[i];
       const to = this.glyphEnd[i];
       instances.set(this.instances.subarray(from * INSTANCE_FLOATS, to * INSTANCE_FLOATS), at * INSTANCE_FLOATS);
       glyphStart.push(at);
+      glyphMid.push(at + this.glyphMid[i] - from);
+      along.push(this.along[i * 2], this.along[i * 2 + 1]);
       at += to - from;
       glyphEnd.push(at);
     }
     this.instances = instances;
     replace(this.glyphStart, glyphStart);
     replace(this.glyphEnd, glyphEnd);
+    replace(this.glyphMid, glyphMid);
+    replace(this.along, along);
     replace(this.labelFeatures, take(this.labelFeatures));
     replace(this.keys, take(this.keys));
     replace(this.content, take(this.content));
@@ -441,6 +467,8 @@ export class LabelBuilder {
     this.labelFeatures.push(this.current!);
     this.keys.push(this.currentKey);
     this.content.push(contentKey(value, x, y));
+    this.currentMid = -1;
+    this.currentAlong[0] = this.currentAlong[1] = 0;
     this.glyphStart.push(this.glyphCount);
     this.partStart.push(this.parts.length / PART_DOUBLES);
     this.mode.push(mode);
@@ -450,6 +478,8 @@ export class LabelBuilder {
 
   private endLabel() {
     this.glyphEnd.push(this.glyphCount);
+    this.glyphMid.push(this.currentMid < 0 ? this.glyphCount : this.currentMid);
+    this.along.push(this.currentAlong[0], this.currentAlong[1]);
     this.partEnd.push(this.parts.length / PART_DOUBLES);
   }
 
@@ -785,10 +815,14 @@ export class LabelBuilder {
       return;
     }
     const startM = (pathLength - textLength) * horizontalAlign(plain, text.getTextAlign());
-    const parts = drawTextOnPath(pixels, 0, pixels.length, 2, plain, startM, maxAngle, sx, measureAndCacheTextWidth, font, cache, o.rotation, text.getKeepUpright() ?? true);
+    const keepUpright = text.getKeepUpright() ?? true;
+    const parts = drawTextOnPath(pixels, 0, pixels.length, 2, plain, startM, maxAngle, sx, measureAndCacheTextWidth, font, cache, o.rotation, keepUpright);
     if (!parts || !parts.length || !this.take()) {
       return;
     }
+    // The other direction, for when the view has turned so far that this one is
+    // upside down: half a turn further ol decides the other way.
+    const turned = keepUpright && !this.boxesOnly ? drawTextOnPath(pixels, 0, pixels.length, 2, plain, startM, maxAngle, sx, measureAndCacheTextWidth, font, cache, o.rotation + Math.PI, true) : null;
     this.hasLine = true;
     const s = style.strokeWidth;
     const height = measureTextHeight(font);
@@ -805,37 +839,81 @@ export class LabelBuilder {
     const face = atlas.face(font, s, raster, style.lightFill, style.lightHalo);
     // a line label is where its line starts: its own place depends on the view
     this.beginLabel(style.mode, style.zIndex, plain, path[begin], path[begin + 1]);
-    // per glyph: part offset x, y, offset x, y, size w, h, atlas cell x, y, w, h, angle
-    const glyphs: number[] = [];
-    for (const part of parts) {
-      const px = (part[0] as number) - mx;
-      const py = (part[1] as number) - my;
-      const half = part[2] as number;
-      const angle = part[3] as number;
-      const segs = this.boxesOnly ? [] : segments(part[4] as string);
-      let pen = 0;
-      for (let k = 0; k < segs.length; k++) {
-        const g = face.glyph(segs[k]);
-        if (g.w > 0) {
-          glyphs.push(px, py, -half + offsetX + (pen + g.left) * sx, cy + g.top * sy, g.width * sx, g.height * sy, g.x, g.y, g.w, g.h, angle);
+    for (const way of turned?.length ? [parts, turned] : [parts]) {
+      if (way === turned) {
+        this.currentMid = this.glyphCount;
+        this.twoWay = true;
+        const from = pointAlong(pixels, startM);
+        const to = pointAlong(pixels, startM + textLength);
+        this.currentAlong[0] = from[0] - to[0];
+        this.currentAlong[1] = from[1] - to[1];
+      }
+      // per glyph: part offset x, y, offset x, y, size w, h, atlas cell x, y, w, h, angle
+      const glyphs: number[] = [];
+      for (const part of way) {
+        const px = (part[0] as number) - mx;
+        const py = (part[1] as number) - my;
+        const half = part[2] as number;
+        const angle = part[3] as number;
+        const segs = this.boxesOnly ? [] : segments(part[4] as string);
+        let pen = 0;
+        for (let k = 0; k < segs.length; k++) {
+          const g = face.glyph(segs[k]);
+          if (g.w > 0) {
+            glyphs.push(px, py, -half + offsetX + (pen + g.left) * sx, cy + g.top * sy, g.width * sx, g.height * sy, g.x, g.y, g.w, g.h, angle);
+          }
+          pen += metrics.advance(segs[k]) + (k + 1 < segs.length ? metrics.kerning(segs[k], segs[k + 1]) : 0);
         }
-        pen += metrics.advance(segs[k]) + (k + 1 < segs.length ? metrics.kerning(segs[k], segs[k + 1]) : 0);
+        if (way === parts) {
+          // the boxes for decluttering and hits are those of the direction of the layout
+          const h = (Math.abs(height * sy) + s) / 2;
+          this.parts.push(ax, ay, px, py, angle, 1, -half + offsetX - s / 2, cy - h, half + offsetX + s / 2, cy + h, Math.cos(angle), Math.sin(angle));
+        }
       }
-      const h = (Math.abs(height * sy) + s) / 2;
-      this.parts.push(ax, ay, px, py, angle, 1, -half + offsetX - s / 2, cy - h, half + offsetX + s / 2, cy + h, Math.cos(angle), Math.sin(angle));
-    }
-    // all halos of the label, then all fills
-    for (let channel = HALO; channel <= FILL; channel++) {
-      const color = channel === HALO ? style.stroke : style.fill;
-      if (color[3] <= 0 || (channel === HALO && s <= 0)) {
-        continue;
-      }
-      for (let i = 0; i < glyphs.length; i += 11) {
-        this.instance(ax, ay, glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4], glyphs[i + 5], glyphs[i + 6], glyphs[i + 7], glyphs[i + 8], glyphs[i + 9], color, glyphs[i + 10], 1, channel);
+      // all halos of the label, then all fills
+      for (let channel = HALO; channel <= FILL; channel++) {
+        const color = channel === HALO ? style.stroke : style.fill;
+        if (color[3] <= 0 || (channel === HALO && s <= 0)) {
+          continue;
+        }
+        for (let i = 0; i < glyphs.length; i += 11) {
+          this.instance(ax, ay, glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4], glyphs[i + 5], glyphs[i + 6], glyphs[i + 7], glyphs[i + 8], glyphs[i + 9], color, glyphs[i + 10], 1, channel);
+        }
       }
     }
     this.endLabel();
   }
+}
+
+/** The point at `m` along a path of x, y pairs. */
+function pointAlong(path: number[], m: number): [number, number] {
+  let x = path[0];
+  let y = path[1];
+  for (let i = 2; i < path.length; i += 2) {
+    const length = Math.hypot(path[i] - x, path[i + 1] - y);
+    if (m <= length || i + 2 >= path.length) {
+      const t = length > 0 ? m / length : 0;
+      return [x + (path[i] - x) * t, y + (path[i + 1] - y) * t];
+    }
+    m -= length;
+    x = path[i];
+    y = path[i + 1];
+  }
+  return [x, y];
+}
+
+/**
+ * Whether a label along a line is read from its second set of glyphs for a
+ * view rotation: when ol's `drawTextOnPath` would turn it around for that
+ * rotation but did not for the rotation of the layout, or the other way.
+ * @param x `along` of the label
+ */
+export function reads(x: number, y: number, layoutRotation: number, rotation: number): boolean {
+  if (x === 0 && y === 0) {
+    return false;
+  }
+  const reversed = (r: number) => Math.cos(r) * x - Math.sin(r) * y > 0;
+  return reversed(rotation) !== reversed(layoutRotation);
 }
 
 const keyDoubles = new Float64Array(2);

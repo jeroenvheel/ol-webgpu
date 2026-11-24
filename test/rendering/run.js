@@ -540,7 +540,7 @@ if (args.gputext !== 'false' && (!args.match || 'gputext'.includes(args.match) |
       checks[layer] = await page.evaluate(() => window.__labels);
       const times = await page.evaluate(() => window.__labelTimes);
       if (times) {
-        console.log(`  [${layer}] 40 000 labels: ${times.first} ms until they are shown, ${times.again} ms (${times.frames} frames) to lay them out again`);
+        console.log(`  [${layer}] 40 000 labels: ${times.first} ms until they are shown, ${times.again} ms (${times.frames} frames) to lay them out again; 3 000 labels along lines: ${times.lines} ms`);
       }
     } catch {
       checks[layer] = {'page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};

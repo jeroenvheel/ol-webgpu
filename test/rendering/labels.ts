@@ -6,6 +6,7 @@
 import Feature from 'ol/Feature.js';
 import Map from 'ol/Map.js';
 import View from 'ol/View.js';
+import LineString from 'ol/geom/LineString.js';
 import Point from 'ol/geom/Point.js';
 import VectorSource from 'ol/source/Vector.js';
 import {frame, renderersSettled} from './settled.js';
@@ -77,6 +78,7 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
   const check = (name: string, ok: boolean, detail: unknown) => {
     results[name] = {ok, detail: JSON.stringify(detail)};
   };
+  let lineLabelsMs = 0;
   try {
     await settle();
     const upper = [0, 0, 256, 180] as const; // without the crowded layer's labels
@@ -153,6 +155,63 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
       {before: crowd, leastAlpha, leastCount, frames: reloadFrames, after: reloaded},
     );
 
+    // a label along a line stays upright while the view turns (it is laid out again when the view rests)
+    {
+      const [cx, cy] = view.getCenter()!;
+      const r = view.getResolution()!;
+      const road = new Feature({geometry: new LineString([[cx - 110 * r, cy + 60 * r], [cx + 110 * r, cy + 60 * r]]), name: 'Upright along the line'});
+      const along = new Layer({
+        source: new VectorSource({features: [road]}),
+        style: {'text-value': ['get', 'name'], 'text-placement': 'line', 'text-font': 'bold 16px sans-serif', 'text-fill-color': '#000000'},
+      });
+      map.addLayer(along);
+      await settle();
+      const image = () => {
+        map.renderSync();
+        const canvas = document.querySelector('#map canvas') as HTMLCanvasElement;
+        probe.canvas.width = canvas.width;
+        probe.canvas.height = canvas.height;
+        probe.drawImage(canvas, 0, 0);
+        return probe.getImageData(0, 0, canvas.width, canvas.height).data;
+      };
+      const INTERACTING = 1; // ol/ViewHint.js
+      view.setHint(INTERACTING, 1);
+      view.setRotation(Math.PI);
+      await frame();
+      const turning = image();
+      view.setHint(INTERACTING, -1);
+      await settle();
+      const rested = image();
+      let inked = 0;
+      let differing = 0;
+      for (let i = 3; i < rested.length; i += 4) {
+        inked += rested[i] > 128 ? 1 : 0;
+        differing += Math.abs(rested[i] - turning[i]) > 128 ? 1 : 0;
+      }
+      check('a label along a line is upright while the view turns', inked > 300 && differing < inked * 0.1, {inked, differing});
+      view.setRotation(0);
+      map.removeLayer(along);
+      await settle();
+
+      // how long 3 000 labels along lines take, for the report
+      const roads: Feature[] = [];
+      for (let i = 0; i < 3000; i++) {
+        const x = cx + (((i * 37) % 200) - 100) * r;
+        const y = cy + (((i * 101) % 200) - 100) * r;
+        roads.push(new Feature({geometry: new LineString([[x - 40 * r, y], [x, y + 10 * r], [x + 40 * r, y]]), name: `Road ${i}`}));
+      }
+      const many = new Layer({
+        source: new VectorSource({features: roads}),
+        style: {'text-value': ['get', 'name'], 'text-placement': 'line', 'text-font': '10px sans-serif', 'text-fill-color': '#000000'},
+      });
+      const start = performance.now();
+      map.addLayer(many);
+      await settle();
+      lineLabelsMs = Math.round(performance.now() - start);
+      map.removeLayer(many);
+      await settle();
+    }
+
     // web fonts that arrive: only those of the labels make the atlas start over
     const atlas = sharedAtlas();
     const loadFont = async (family: string) => {
@@ -193,7 +252,7 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
       await frame();
     }
     // how long 40 000 labels take, for the report
-    (window as any).__labelTimes = {first: Math.round(manyMs), again: Math.round(performance.now() - relayStart), frames};
+    (window as any).__labelTimes = {lines: lineLabelsMs, first: Math.round(manyMs), again: Math.round(performance.now() - relayStart), frames};
     const relaid = drawn(0, 180, 256, 256);
     check('a font of the labels starts the atlas over', atlas.generation === generation + 1 && relaid.count > 40 && relaid.alpha === 255, {
       before: generation,

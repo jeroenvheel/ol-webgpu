@@ -264,6 +264,10 @@ two backends and GPU-evaluated styles.
   screen stay until the new ones are ready. A new layout is made when the
   view leaves that area, and when the resolution (or, for text along lines
   and with decluttering, the rotation) has changed and the view has settled.
+  Text along a line that is kept upright has its glyphs for both directions,
+  so it is upright in every frame of a view that turns; a label that is
+  loaded again as another feature object, with the same text at the same
+  place, stays as it is instead of fading in.
 - **Drawing.** A glyph is an instanced quad, drawn after the layer's
   geometries in the same pass, in every world copy. Labels are drawn one
   after the other, by `z-index` and then feature age, each as its

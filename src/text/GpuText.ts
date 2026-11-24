@@ -16,7 +16,7 @@ import type {FlatStyleLike} from 'ol/style/flat.js';
 import {getUid} from 'ol/util.js';
 import {type AtlasPage, sharedAtlas} from './atlas.js';
 import {Occupancy, selectCandidates} from './declutter.js';
-import {LabelBuilder, type LabelSet, type LayoutOptions, MODE_DECLUTTER, MODE_NONE, partBox} from './layout.js';
+import {LabelBuilder, type LabelSet, type LayoutOptions, MODE_DECLUTTER, MODE_NONE, partBox, reads} from './layout.js';
 import {type TextEvaluator, buildTextEvaluator} from './style.js';
 
 /** Milliseconds a label takes to fade in or out when decluttering changes. */
@@ -37,6 +37,9 @@ export interface LabelWorld {
   world: number;
   /** Opacity per glyph instance. */
   opacity: Float32Array;
+  /** Per label of a set with two directions: whether the second one is shown, and the view rotation that was decided for. */
+  second: Uint8Array;
+  rotation: number;
   /** Increases when `opacity` changes. */
   version: number;
   /** Per label: fade state 0..1 and whether it should be shown. */
@@ -124,6 +127,8 @@ export default class GpuText {
   stats: LabelStats = {features: 0, labels: 0, glyphs: 0, measured: 0, layout: 0, frames: 0, declutter: 0};
   private worlds: LabelWorld[] = [];
   private worldWidth = 0;
+  /** Rotation of the view of the frame in the making. */
+  private rotation = 0;
   private styleVersion = 0;
   private lastFrameTime = 0;
   private wasFading = false;
@@ -373,6 +378,7 @@ export default class GpuText {
     if (!set) {
       return;
     }
+    this.rotation = frameState.viewState.rotation;
     const [start, end, worldWidth] = getWorldParameters(frameState, layer);
     this.worldWidth = worldWidth;
     const worlds: LabelWorld[] = [];
@@ -396,6 +402,8 @@ export default class GpuText {
         w = {
           world,
           opacity: new Float32Array(set.glyphCount),
+          second: new Uint8Array(set.twoWay ? set.count : 0),
+          rotation: this.rotation,
           version: 0,
           alpha,
           target: new Uint8Array(set.count).fill(this.declutter ? 0 : 1),
@@ -421,13 +429,43 @@ export default class GpuText {
   private writeOpacity(w: LabelWorld) {
     const set = this.set!;
     const {glyphStart, glyphEnd} = set;
-    for (let i = 0; i < set.count; i++) {
-      const a = w.alpha[i];
-      for (let g = glyphStart[i], e = glyphEnd[i]; g < e; g++) {
-        w.opacity[g] = a;
+    if (set.twoWay) {
+      // of a label along a line, the glyphs that are upright for this view
+      const {glyphMid, along} = set;
+      const rotation = this.rotation;
+      w.rotation = rotation;
+      for (let i = 0; i < set.count; i++) {
+        const a = w.alpha[i];
+        const second = reads(along[i * 2], along[i * 2 + 1], set.rotation, rotation);
+        w.second[i] = second ? 1 : 0;
+        const mid = glyphMid[i];
+        for (let g = glyphStart[i], e = glyphEnd[i]; g < e; g++) {
+          w.opacity[g] = g < mid === second ? 0 : a;
+        }
+      }
+    } else {
+      for (let i = 0; i < set.count; i++) {
+        const a = w.alpha[i];
+        for (let g = glyphStart[i], e = glyphEnd[i]; g < e; g++) {
+          w.opacity[g] = a;
+        }
       }
     }
     w.version++;
+  }
+
+  /** The view turned: labels along lines that are upside down now show their other glyphs. */
+  private turn(w: LabelWorld) {
+    const set = this.set!;
+    const {along} = set;
+    const rotation = this.rotation;
+    w.rotation = rotation;
+    for (let i = 0; i < set.count; i++) {
+      if ((reads(along[i * 2], along[i * 2 + 1], set.rotation, rotation) ? 1 : 0) !== w.second[i]) {
+        this.writeOpacity(w);
+        return;
+      }
+    }
   }
 
   /**
@@ -525,6 +563,9 @@ export default class GpuText {
     this.lastFrameTime = now;
     this.wasFading = anyFading;
     for (const w of this.worlds) {
+      if (set.twoWay && w.rotation !== this.rotation) {
+        this.turn(w);
+      }
       if (!w.fading) {
         continue;
       }
