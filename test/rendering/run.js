@@ -244,9 +244,19 @@ const EXPECTED_PICKS = {
   'point of a second layer': ['other'],
   'rotated view: point': ['point'],
   'panned view: point': ['point'],
+  'displaced circle: where it is drawn': ['displaced'],
+  'displaced circle: at its point': [],
+  'stroke with an offset: where it is drawn': ['offset line'],
+  'stroke with an offset: on the line': [],
+  'icon anchored at its bottom: in the icon': ['pin'],
+  'icon anchored at its bottom: below the point': [],
+  'displaced circle, rotated view': ['displaced'],
+  'displaced circle, rotated view: at its point': [],
+  'a symbol of 150 px, 140 px from its point': ['huge'],
+  'a symbol of 150 px, 160 px from its point': [],
 };
 let pickFailures = 0;
-if (args.picking !== 'false' && !args.match) {
+if (args.picking !== 'false' && (!args.match || args.match === 'picking')) {
   console.log('\nhit detection (forEachFeatureAtPixel):');
   const picks = {};
   for (const layer of layers) {

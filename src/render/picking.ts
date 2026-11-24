@@ -3,7 +3,8 @@
  * rendered geometries, in "build pixels": (world - center) / resolution at
  * the time the buffers were built. Queries run synchronously in a
  * main-thread wasm instance, then each candidate is checked against the
- * parts of its style that decide a hit: filter, symbol radius, stroke width
+ * parts of its style that decide a hit: filter, symbol size and where the
+ * symbol is drawn (displacement, anchor, rotation), stroke width and offset,
  * and fill. These are evaluated per property with ol's CPU expression
  * evaluator, so a missing property only disables the part that uses it
  * (the GPU then draws a degenerate primitive too).
@@ -18,9 +19,13 @@ import type {Coordinate} from 'ol/coordinate.js';
 import {buildExpression, newEvaluationContext} from 'ol/expr/cpu.js';
 import {BooleanType, NumberArrayType, NumberType, computeGeometryType, newParsingContext} from 'ol/expr/expression.js';
 import type {FlatStyle, FlatStyleLike, Rule} from 'ol/style/flat.js';
-import {type Core, HIT_KIND_LINE, HIT_KIND_POINT, HIT_KIND_POLYGON} from '../wasm/core.js';
+import {type Core, HIT_KIND_LINE, HIT_KIND_POINT, HIT_KIND_POLYGON, HIT_WORDS} from '../wasm/core.js';
 
-/** Largest symbol radius / half stroke width searched for, in CSS pixels. */
+/**
+ * How far from a geometry is searched, in CSS pixels, while the sizes of
+ * the features are not known yet (see `measure`). Sizes that are known are
+ * searched as far as they reach.
+ */
 export const MAX_PICK_RADIUS_PX = 128;
 
 const ZOOM_VAR = '__olgpu_zoom';
@@ -116,6 +121,14 @@ interface CompiledStyle {
   radius2: Evaluator<number>;
   symbolStrokeWidth: Evaluator<number>;
   scale: Evaluator<number | number[]>;
+  displacement: Evaluator<number[]>;
+  rotation: Evaluator<number>;
+  rotateWithView: boolean;
+  anchor: Evaluator<number[]>;
+  anchorOrigin: unknown;
+  anchorXPixels: boolean;
+  anchorYPixels: boolean;
+  strokeOffset: Evaluator<number>;
   iconWidth: Evaluator<number>;
   iconHeight: Evaluator<number>;
   iconSrc: string | null;
@@ -129,7 +142,17 @@ function compileStyle(s: FlatStyle): CompiledStyle {
   const style = s as Record<string, unknown>;
   const symbol = 'circle-radius' in style ? 'circle' : 'shape-points' in style ? 'shape' : 'icon-src' in style ? 'icon' : null;
   const p = symbol === 'circle' ? 'circle' : symbol === 'shape' ? 'shape' : 'icon';
-  const symbolSizes = [style[`${p}-radius`], style['shape-radius2'], style[`${p}-stroke-width`], style[`${p}-scale`], style['icon-width'], style['icon-height']];
+  const symbolSizes = [
+    style[`${p}-radius`],
+    style['shape-radius2'],
+    style[`${p}-stroke-width`],
+    style[`${p}-scale`],
+    style['icon-width'],
+    style['icon-height'],
+    style[`${p}-displacement`],
+    style['icon-anchor'],
+  ];
+  const strokeSizes = [style['stroke-width'], style['stroke-offset']];
   return {
     fill: 'fill-color' in style || 'fill-pattern-src' in style,
     stroke: 'stroke-color' in style || 'stroke-pattern-src' in style,
@@ -139,12 +162,20 @@ function compileStyle(s: FlatStyle): CompiledStyle {
     radius2: compile<number>(style['shape-radius2'], NumberType),
     symbolStrokeWidth: compile<number>(style[`${p}-stroke-width`], NumberType),
     scale: compile<number | number[]>(style[`${p}-scale`], NumberType | NumberArrayType),
+    displacement: compile<number[]>(style[`${p}-displacement`], NumberArrayType),
+    rotation: compile<number>(style[`${p}-rotation`], NumberType),
+    rotateWithView: !!style[`${p}-rotate-with-view`],
+    anchor: compile<number[]>(style['icon-anchor'], NumberArrayType),
+    anchorOrigin: style['icon-anchor-origin'],
+    anchorXPixels: style['icon-anchor-x-units'] === 'pixels',
+    anchorYPixels: style['icon-anchor-y-units'] === 'pixels',
+    strokeOffset: compile<number>(style['stroke-offset'], NumberType),
     iconWidth: compile<number>(style['icon-width'], NumberType),
     iconHeight: compile<number>(style['icon-height'], NumberType),
     iconSrc: typeof style['icon-src'] === 'string' ? (style['icon-src'] as string) : null,
     symbolSize: sizeKind(symbolSizes),
-    strokeSize: sizeKind([style['stroke-width']]),
-    timeDependent: [...symbolSizes, style['stroke-width']].some((v) => usesOps(v, new Set(['time']))),
+    strokeSize: sizeKind(strokeSizes),
+    timeDependent: [...symbolSizes, ...strokeSizes].some((v) => usesOps(v, new Set(['time']))),
   };
 }
 
@@ -182,22 +213,84 @@ function compileRules(style: FlatStyleLike): CompiledRule[] {
   });
 }
 
-function symbolRadius(s: CompiledStyle, ctx: any): number {
+/**
+ * Where a symbol is drawn, in CSS pixels with y up, as ol's shaders place
+ * it: its centre relative to the point (before the rotation of the symbol
+ * turns that as well), and its half size. `round`: a circle of radius
+ * `halfWidth`, else a rectangle.
+ */
+interface SymbolBox {
+  x: number;
+  y: number;
+  halfWidth: number;
+  halfHeight: number;
+  round: boolean;
+  /** Clockwise, without the rotation of the view. */
+  rotation: number;
+}
+const box: SymbolBox = {x: 0, y: 0, halfWidth: 0, halfHeight: 0, round: true, rotation: 0};
+
+/** The box of a symbol for the feature of `ctx` (shared: copy what is kept), or null when nothing is drawn. */
+function symbolBox(s: CompiledStyle, ctx: any): SymbolBox | null {
   const scaleValue = run(s.scale, ctx) ?? 1;
-  const scale = Array.isArray(scaleValue) ? Math.max(Math.abs(scaleValue[0]), Math.abs(scaleValue[1])) : Math.abs(scaleValue);
+  const scaleX = Math.abs(Array.isArray(scaleValue) ? scaleValue[0] : scaleValue);
+  const scaleY = Math.abs(Array.isArray(scaleValue) ? scaleValue[1] : scaleValue);
+  const displacement = run(s.displacement, ctx);
+  box.x = displacement?.[0] ?? 0;
+  box.y = displacement?.[1] ?? 0;
+  box.rotation = run(s.rotation, ctx) ?? 0;
   if (s.symbol === 'icon') {
     const size = s.iconSrc ? iconSize(s.iconSrc) : undefined;
-    const w = run(s.iconWidth, ctx) ?? size?.[0] ?? 0;
-    const h = run(s.iconHeight, ctx) ?? size?.[1] ?? 0;
-    return (Math.max(w, h) / 2) * scale;
+    const w = (run(s.iconWidth, ctx) ?? size?.[0] ?? 0) * scaleX;
+    const h = (run(s.iconHeight, ctx) ?? size?.[1] ?? 0) * scaleY;
+    const anchor = run(s.anchor, ctx);
+    if (anchor) {
+      // as `parseIconProperties` of ol/render/webgl/style.js
+      const shiftX = anchor[0] * (s.anchorXPixels ? scaleX : w);
+      const shiftY = anchor[1] * (s.anchorYPixels ? scaleX : h);
+      switch (s.anchorOrigin) {
+        case 'top-right':
+          box.x += -w / 2 + shiftX;
+          box.y += -h / 2 + shiftY;
+          break;
+        case 'bottom-left':
+          box.x += w / 2 - shiftX;
+          box.y += h / 2 - shiftY;
+          break;
+        case 'bottom-right':
+          box.x += -w / 2 + shiftX;
+          box.y += h / 2 - shiftY;
+          break;
+        default:
+          box.x += w / 2 - shiftX;
+          box.y += -h / 2 + shiftY;
+      }
+    }
+    box.halfWidth = w / 2;
+    box.halfHeight = h / 2;
+    box.round = false;
+    return box;
   }
   const r = run(s.radius, ctx);
   if (r === undefined || !(r > 0)) {
-    return -1;
+    return null;
   }
   const r2 = run(s.radius2, ctx) ?? 0;
   const stroke = run(s.symbolStrokeWidth, ctx) ?? 0;
-  return (Math.max(r, r2) + Math.max(stroke, 0) / 2) * scale;
+  box.halfWidth = box.halfHeight = (Math.max(r, r2) + Math.max(stroke, 0) / 2) * Math.max(scaleX, scaleY);
+  box.round = true;
+  return box;
+}
+
+/** How far from its point a symbol reaches, or -1 when nothing is drawn. */
+function symbolReach(s: CompiledStyle, ctx: any): number {
+  const b = symbolBox(s, ctx);
+  return b ? Math.hypot(b.x, b.y) + (b.round ? b.halfWidth : Math.hypot(b.halfWidth, b.halfHeight)) : -1;
+}
+
+/** How far from its line a stroke reaches. */
+function strokeReach(s: CompiledStyle, ctx: any): number {
+  return (run(s.strokeWidth, ctx) ?? 0) / 2 + Math.abs(run(s.strokeOffset, ctx) ?? 0);
 }
 
 export interface IndexState {
@@ -218,7 +311,7 @@ export class Picker {
   private rules: CompiledRule[];
   private readonly ctx = newEvaluationContext();
   private readonly start = Date.now();
-  /** Max symbol radius / half stroke width (CSS px) over all features, for one view key. */
+  /** How far symbols and strokes reach from their geometry at most (CSS px) over all features, for one view key. */
   private measured: {key: string; point: number; line: number} | null = null;
   private measuring: string | null = null;
   private measureToken = 0;
@@ -257,8 +350,8 @@ export class Picker {
   }
 
   /**
-   * Measures, in idle time and in chunks, the largest symbol radius and
-   * stroke width over all features when sizes depend on feature data. Until
+   * Measures, in idle time and in chunks, how far the symbols and strokes of
+   * all features reach from their geometry when that depends on feature data. Until
    * it finishes, picking searches the conservative MAX_PICK_RADIUS_PX.
    * The sizes do not depend on the extent that is rendered: they are kept
    * while the features (`revision` of the source) stay the same.
@@ -311,9 +404,9 @@ export class Picker {
           const ctx = this.prepareContext(features[index], variables, resolution);
           for (const s of styles) {
             if (kind === 'point' && s.symbol) {
-              result.point = Math.max(result.point, symbolRadius(s, ctx));
+              result.point = Math.max(result.point, symbolReach(s, ctx));
             } else if (kind === 'line' && s.stroke) {
-              result.line = Math.max(result.line, (run(s.strokeWidth, ctx) ?? 0) / 2);
+              result.line = Math.max(result.line, strokeReach(s, ctx));
             }
           }
         }
@@ -341,7 +434,7 @@ export class Picker {
     return this.measured?.key === this.viewKey(frameState);
   }
 
-  /** Upper bound of symbol radius / half stroke width in CSS px for this frame. */
+  /** How far from a geometry something of it can be drawn, in CSS px, for this frame. */
   private bound(frameState: FrameState): number {
     let bound = 0;
     const key = this.viewKey(frameState);
@@ -357,7 +450,7 @@ export class Picker {
         }
         if (size === 'shared') {
           const ctx = this.prepareContext(null, variables, frameState.viewState.resolution);
-          const r = kind === 'point' ? symbolRadius(s, ctx) : (run(s.strokeWidth, ctx) ?? 0) / 2;
+          const r = kind === 'point' ? symbolReach(s, ctx) : strokeReach(s, ctx);
           bound = Math.max(bound, r);
           continue;
         }
@@ -370,7 +463,7 @@ export class Picker {
         bound = Math.max(bound, measured[kind]);
       }
     }
-    return Math.min(Math.ceil(bound) + 1, MAX_PICK_RADIUS_PX);
+    return Math.ceil(bound) + 1;
   }
 
   load(serialized: Float32Array, state: IndexState) {
@@ -409,8 +502,23 @@ export class Picker {
     return ctx;
   }
 
-  /** Whether `feature` is hit at `distancePx` from a geometry of the given kind. */
-  private isHit(feature: FeatureLike, kind: number, distancePx: number, tolerance: number, variables: Record<string, any>, resolution: number): boolean {
+  /**
+   * Whether `feature` is hit at `distancePx` from a geometry of the given kind.
+   * @param x for a point: the position relative to it, in CSS px on screen with y up;
+   *   for a line: the distance again, positive to the right of its direction
+   * @param viewRotation rotation of the view
+   */
+  private isHit(
+    feature: FeatureLike,
+    kind: number,
+    distancePx: number,
+    x: number,
+    y: number,
+    viewRotation: number,
+    tolerance: number,
+    variables: Record<string, any>,
+    resolution: number,
+  ): boolean {
     const ctx = this.prepareContext(feature, variables, resolution);
     for (const rule of this.rules) {
       if (rule.isElse && rule.previous.some((f) => run(f, ctx) === true)) {
@@ -421,13 +529,28 @@ export class Picker {
       }
       for (const s of rule.styles) {
         if (kind === HIT_KIND_POINT && s.symbol) {
-          const r = symbolRadius(s, ctx);
-          if (r >= 0 && distancePx <= r + tolerance) {
+          const b = symbolBox(s, ctx);
+          if (!b) {
+            continue;
+          }
+          // the shader turns the symbol, and where it is, clockwise by this angle
+          const angle = b.rotation + (s.rotateWithView ? viewRotation : 0);
+          const cos = Math.cos(angle);
+          const sin = Math.sin(angle);
+          const dx = x - (cos * b.x + sin * b.y);
+          const dy = y - (-sin * b.x + cos * b.y);
+          if (b.round) {
+            if (Math.hypot(dx, dy) <= b.halfWidth + tolerance) {
+              return true;
+            }
+          } else if (Math.abs(cos * dx - sin * dy) <= b.halfWidth + tolerance && Math.abs(sin * dx + cos * dy) <= b.halfHeight + tolerance) {
             return true;
           }
         } else if (kind === HIT_KIND_LINE && s.stroke) {
           const w = run(s.strokeWidth, ctx);
-          if (w !== undefined && w > 0 && distancePx <= w / 2 + tolerance) {
+          const offset = run(s.strokeOffset, ctx) ?? 0;
+          // a positive offset draws the stroke to the right of the line
+          if (w !== undefined && w > 0 && (offset ? Math.abs(x - offset) : distancePx) <= w / 2 + tolerance) {
             return true;
           }
         } else if (kind === HIT_KIND_POLYGON && s.fill && distancePx <= tolerance) {
@@ -458,20 +581,30 @@ export class Picker {
     const radius = (this.bound(frameState) + hitTolerance) * toIndex;
     const variables = this.frameVariables(frameState);
     const resolution = frameState.viewState.resolution;
+    const rotation = frameState.viewState.rotation;
+    const cos = Math.cos(rotation);
+    const sin = Math.sin(rotation);
     const seen = new Set<FeatureLike>();
     for (const offset of worlds) {
       const x = (coordinate[0] - offset - state.center[0]) / state.resolution;
       const y = (coordinate[1] - state.center[1]) / state.resolution;
       // copy the (small) hit list: evaluating styles must not see it change
       const {count, words, floats} = this.core.queryIndexRaw(x, y, radius, this.index);
-      const refs = words.slice(0, count * 4);
-      const distances = floats.slice(0, count * 4);
+      const refs = words.slice(0, count * HIT_WORDS);
+      const distances = floats.slice(0, count * HIT_WORDS);
       for (let i = 0; i < count; i++) {
-        const feature = getFeature(refs[i * 4]);
+        const feature = getFeature(refs[i * HIT_WORDS]);
         if (!feature || seen.has(feature)) {
           continue;
         }
-        if (this.isHit(feature, refs[i * 4 + 1], distances[i * 4 + 3] / toIndex, hitTolerance, variables, resolution)) {
+        const kind = refs[i * HIT_WORDS + 1];
+        let a = distances[i * HIT_WORDS + 4] / toIndex;
+        let b = distances[i * HIT_WORDS + 5] / toIndex;
+        if (kind === HIT_KIND_POINT) {
+          // from the map to the screen: the view turns the map clockwise by its rotation
+          [a, b] = [cos * a + sin * b, -sin * a + cos * b];
+        }
+        if (this.isHit(feature, kind, distances[i * HIT_WORDS + 3] / toIndex, a, b, rotation, hitTolerance, variables, resolution)) {
           seen.add(feature);
           yield feature;
         }

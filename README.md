@@ -165,7 +165,8 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
 - **CPU hit detection.** WebGPU readback is asynchronous, but OpenLayers asks
   for hits synchronously, so picking uses a spatial index (built in Rust in the
   worker, queried by a main-thread wasm instance) plus the style's filter,
-  symbol radius, stroke width and fill evaluated with ol's CPU expression
+  symbol size and place (displacement, `icon-anchor`, rotation), stroke width
+  and `stroke-offset`, and fill, evaluated with ol's CPU expression
   evaluator. Unlike ol's GPU picking it honours `hitTolerance`, respects
   `filter`, and can return all features under the cursor.
 - **Text on the GPU.** See [Labels](#labels). With `text: 'canvas'`,
@@ -440,9 +441,11 @@ features. It checks that the first two share a canvas (3 canvases in map
 order) and compares the screenshot with ol's `WebGLVector` layers: 0.00%
 differing pixels on both backends, with and without `antialias`.
 
-**Hit detection.** `test/rendering/picking.ts` checks 14 situations (symbol
+**Hit detection.** `test/rendering/picking.ts` checks 25 situations (symbol
 radius, stroke width, polygon fill and holes, `hitTolerance`, filtered-out
-features, rotation, panning). WebGL2 and WebGPU pass all 14. ol's
+features, rotation, panning, and symbols and strokes that are not drawn on
+their geometry: a displaced circle, a stroke with an offset, an icon
+anchored at its bottom, a symbol of 150 px). WebGL2 and WebGPU pass all 25. ol's
 `WebGLVector` fails two by design (it ignores `hitTolerance` and returns
 features hidden by a style `filter`), and is flaky right after a rebuild
 because its GPU hit buffer is rendered asynchronously.
@@ -615,9 +618,13 @@ view), which is not sliced yet.
   submitted once per map frame (on the map's `postcompose`), so reading a
   layer canvas in the same task after `renderSync()` works as with WebGL.
 - Hit detection is geometric: dash gaps and transparent icon pixels still
-  count as hits. When symbol or stroke sizes depend on feature properties,
-  the largest size is measured in idle time after each rebuild; until then
-  (and for sizes that change with `time`) picks search a 128 px radius,
-  which is correct but slower on dense data.
+  count as hits; an icon is hit within its rectangle, a circle or shape
+  within its radius. A stroke with an offset is hit beside the nearest
+  segment of its line, so at a sharp bend the hit area is not exactly the
+  drawn join. When symbol or stroke sizes (or displacements) depend on
+  feature properties, how far they reach is measured in idle time after
+  each rebuild; until then (and for sizes that change with `time`) picks
+  search 128 px around the cursor, which is slower on dense data and misses
+  what is drawn further than that from its geometry.
 - The naga shader translator is ~1.3 MB of wasm (loaded once, only by the
   WebGPU layer).

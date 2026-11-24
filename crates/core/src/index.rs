@@ -21,6 +21,8 @@ use crate::instructions::{self, LINE_VERTEX_SIZE};
 const NODE_SIZE: usize = 16;
 const LINE_CHUNK: usize = 32;
 const MAGIC: u32 = 0x4F4C_4731; // "OLG1"
+/// Words per hit of a query.
+pub const HIT_WORDS: usize = 6;
 const HEADER: usize = 6;
 
 pub const KIND_POLYGON: u32 = 0;
@@ -43,8 +45,8 @@ pub struct PackedIndex {
 /// Working memory of a query, kept between queries so they do not allocate.
 #[derive(Default)]
 pub struct QueryScratch {
-    /// kind, seq, ref, distance
-    found: Vec<(u32, u32, u32, f64)>,
+    /// kind, seq, ref, distance, where (see `query`)
+    found: Vec<(u32, u32, u32, f64, [f64; 2])>,
     /// node position, level
     stack: Vec<(usize, usize)>,
 }
@@ -280,8 +282,12 @@ impl PackedIndex {
         self.data[at].to_bits()
     }
 
-    /// Appends `[ref, kind, seq, distance bits]` for each item within `radius`,
-    /// deduplicated per geometry and sorted topmost first.
+    /// Appends `HIT_WORDS` words for each item within `radius`, deduplicated
+    /// per geometry and sorted topmost first: `[ref, kind, seq, distance, a, b]`
+    /// (the last three as f32 bits). For a point, `(a, b)` is the query position
+    /// relative to the point. For a line, `a` is the distance with a sign:
+    /// positive to the right of the direction of the line; `b` is 0. Both are 0
+    /// for a polygon.
     pub fn query(&self, x: f64, y: f64, radius: f64, hits: &mut Vec<u32>) {
         self.query_with(x, y, radius, hits, &mut QueryScratch::default());
     }
@@ -312,11 +318,11 @@ impl PackedIndex {
                 }
                 let target = self.word(self.indices + pos) as usize;
                 if pos < n {
-                    if let Some(d) = self.distance(target, x, y)
+                    if let Some((d, at)) = self.distance(target, x, y)
                         && d <= radius
                     {
                         let m = self.meta + target * 4;
-                        found.push((self.word(m), self.word(m + 1), self.word(m + 2), d));
+                        found.push((self.word(m), self.word(m + 1), self.word(m + 2), d, at));
                     }
                 } else {
                     stack.push((target, level - 1));
@@ -329,16 +335,24 @@ impl PackedIndex {
             b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.3.total_cmp(&b.3))
         });
         let mut last: Option<(u32, u32)> = None;
-        for &(kind, seq, r, d) in found.iter() {
+        for &(kind, seq, r, d, at) in found.iter() {
             if last == Some((kind, seq)) {
                 continue;
             }
             last = Some((kind, seq));
-            hits.extend_from_slice(&[r, kind, seq, (d as f32).to_bits()]);
+            hits.extend_from_slice(&[
+                r,
+                kind,
+                seq,
+                (d as f32).to_bits(),
+                (at[0] as f32).to_bits(),
+                (at[1] as f32).to_bits(),
+            ]);
         }
     }
 
-    fn distance(&self, item: usize, x: f64, y: f64) -> Option<f64> {
+    /// The distance of an item to (x, y), and where (x, y) is (see `query`).
+    fn distance(&self, item: usize, x: f64, y: f64) -> Option<(f64, [f64; 2])> {
         let kind = self.word(self.meta + item * 4);
         let g = self.word(self.meta + item * 4 + 3) as usize;
         let geom = &self.data[self.geom..];
@@ -346,23 +360,23 @@ impl PackedIndex {
             KIND_POINT => {
                 let dx = x - geom[g] as f64;
                 let dy = y - geom[g + 1] as f64;
-                Some((dx * dx + dy * dy).sqrt())
+                Some(((dx * dx + dy * dy).sqrt(), [dx, dy]))
             }
             KIND_LINE => {
                 let count = geom[g] as usize;
                 let c = &geom[g + 1..g + 1 + count * 2];
                 let mut best = f64::INFINITY;
+                let mut right = true;
                 for k in 0..count.saturating_sub(1) {
-                    best = best.min(segment_distance(
-                        x,
-                        y,
-                        c[k * 2] as f64,
-                        c[k * 2 + 1] as f64,
-                        c[k * 2 + 2] as f64,
-                        c[k * 2 + 3] as f64,
-                    ));
+                    let (x0, y0) = (c[k * 2] as f64, c[k * 2 + 1] as f64);
+                    let (x1, y1) = (c[k * 2 + 2] as f64, c[k * 2 + 3] as f64);
+                    let d = segment_distance(x, y, x0, y0, x1, y1);
+                    if d < best {
+                        best = d;
+                        right = (x1 - x0) * (y - y0) - (y1 - y0) * (x - x0) <= 0.0;
+                    }
                 }
-                Some(best)
+                Some((best, [if right { best } else { -best }, 0.0]))
             }
             KIND_POLYGON => {
                 let rings = geom[g] as usize;
@@ -385,7 +399,7 @@ impl PackedIndex {
                     }
                     p += count * 2;
                 }
-                Some(if inside { 0.0 } else { best })
+                Some((if inside { 0.0 } else { best }, [0.0, 0.0]))
             }
             _ => None,
         }
@@ -476,7 +490,7 @@ mod tests {
     }
 
     fn refs(hits: &[u32]) -> Vec<u32> {
-        hits.chunks_exact(4).map(|h| h[0]).collect()
+        hits.chunks_exact(HIT_WORDS).map(|h| h[0]).collect()
     }
 
     #[test]
@@ -543,7 +557,24 @@ mod tests {
         loaded.query(42.0, 17.0, 0.1, &mut hits);
         assert_eq!(refs(&hits), vec![17 * 100 + 42]);
         loaded.query(42.5, 17.0, 0.6, &mut hits);
-        assert_eq!(hits.len() / 4, 2);
+        assert_eq!(hits.len() / HIT_WORDS, 2);
+    }
+
+    #[test]
+    fn says_where_the_query_is() {
+        // a point at (10, 20) and a line from (0, 0) to (10, 0), going east
+        let points = [10.0, 20.0, 1.0];
+        let lines = [2.0, 2.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0];
+        let idx = PackedIndex::build(&points, &lines, &[], 1, 0, &ID);
+        let f = |w: u32| f32::from_bits(w);
+        let mut hits = vec![];
+        idx.query(13.0, 16.0, 6.0, &mut hits);
+        assert_eq!((f(hits[3]), f(hits[4]), f(hits[5])), (5.0, 3.0, -4.0));
+        // south of a line going east is to its right
+        idx.query(5.0, -2.0, 3.0, &mut hits);
+        assert_eq!((hits[0], f(hits[3]), f(hits[4])), (2, 2.0, 2.0));
+        idx.query(5.0, 2.0, 3.0, &mut hits);
+        assert_eq!((f(hits[3]), f(hits[4])), (2.0, -2.0));
         assert!(PackedIndex::from_data(&[1.0, 2.0]).is_none());
     }
 }

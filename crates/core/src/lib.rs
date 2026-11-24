@@ -107,7 +107,7 @@ pub unsafe extern "C" fn olgpu_build_polygons(ptr: *const f32, len: usize, custo
 }
 
 /// Output buffer pointer: 0 = indices (u32), 1 = vertices (f32), 2 = instances (f32),
-/// 3 = query hits (u32 x4 per hit), 4 = serialized index (f32).
+/// 3 = query hits (`index::HIT_WORDS` words per hit), 4 = serialized index (f32).
 #[unsafe(no_mangle)]
 pub extern "C" fn olgpu_out_ptr(kind: u32) -> *const u8 {
     STATE.with_borrow(|s| match kind {
@@ -233,6 +233,6 @@ pub extern "C" fn olgpu_index_query(handle: u32, x: f64, y: f64, radius: f64) ->
             Some(index) => index.query_with(x, y, radius, hits, query),
             None => hits.clear(),
         }
-        hits.len() / 4
+        hits.len() / index::HIT_WORDS
     })
 }

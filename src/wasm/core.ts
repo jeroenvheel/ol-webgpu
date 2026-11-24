@@ -61,6 +61,8 @@ export interface IndexHit {
 
 export const HIT_KIND_POLYGON = 0;
 export const HIT_KIND_LINE = 1;
+/** Words per hit of `queryIndexRaw` (`HIT_WORDS` of the core). */
+export const HIT_WORDS = 6;
 export const HIT_KIND_POINT = 2;
 
 export type WasmSource = URL | string | BufferSource | WebAssembly.Module;
@@ -236,15 +238,17 @@ export class Core {
 
   /**
    * Raw hits within `radius` of (x, y), topmost first, as views on wasm
-   * memory: 4 words per hit (ref, kind, seq, distance as f32). Valid until
-   * the next call into this Core.
+   * memory: `HIT_WORDS` words per hit (ref, kind, seq, and as f32 the distance
+   * and where the query is: for a point (x, y) relative to it, for a line the
+   * distance again, positive to the right of its direction). Valid until the
+   * next call into this Core.
    * @param index handle from `loadIndex` (0: the index `buildIndex` made last)
    */
   queryIndexRaw(x: number, y: number, radius: number, index = 0): {count: number; words: Uint32Array; floats: Float32Array} {
     const count = this.ex.olgpu_index_query(index, x, y, radius);
     const ptr = this.ex.olgpu_out_ptr(3);
-    const words = new Uint32Array(this.ex.memory.buffer, ptr, count * 4);
-    const floats = new Float32Array(this.ex.memory.buffer, ptr, count * 4);
+    const words = new Uint32Array(this.ex.memory.buffer, ptr, count * HIT_WORDS);
+    const floats = new Float32Array(this.ex.memory.buffer, ptr, count * HIT_WORDS);
     return {count, words, floats};
   }
 
@@ -254,10 +258,10 @@ export class Core {
     const hits: IndexHit[] = new Array(count);
     for (let i = 0; i < count; i++) {
       hits[i] = {
-        ref: words[i * 4],
-        kind: words[i * 4 + 1],
-        seq: words[i * 4 + 2],
-        distance: floats[i * 4 + 3],
+        ref: words[i * HIT_WORDS],
+        kind: words[i * HIT_WORDS + 1],
+        seq: words[i * HIT_WORDS + 2],
+        distance: floats[i * HIT_WORDS + 3],
       };
     }
     return hits;
