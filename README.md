@@ -243,7 +243,9 @@ two backends and GPU-evaluated styles.
   halo in one colour channel and the fill in another. One atlas (2048 px
   wide, growing to 4096 px high) is shared by all layers of the page. Text
   in scripts that need shaping (Arabic, Hebrew, Indic, combining marks) is
-  drawn as a whole line. When a web font of the labels finishes loading, or
+  drawn as a whole line. Along a line with bends such text is cut per
+  stretch of the line; an Arabic or Syriac word that is cut keeps its joined
+  letter forms and its length (ol spreads it out, see `src/text/textpath.ts`). When a web font of the labels finishes loading, or
   the atlas is full, it starts over on a new page and the labels are laid
   out again; until then they are drawn as they were, from the page before.
   Other fonts of the page (an icon font, the fonts of the interface) change

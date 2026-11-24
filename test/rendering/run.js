@@ -63,7 +63,7 @@ const server = await createServer({
   root: here,
   logLevel: 'warn',
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
-  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'renderfeature.ts', 'rebuild.ts']},
+  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'renderfeature.ts', 'rebuild.ts']},
   worker: {format: 'es'},
   plugins: [
     {
@@ -545,6 +545,22 @@ if (args.gputext !== 'false' && (!args.match || 'gputext'.includes(args.match) |
     } catch {
       checks[layer] = {'page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
     }
+  }
+  // letters that join, along a line with bends (bend.ts): in one piece and as long as on a straight line
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    await page.goto(`${base}bend.html?layer=${layer}`);
+    let r = null;
+    try {
+      await page.waitForFunction(() => window.__bend, null, {timeout: 30_000, polling: 50});
+      r = await page.evaluate(() => window.__bend);
+    } catch {
+      // reported below
+    }
+    const whole = (b) => b.gaps === 0 && Math.abs(b.width - r.straight.width) <= r.straight.width * 0.08;
+    checks[layer]['a word of letters that join stays whole around bends'] = {
+      ok: !!r && r.straight.width > 60 && r.straight.gaps === 0 && whole(r.oneBend) && whole(r.twoBends),
+      detail: JSON.stringify(r),
+    };
   }
   const checkNames = [...new Set(Object.values(checks).flatMap((c) => Object.keys(c)))];
   for (const name of checkNames) {

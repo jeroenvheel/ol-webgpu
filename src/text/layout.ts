@@ -27,11 +27,13 @@ import {
   type GlyphAtlas,
   SUBPIXEL_BINS,
   createAtlasUse,
+  graphemes,
   quantizeFont,
   quantizeStrokeWidth,
   segments,
 } from './atlas.js';
 import type {TextEvaluator} from './style.js';
+import {JOINING, ZWJ, joinedAdvances, joinsAcross, textOnPath} from './textpath.js';
 
 /**
  * Sizes of the attributes of an instance, in shader location order after
@@ -794,6 +796,22 @@ export class LabelBuilder {
     }
   }
 
+  /** The graphemes of a text whose letters join, with their widths inside the text at a scale, and the sum of those. */
+  private joining(font: string, text: string, scale: number): {segments: string[]; advances: Float64Array; length: number} {
+    const key = `${scale}|${font}|${text}`;
+    let j = joiningCache.get(key);
+    if (!j) {
+      const segments = graphemes(text);
+      const advances = joinedAdvances(segments, (t) => this.atlas.measure(font, t).width).map((a) => a * scale);
+      j = {segments, advances, length: advances.reduce((sum, a) => sum + a, 0)};
+      if (joiningCache.size > 2000) {
+        joiningCache.clear();
+      }
+      joiningCache.set(key, j);
+    }
+    return j;
+  }
+
   private emitLineLabel(text: Text, path: number[], begin: number, end: number, plain: string, style: TextValues, maxAngle: number) {
     const o = this.options;
     const atlas = this.atlas;
@@ -810,19 +828,25 @@ export class LabelBuilder {
     const sy = style.scale[1];
     const pathLength = lineStringLength(pixels, 0, pixels.length, 2);
     const cache = (this.atlas.widthCaches[font] ??= {});
-    const textLength = sx * measureAndCacheTextWidth(font, plain, cache);
+    // letters that join get the width they have inside the word (see textpath.ts)
+    const joining = JOINING.test(plain) ? this.joining(font, plain, sx) : null;
+    const textLength = joining ? joining.length : sx * measureAndCacheTextWidth(font, plain, cache);
     if (!text.getOverflow() && textLength > pathLength) {
       return;
     }
     const startM = (pathLength - textLength) * horizontalAlign(plain, text.getTextAlign());
     const keepUpright = text.getKeepUpright() ?? true;
-    const parts = drawTextOnPath(pixels, 0, pixels.length, 2, plain, startM, maxAngle, sx, measureAndCacheTextWidth, font, cache, o.rotation, keepUpright);
+    const onPath = (rotation: number, upright: boolean): any[][] | null =>
+      joining
+        ? textOnPath(pixels, joining.segments, joining.advances, startM, maxAngle, rotation, upright)
+        : drawTextOnPath(pixels, 0, pixels.length, 2, plain, startM, maxAngle, sx, measureAndCacheTextWidth, font, cache, rotation, upright);
+    const parts = onPath(o.rotation, keepUpright);
     if (!parts || !parts.length || !this.take()) {
       return;
     }
     // The other direction, for when the view has turned so far that this one is
     // upside down: half a turn further ol decides the other way.
-    const turned = keepUpright && !this.boxesOnly ? drawTextOnPath(pixels, 0, pixels.length, 2, plain, startM, maxAngle, sx, measureAndCacheTextWidth, font, cache, o.rotation + Math.PI, true) : null;
+    const turned = keepUpright && !this.boxesOnly ? onPath(o.rotation + Math.PI, true) : null;
     this.hasLine = true;
     const s = style.strokeWidth;
     const height = measureTextHeight(font);
@@ -850,13 +874,25 @@ export class LabelBuilder {
       }
       // per glyph: part offset x, y, offset x, y, size w, h, atlas cell x, y, w, h, angle
       const glyphs: number[] = [];
-      for (const part of way) {
+      const texts = this.boxesOnly ? null : joinChunks(way.map((part) => part[4] as string), plain);
+      for (let p = 0; p < way.length; p++) {
+        const part = way[p];
         const px = (part[0] as number) - mx;
         const py = (part[1] as number) - my;
         const half = part[2] as number;
         const angle = part[3] as number;
-        const segs = this.boxesOnly ? [] : segments(part[4] as string);
+        const segs = texts ? segments(texts[p]) : [];
         let pen = 0;
+        if (texts && texts[p] !== part[4]) {
+          // A chunk of a word that goes on around a bend ends where its stretch of the
+          // line does: at the side of the rest of the word (right to left, so its start
+          // is at its right).
+          const j = atlas.joined(font, texts[p]);
+          const spare = 2 * half - (j.cutRight - j.cutLeft) * sx;
+          if (j.cutRight !== Infinity) {
+            pen = (j.lead && j.trail ? spare / 2 : j.lead ? spare : 0) / sx;
+          }
+        }
         for (let k = 0; k < segs.length; k++) {
           const g = face.glyph(segs[k]);
           if (g.w > 0) {
@@ -884,6 +920,40 @@ export class LabelBuilder {
     this.endLabel();
   }
 }
+
+/**
+ * The chunks of a text along a line (one per stretch of the line, in the
+ * order of the line: that of the text or the other way around), for
+ * drawing each on its own. Where the text was cut between two letters that
+ * join (Arabic, Syriac), both chunks get a zero width joiner there as a
+ * mark: the atlas draws such a chunk with the form its letters have in the
+ * whole word (see `GlyphAtlas.draw`). An Arabic word that goes around a bend
+ * would otherwise fall apart into isolated forms.
+ */
+export function joinChunks(chunks: string[], text: string): string[] {
+  if (chunks.length < 2 || !JOINING.test(text)) {
+    return chunks;
+  }
+  const joined = chunks.join('');
+  const forward = joined === text;
+  if (!forward && chunks.slice().reverse().join('') !== text) {
+    return chunks;
+  }
+  const out = chunks.slice();
+  const n = chunks.length;
+  for (let k = 0; k + 1 < n; k++) {
+    // in the order of the text
+    const a = forward ? k : n - 1 - k;
+    const b = forward ? k + 1 : n - 2 - k;
+    if (joinsAcross(chunks[a], chunks[b])) {
+      out[a] = out[a] + ZWJ;
+      out[b] = ZWJ + out[b];
+    }
+  }
+  return out;
+}
+
+const joiningCache = new Map<string, {segments: string[]; advances: Float64Array; length: number}>();
 
 /** The point at `m` along a path of x, y pairs. */
 function pointAlong(path: number[], m: number): [number, number] {

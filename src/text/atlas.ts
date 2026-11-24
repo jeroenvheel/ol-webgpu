@@ -20,6 +20,7 @@
  * made for until then.
  */
 import {getFontParameters} from 'ol/css.js';
+import {TATWEEL, ZWJ} from './textpath.js';
 import {textHeights} from 'ol/render/canvas.js';
 
 export interface Glyph {
@@ -122,6 +123,10 @@ export function quantizeStrokeWidth(width: number): number {
   return Math.max(0, Math.round(width * 4) / 4);
 }
 
+/** Text that is one run from right to left of letters that join. */
+const JOINED_RUN = /^[\p{Script=Arabic}\p{Script=Syriac}\p{M}\s]+$/u;
+const DIGIT = /\p{N}/u;
+
 export function needsShaping(text: string): boolean {
   return SHAPED.test(text);
 }
@@ -133,6 +138,11 @@ export function segments(text: string): string[] {
   if (needsShaping(text)) {
     return [text];
   }
+  return graphemes(text);
+}
+
+/** The graphemes of a text. */
+export function graphemes(text: string): string[] {
   segmenter ??= new Intl.Segmenter(undefined, {granularity: 'grapheme'});
   const out: string[] = [];
   for (const s of segmenter.segment(text)) {
@@ -469,10 +479,44 @@ export class GlyphAtlas {
     return face;
   }
 
+  /**
+   * How a segment is drawn: as it is, or, for a chunk of a word that was cut
+   * between letters that join, with a tatweel at the side where the word
+   * goes on (`lead`: at its start, `trail`: at its end) and what to keep of
+   * that, in CSS pixels from the left of the text.
+   */
+  joined(font: string, segment: string): {text: string; cutLeft: number; cutRight: number; lead: boolean; trail: boolean} {
+    const lead = segment.length > 1 && segment.startsWith(ZWJ);
+    const trail = segment.length > 1 && segment.endsWith(ZWJ);
+    if (!lead && !trail) {
+      return {text: segment, cutLeft: 0, cutRight: Infinity, lead, trail};
+    }
+    const core = segment.slice(lead ? 1 : 0, trail ? -1 : undefined);
+    if (!JOINED_RUN.test(core) || DIGIT.test(core)) {
+      return {text: core, cutLeft: 0, cutRight: Infinity, lead: false, trail: false};
+    }
+    const text = (lead ? TATWEEL : '') + core + (trail ? TATWEEL : '');
+    const tatweel = this.measure(font, TATWEEL).width;
+    return {text, cutLeft: trail ? tatweel : 0, cutRight: this.measure(font, text).width - (lead ? tatweel : 0), lead, trail};
+  }
+
   /** Draws the cell of a segment (see `Face.glyph`; `shift` and `drop` in texels here). */
   draw(face: Face, segment: string, shift: number, drop: number): Glyph {
     const {font, strokeWidth, pixelRatio} = face;
-    const m = this.measure(font, segment);
+    // A chunk of a word that was cut between letters that join (marked with a zero
+    // width joiner, see joinChunks in layout.ts) is drawn with a tatweel where the
+    // rest of the word was, which gives its letters their joining form, and the
+    // tatweel is cut off. (A zero width joiner itself changes nothing on a canvas.)
+    // Right to left, so the start of the chunk is at its right.
+    const {text, cutLeft, cutRight, lead} = this.joined(font, segment);
+    const measured = this.measure(font, text);
+    // the ink, relative to where the kept part starts
+    const m = {
+      actualBoundingBoxLeft: -(Math.max(-measured.actualBoundingBoxLeft, cutLeft) - cutLeft),
+      actualBoundingBoxRight: Math.min(measured.actualBoundingBoxRight, cutRight) - cutLeft,
+      actualBoundingBoxAscent: measured.actualBoundingBoxAscent,
+      actualBoundingBoxDescent: measured.actualBoundingBoxDescent,
+    };
     if (m.actualBoundingBoxLeft + m.actualBoundingBoxRight <= 0 || m.actualBoundingBoxAscent + m.actualBoundingBoxDescent <= 0) {
       return EMPTY;
     }
@@ -491,20 +535,30 @@ export class GlyphAtlas {
       }
       return EMPTY;
     }
+    const place = (ctx: CanvasRenderingContext2D) => {
+      if (text !== segment && cutRight !== Infinity) {
+        // only the kept part: the cell ends where the rest of the word goes on
+        const x0 = cutLeft > 0 ? left + shift : 0;
+        const x1 = lead ? left + shift + (cutRight - cutLeft) * pixelRatio : w;
+        ctx.beginPath();
+        ctx.rect(x0, 0, x1 - x0, h);
+        ctx.clip();
+      }
+      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, left + shift - cutLeft * pixelRatio, ascent + drop);
+      ctx.font = font;
+    };
     if (strokeWidth > 0) {
       this.mask(at.x, at.y, w, h, face.lightHalo, '#f00', (ctx) => {
-        ctx.setTransform(pixelRatio, 0, 0, pixelRatio, left + shift, ascent + drop);
-        ctx.font = font;
+        place(ctx);
         ctx.lineWidth = strokeWidth;
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
-        ctx.strokeText(segment, 0, 0);
+        ctx.strokeText(text, 0, 0);
       });
     }
     this.mask(at.x, at.y, w, h, face.lightFill, '#0f0', (ctx) => {
-      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, left + shift, ascent + drop);
-      ctx.font = font;
-      ctx.fillText(segment, 0, 0);
+      place(ctx);
+      ctx.fillText(text, 0, 0);
     });
     return {
       x: at.x,
@@ -539,7 +593,9 @@ export class GlyphAtlas {
     ctx.fillStyle = ctx.strokeStyle = light ? '#fff' : '#000';
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
+    ctx.save();
     draw(ctx);
+    ctx.restore(); // a clip of the cell
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (!light) {
       ctx.globalCompositeOperation = 'difference';
