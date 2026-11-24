@@ -8,6 +8,8 @@ export interface BuildRequest {
   points: ArrayBuffer | null;
   lines: ArrayBuffer | null;
   polygons: ArrayBuffer | null;
+  /** Also make the rings of the polygons as lines, for the soft edge of fills (see `buildStylePasses`). */
+  edges?: boolean;
   customSize: number;
   refOffset: number;
   /** Inverse of the transform used to create the instructions. */
@@ -25,6 +27,8 @@ export interface BuildResponse {
   points: BufferSet | null;
   lines: BufferSet | null;
   polygons: BufferSet | null;
+  /** The rings of the polygons as lines (when asked for). */
+  edges?: BufferSet | null;
   /** Serialized hit index (see crates/core/src/index.rs). */
   index: Float32Array | null;
   /** 'wasm' or 'js' (fallback). */

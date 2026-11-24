@@ -24,6 +24,12 @@ export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> ex
   /** Multisample antialiasing (default false = pixel parity with ol's WebGL layers). */
   antialias?: boolean;
   /**
+   * Smooth edges for fills without a stroke: the fill fades out over one
+   * pixel outside the polygon instead of ending in stairs, without the cost
+   * of `antialias`. Default false (pixel parity with ol's WebGL layers).
+   */
+  smoothFill?: boolean;
+  /**
    * How `text-*` styles are drawn. 'gpu' (default): glyphs from an atlas
    * drawn by the layer itself, with the page's fonts, at the device pixel
    * ratio, in every world copy, and hit-detectable. 'canvas': ol's text
@@ -48,7 +54,7 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
   protected readonly gpuOptions: GpuVectorLayerOptions<S>;
 
   constructor(options: GpuVectorLayerOptions<S>) {
-    const {style, variables, disableHitDetection, wasmUrl, preserveDrawingBuffer, antialias, text, declutter, ...base} = options;
+    const {style, variables, disableHitDetection, wasmUrl, preserveDrawingBuffer, antialias, smoothFill, text, declutter, ...base} = options;
     super(base);
     this.gpuOptions = options;
     this.style = style;
@@ -76,6 +82,7 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
       wasmUrl: this.gpuOptions.wasmUrl,
       preserveDrawingBuffer: this.gpuOptions.preserveDrawingBuffer,
       antialias: this.gpuOptions.antialias,
+      smoothFill: this.gpuOptions.smoothFill,
       text: this.gpuOptions.text,
       declutter: this.gpuOptions.declutter,
     };

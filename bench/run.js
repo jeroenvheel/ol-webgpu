@@ -1,6 +1,6 @@
 // Runs examples/bench.html in Playwright Chromium and stores the results.
 // Usage: npm run bench -- [--points=N] [--lines=N] [--polygons=N] [--layers=ol,webgl2,webgpu]
-//        [--style=full|fill|stroke|simple] [--timeout=minutes] [--channel=msedge] [--headed]
+//        [--style=full|fill|stroke|simple] [--smooth (smoothFill, for --style=fill)] [--timeout=minutes] [--channel=msedge] [--headed]
 import {writeFileSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -40,7 +40,7 @@ page.on('crash', () => (died = 'page crashed (out of memory?)'));
 page.on('close', () => (died ??= 'page closed'));
 
 const query = new URLSearchParams();
-for (const k of ['points', 'lines', 'polygons', 'layers', 'style']) {
+for (const k of ['points', 'lines', 'polygons', 'layers', 'style', 'smooth']) {
   if (args[k]) {
     query.set(k, args[k]);
   }

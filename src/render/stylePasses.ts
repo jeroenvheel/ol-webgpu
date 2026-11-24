@@ -6,6 +6,7 @@
  */
 import type {FlatStyleLike} from 'ol/style/flat.js';
 import {Attributes, convertStyleToShaders, toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
+import {stringToGlsl} from 'ol/expr/gpu.js';
 import {getCustomAttributesSize} from 'ol/render/webgl/renderinstructions.js';
 import {hasTextStyle} from 'ol/render/webgl/textUtil.js';
 
@@ -29,6 +30,8 @@ export interface SubPass {
 
 export interface StylePass {
   fill?: SubPass;
+  /** The soft edge of a fill without a stroke (see `buildStylePasses`). */
+  edge?: SubPass;
   stroke?: SubPass;
   symbol?: SubPass;
 }
@@ -49,6 +52,7 @@ export interface StylePasses {
   refOffset: number;
   uniforms: Record<string, UniformValue>;
   hasFill: boolean;
+  hasEdge: boolean;
   hasStroke: boolean;
   hasSymbol: boolean;
   hasText: boolean;
@@ -57,7 +61,19 @@ export interface StylePasses {
 /** Name of the custom attribute holding the feature ref (for CPU picking). */
 export const REF_ATTRIBUTE = 'olgpuRef';
 
-export function buildStylePasses(style: FlatStyleLike, variables: Record<string, any>): StylePasses {
+/** Width in pixels of the band outside a polygon in which its fill fades out. */
+const EDGE_WIDTH = 1;
+
+/**
+ * @param smoothFill Fills without a stroke get an `edge` sub pass: the rings
+ *   of the polygons drawn as lines with ol's stroke shader, in the fill
+ *   colour, fading from the edge of the polygon to nothing `EDGE_WIDTH`
+ *   pixels outside it. The rasterizer fills the pixels whose centre is
+ *   inside a polygon, which gives stairs; the band covers the stairs. The
+ *   rings come from the worker with the fill on their left (see
+ *   `edgeInstructions`), so "outside" is to the right of the line.
+ */
+export function buildStylePasses(style: FlatStyleLike, variables: Record<string, any>, smoothFill = false): StylePasses {
   const styleShaders = convertStyleToShaders(style as any, variables);
 
   // the ref goes first so its offset is always 0
@@ -99,23 +115,42 @@ export function buildStylePasses(style: FlatStyleLike, variables: Record<string,
         instanced: [],
       };
     }
+    const lineAttributes = (): Pick<SubPass, 'attributes' | 'instanced'> => ({
+      attributes: [{name: Attributes.LOCAL_POSITION, size: 2}],
+      instanced: [
+        {name: Attributes.SEGMENT_START, size: 2},
+        {name: Attributes.MEASURE_START, size: 1},
+        {name: Attributes.SEGMENT_END, size: 2},
+        {name: Attributes.MEASURE_END, size: 1},
+        {name: Attributes.JOIN_ANGLES, size: 2},
+        {name: Attributes.DISTANCE_LOW, size: 1},
+        {name: Attributes.DISTANCE_HIGH, size: 1},
+        {name: Attributes.ANGLE_TANGENT_SUM, size: 1},
+        ...custom,
+      ],
+    });
     if (b.getStrokeVertexShader()) {
       pass.stroke = {
         kind: 'line',
         vertexShader: b.getStrokeVertexShader()!,
         fragmentShader: b.getStrokeFragmentShader()!,
-        attributes: [{name: Attributes.LOCAL_POSITION, size: 2}],
-        instanced: [
-          {name: Attributes.SEGMENT_START, size: 2},
-          {name: Attributes.MEASURE_START, size: 1},
-          {name: Attributes.SEGMENT_END, size: 2},
-          {name: Attributes.MEASURE_END, size: 1},
-          {name: Attributes.JOIN_ANGLES, size: 2},
-          {name: Attributes.DISTANCE_LOW, size: 1},
-          {name: Attributes.DISTANCE_HIGH, size: 1},
-          {name: Attributes.ANGLE_TANGENT_SUM, size: 1},
-          ...custom,
-        ],
+        ...lineAttributes(),
+      };
+    } else if (smoothFill && pass.fill && !/pattern|texture/i.test(b.getFillColorExpression())) {
+      // The stroke shader of this builder, with the fill colour. In its fragment
+      // shader `currentRadiusRatio * v_width / 2` is the distance to the line
+      // in pixels, positive to its left: inside the polygon. (The builder is not
+      // used after this.)
+      const outside = 'clamp(1.0 + currentRadiusRatio * v_width * 0.5 / ' + EDGE_WIDTH.toFixed(1) + ', 0.0, 1.0) * step(currentRadiusRatio, 0.0)';
+      b.setStrokeWidthExpression((2 * EDGE_WIDTH).toFixed(1));
+      b.setStrokeColorExpression(`((${b.getFillColorExpression()}) * vec4(1.0, 1.0, 1.0, ${outside}))`);
+      // segments that do not overlap where they meet, or a translucent fill is darker there
+      b.setStrokeJoinExpression(stringToGlsl('miter'));
+      pass.edge = {
+        kind: 'line',
+        vertexShader: b.getStrokeVertexShader()!,
+        fragmentShader: b.getStrokeFragmentShader()!,
+        ...lineAttributes(),
       };
     }
     if (b.getSymbolVertexShader()) {
@@ -138,6 +173,7 @@ export function buildStylePasses(style: FlatStyleLike, variables: Record<string,
     refOffset: 0,
     uniforms,
     hasFill: passes.some((p) => p.fill),
+    hasEdge: passes.some((p) => p.edge),
     hasStroke: passes.some((p) => p.stroke),
     hasSymbol: passes.some((p) => p.symbol),
     hasText: !!flat && hasTextStyle(flat),

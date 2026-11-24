@@ -29,7 +29,10 @@ map.addLayer(layer);
 - Options and methods mirror `ol/layer/WebGLVector`: `style` (flat style,
   rules with `filter`/`else`, expressions), `variables`,
   `updateStyleVariables()`, `setStyle()`, `disableHitDetection`.
-  Extra options: `antialias` (default `false`), `preserveDrawingBuffer`
+  Extra options: `antialias` (default `false`), `smoothFill` (default
+  `false`: fills without a stroke fade out over one pixel outside the
+  polygon instead of ending in stairs, at about the cost of a stroke; see
+  [bench/fixes-2026-11-24.md](bench/fixes-2026-11-24.md)), `preserveDrawingBuffer`
   (default `true`, needed for map export), `wasmUrl`, `shaderWasmUrl`, and on
   `GpuVectorLayer` `backend` (`'auto'` (default), `'webgpu'` or `'webgl2'`).
 - `text-*` styles are drawn on the GPU from a glyph atlas (`text: 'gpu'`, the

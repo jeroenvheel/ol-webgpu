@@ -63,7 +63,7 @@ const server = await createServer({
   root: here,
   logLevel: 'warn',
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
-  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'renderfeature.ts', 'rebuild.ts']},
+  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'smooth.ts', 'renderfeature.ts', 'rebuild.ts']},
   worker: {format: 'es'},
   plugins: [
     {
@@ -600,9 +600,30 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
       checks[name] = {'page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
     }
   }
+  // smoothFill (smooth.ts)
+  const smooth = {};
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    errors.length = 0;
+    await page.goto(`${base}smooth.html?layer=${layer}`);
+    try {
+      await page.waitForFunction(() => window.__smooth, null, {timeout: 30_000, polling: 50});
+      smooth[layer] = await page.evaluate(() => window.__smooth);
+    } catch {
+      smooth[layer] = {'smoothFill page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
+    }
+  }
   const checkNames = [...new Set(Object.values(checks).flatMap((c) => Object.keys(c)))];
+  // the checks of smooth.ts are of the two layers only
+  for (const name of new Set(Object.values(smooth).flatMap((c) => Object.keys(c)))) {
+    checkNames.push(name);
+    for (const run of Object.keys(checks)) {
+      checks[run][name] = smooth[run]?.[name] ?? {ok: true, skipped: true};
+    }
+  }
   for (const name of checkNames) {
-    const cells = Object.entries(checks).map(([layer, c]) => {
+    const cells = Object.entries(checks)
+      .filter(([, c]) => !c[name]?.skipped)
+      .map(([layer, c]) => {
       const r = c[name];
       rebuildFailures += r?.ok ? 0 : 1;
       return `${layer}: ${r?.ok ? 'ok' : `FAIL ${r?.detail ?? 'missing'}`}`;

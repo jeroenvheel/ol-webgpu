@@ -65,11 +65,18 @@ export interface GpuVectorRendererOptions extends WorkerOptions {
   text?: 'gpu' | 'canvas';
   /** Declutter group for GPU text (false: labels may overlap). */
   declutter?: boolean | string | number;
+  /**
+   * Smooth edges for fills without a stroke: the fill fades out over one
+   * pixel outside the polygon, instead of ending in stairs. Default false:
+   * as ol's WebGL layers draw them.
+   */
+  smoothFill?: boolean;
 }
 
 /** The sub passes of a style pass and the buffers each draws, in draw order. */
 export const KINDS = [
   ['fill', 'polygons'],
+  ['edge', 'edges'],
   ['stroke', 'lines'],
   ['symbol', 'points'],
 ] as const;
@@ -92,6 +99,8 @@ export interface UploadedSet<B> {
 
 export interface Uploaded<B> {
   polygons: UploadedSet<B> | null;
+  /** The rings of the polygons as lines, for the soft edge of fills (`smoothFill`). */
+  edges: UploadedSet<B> | null;
   lines: UploadedSet<B> | null;
   points: UploadedSet<B> | null;
   invertVerticesTransform: Transform;
@@ -206,6 +215,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   protected readonly spec: SurfaceSpec;
   protected readonly preserveDrawingBuffer: boolean;
   protected readonly antialias: boolean;
+  private readonly smoothFill: boolean;
   /** Last rebuild statistics. */
   stats: RebuildStats | null = null;
   /** Buffer builds started so far (for tests and benchmarks). */
@@ -269,7 +279,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.spec = surfaceSpec(backend, options);
     this.preserveDrawingBuffer = this.spec.preserveDrawingBuffer;
     this.antialias = this.spec.antialias;
-    this.passes = buildStylePasses(this.style, this.variables);
+    this.smoothFill = !!options.smoothFill;
+    this.passes = buildStylePasses(this.style, this.variables, this.smoothFill);
     this.instructions = new InstructionBuilder(this.passes.customAttributes);
     this.uniformState = new UniformState(this.passes.uniforms);
     this.uniformState.onPendingImage = (image) => this.awaitImage(image);
@@ -388,7 +399,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   setStyle(style: FlatStyleLike, variables: Record<string, any>) {
     this.style = style;
     this.variables = variables;
-    this.passes = buildStylePasses(style, variables);
+    this.passes = buildStylePasses(style, variables, this.smoothFill);
     this.uniformState.setStyleUniforms(this.passes.uniforms);
     this.pendingImages.clear();
     this.picker?.setStyle(style, variables);
@@ -643,6 +654,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       points: p.hasSymbol ? ((points?.buffer as ArrayBuffer) ?? null) : null,
       lines: p.hasStroke ? ((lines?.buffer as ArrayBuffer) ?? null) : null,
       polygons: p.hasFill ? ((polygons?.buffer as ArrayBuffer) ?? null) : null,
+      edges: p.hasEdge,
       customSize: p.customSize,
       refOffset: p.refOffset,
       invert: Array.from(invert),
@@ -681,6 +693,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         this.awaitingText = !!key;
         this.buffers = {
           polygons: up(response.polygons, old?.polygons),
+          edges: up(response.edges ?? null, old?.edges),
           lines: up(response.lines, old?.lines),
           points: up(response.points, old?.points),
           invertVerticesTransform: invert,

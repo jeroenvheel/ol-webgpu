@@ -129,7 +129,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   private translator: ShaderTranslator | null = null;
   private initializing: Promise<void> | null = null;
   private initError: unknown = null;
-  private pipelines: Array<{fill?: Pipeline; stroke?: Pipeline; symbol?: Pipeline}> = [];
+  private pipelines: Array<{fill?: Pipeline; edge?: Pipeline; stroke?: Pipeline; symbol?: Pipeline}> = [];
   /** Largest uniform block of the current pipelines. */
   private blockSize = 16;
   /**
@@ -284,10 +284,11 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     }
     this.pipelines = this.passes.passes.map((pass) => ({
       fill: pass.fill && this.createPipeline(pass.fill),
+      edge: pass.edge && this.createPipeline(pass.edge),
       stroke: pass.stroke && this.createPipeline(pass.stroke),
       symbol: pass.symbol && this.createPipeline(pass.symbol),
     }));
-    this.blockSize = Math.max(16, ...this.pipelines.flatMap((p) => [p.fill, p.stroke, p.symbol]).map((x) => x?.program.uniformBlockSize ?? 0));
+    this.blockSize = Math.max(16, ...this.pipelines.flatMap((p) => [p.fill, p.edge, p.stroke, p.symbol]).map((x) => x?.program.uniformBlockSize ?? 0));
   }
 
   private createPipeline(pass: SubPass): Pipeline {

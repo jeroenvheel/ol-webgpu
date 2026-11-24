@@ -109,7 +109,7 @@ interface Program {
 
 export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffers, WebGL2Surface> {
   private gl: WebGL2RenderingContext | null = null;
-  private programs: Array<{fill?: Program; stroke?: Program; symbol?: Program}> = [];
+  private programs: Array<{fill?: Program; edge?: Program; stroke?: Program; symbol?: Program}> = [];
   private textures = new Map<string, {texture: WebGLTexture; source: TexImageSource | null}>();
   private labels: LabelResources | null = null;
   private readonly labelUniforms = new Float32Array(LABEL_UNIFORM_FLOATS);
@@ -244,6 +244,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     this.deletePrograms();
     this.programs = this.passes.passes.map((pass) => ({
       fill: pass.fill && this.compile(pass.fill),
+      edge: pass.edge && this.compile(pass.edge),
       stroke: pass.stroke && this.compile(pass.stroke),
       symbol: pass.symbol && this.compile(pass.symbol),
     }));
@@ -252,7 +253,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
   private deletePrograms() {
     const gl = this.gl!;
     for (const p of this.programs) {
-      for (const prog of [p.fill, p.stroke, p.symbol]) {
+      for (const prog of [p.fill, p.edge, p.stroke, p.symbol]) {
         if (prog) {
           gl.deleteProgram(prog.program);
         }

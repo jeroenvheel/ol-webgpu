@@ -12,10 +12,12 @@ export interface LayerOptions {
   source: VectorSource;
   style: any;
   variables?: Record<string, any>;
+  /** For the ol-webgpu layers (see their options). */
+  smoothFill?: boolean;
 }
 
 export const layerFactories: Record<string, (o: LayerOptions) => BaseLayer> = {
   ol: (o) => new WebGLVectorLayer({source: o.source, style: o.style, variables: o.variables}),
-  webgl2: (o) => new WebGL2VectorLayer({source: o.source, style: o.style, variables: o.variables}),
-  webgpu: (o) => new WebGPUVectorLayer({source: o.source, style: o.style, variables: o.variables}),
+  webgl2: (o) => new WebGL2VectorLayer({source: o.source, style: o.style, variables: o.variables, smoothFill: o.smoothFill}),
+  webgpu: (o) => new WebGPUVectorLayer({source: o.source, style: o.style, variables: o.variables, smoothFill: o.smoothFill}),
 };

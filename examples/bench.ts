@@ -157,7 +157,7 @@ async function layerBench(layerName: string, features: Feature[]) {
   const target = document.getElementById('map')!;
   const source = new VectorSource({useSpatialIndex: false});
   const [, addTime] = time(() => source.addFeatures(features));
-  const layer: BaseLayer = layerFactories[layerName]({source, style});
+  const layer: BaseLayer = layerFactories[layerName]({source, style, smoothFill: params.get('smooth') === 'true'});
   const view = new View({center: [0, 0], zoom: 1});
   const map = new Map({target, layers: [], view});
   await nextFrame();
