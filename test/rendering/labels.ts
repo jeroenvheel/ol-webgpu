@@ -190,6 +190,57 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
       await settle();
     }
 
+    // text-max-width: a label that is wider is broken into lines
+    {
+      const [cx, cy] = view.getCenter()!;
+      const r = view.getResolution()!;
+      const words = 'one two three four five six';
+      const wide = {'text-value': ['get', 'name'], 'text-font': '12px sans-serif', 'text-fill-color': '#000000'};
+      const whole = new Layer({source: new VectorSource({features: [point(cx, cy + 60 * r, words)]}), style: wide});
+      const broken = new Layer({
+        source: new VectorSource({features: [point(cx, cy - 20 * r, words), point(cx, cy - 90 * r, 'one')]}),
+        style: {...wide, 'text-max-width': ['case', ['==', ['get', 'name'], 'one'], 10, 60]} as any,
+      });
+      map.addLayer(whole);
+      map.addLayer(broken);
+      await settle();
+      map.renderSync();
+      const canvas = document.querySelector('#map canvas') as HTMLCanvasElement;
+      probe.canvas.width = canvas.width;
+      probe.canvas.height = canvas.height;
+      probe.drawImage(canvas, 0, 0);
+      /** The box of the dark pixels in rows y0 to y1 of the canvas. */
+      const box = (y0: number, y1: number) => {
+        const data = probe.getImageData(0, y0, 256, y1 - y0).data;
+        let minX = 256;
+        let maxX = -1;
+        let minY = y1;
+        let maxY = -1;
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] > 128 && data[i] < 80) {
+            const x = (i / 4) % 256;
+            const y = Math.floor(i / 4 / 256);
+            minX = Math.min(minX, x);
+            maxX = Math.max(maxX, x);
+            minY = Math.min(minY, y);
+            maxY = Math.max(maxY, y);
+          }
+        }
+        return {width: maxX - minX + 1, height: maxY - minY + 1};
+      };
+      const one = box(40, 96);
+      const lines = box(100, 196);
+      const word = box(200, 236);
+      check('text-max-width breaks a label into lines', one.width > 100 && one.height < 16 && lines.width <= 62 && lines.width > 30 && lines.height > 2.5 * one.height && word.width > 10 && word.height < 16, {
+        whole: one,
+        broken: lines,
+        word,
+      });
+      map.removeLayer(whole);
+      map.removeLayer(broken);
+      await settle();
+    }
+
     // a label along a line stays upright while the view turns (it is laid out again when the view rests)
     {
       const [cx, cy] = view.getCenter()!;

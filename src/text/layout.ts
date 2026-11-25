@@ -35,6 +35,7 @@ import {
 import type {DeclutterSymbol, SymbolEvaluator} from '../render/symbols.js';
 import type {TextEvaluator} from './style.js';
 import {JOINING, ZWJ, joinedAdvances, joinsAcross, textOnPath} from './textpath.js';
+import {wrapText} from './wrap.js';
 
 /**
  * Sizes of the attributes of an instance, in shader location order after
@@ -278,7 +279,7 @@ export class LabelBuilder {
   private currentKey = 0;
   private readonly boxesOnly: boolean;
   private readonly accept: Set<number> | null;
-  private readonly onText = (text: Text, zIndex: number) => this.addText(text, zIndex);
+  private readonly onText = (text: Text, zIndex: number, maxWidth: number) => this.addText(text, zIndex, maxWidth);
 
   constructor(
     private readonly features: FeatureLike[],
@@ -509,8 +510,8 @@ export class LabelBuilder {
 
   // --- text --------------------------------------------------------------
 
-  private addText(text: Text, zIndex: number) {
-    const value = text.getText();
+  private addText(text: Text, zIndex: number, maxWidth = 0) {
+    let value = text.getText();
     if (value === undefined || value === '' || (Array.isArray(value) && !value.length)) {
       return;
     }
@@ -532,9 +533,17 @@ export class LabelBuilder {
     const declutterMode = text.getDeclutterMode();
     const mode = declutterMode === 'obstacle' ? MODE_OBSTACLE : declutterMode === 'none' ? MODE_NONE : MODE_DECLUTTER;
     const type: string = geometry.getType();
+    const font = quantizeFont(text.getFont() || '10px sans-serif');
+    const onLine = text.getPlacement() === 'line' && (type === 'LineString' || type === 'MultiLineString' || type === 'Polygon' || type === 'MultiPolygon');
+    if (maxWidth > 0 && typeof value === 'string' && !onLine) {
+      // `text-max-width` is of the label as it is drawn (see wrap.ts)
+      const scaleX = Math.abs((text.getScaleArray() as number[] | undefined)?.[0] ?? 1) || 1;
+      const metrics = this.atlas.metrics(font);
+      value = wrapText(value, maxWidth / scaleX, (piece) => metrics.advance(piece));
+    }
     const style = {
       value,
-      font: quantizeFont(text.getFont() || '10px sans-serif'),
+      font,
       fill: fill ?? NONE,
       stroke: stroke ?? NONE,
       lightFill: isLight(fill),
@@ -544,7 +553,7 @@ export class LabelBuilder {
       mode,
       zIndex,
     };
-    if (text.getPlacement() === 'line' && (type === 'LineString' || type === 'MultiLineString' || type === 'Polygon' || type === 'MultiPolygon')) {
+    if (onLine) {
       this.addLineLabels(text, geometry, type, style);
     } else {
       this.addPointLabels(text, geometry, type, style);
