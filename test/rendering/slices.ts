@@ -17,7 +17,8 @@ import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
 const params = new URLSearchParams(location.search);
 const Layer = params.get('layer') === 'webgpu' ? WebGPUVectorLayer : WebGL2VectorLayer;
 
-const COUNT = 1_000_000;
+// fewer where drawing is slow (software rendering in CI draws all of them in every frame)
+const COUNT = Number(params.get('count') ?? 1_000_000);
 const features: Feature[] = [];
 for (let i = 0; i < COUNT; i++) {
   // all but the first two far outside the view: they only have to be built

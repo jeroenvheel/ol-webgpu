@@ -631,14 +631,14 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
   const extra = {};
   for (const layer of layers.filter((l) => l !== 'ol')) {
     errors.length = 0;
-    await page.goto(`${base}slices.html?layer=${layer}`, {timeout: 120_000});
+    await page.goto(`${base}slices.html?layer=${layer}${process.env.CI ? '&count=400000' : ''}`, {timeout: 120_000});
     try {
-      await page.waitForFunction(() => window.__slices, null, {timeout: 120_000, polling: 50});
+      await page.waitForFunction(() => window.__slices, null, {timeout: 240_000, polling: 50});
       const {times, ...sliced} = await page.evaluate(() => window.__slices);
       extra[layer] = sliced;
       if (times) {
         console.log(
-          `  [${layer}] a layer of 1 000 000 points: ${Object.entries(times)
+          `  [${layer}] a layer of ${process.env.CI ? '400 000' : '1 000 000'} points: ${Object.entries(times)
             .map(([what, t]) => `${what === 'one' ? 'one feature changed' : 'another style'}: built after ${t.ms} ms in ${t.slices} slices, longest frame ${t.longestFrame} ms, ${t.longTasks} long tasks (${t.longTaskMs} ms)`)
             .join('; ')}`,
         );
