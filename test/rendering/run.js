@@ -651,14 +651,14 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
   const ordered = {};
   for (const layer of layers.filter((l) => l !== 'ol')) {
     errors.length = 0;
-    await page.goto(`${base}order.html?layer=${layer}`);
+    await page.goto(`${base}order.html?layer=${layer}${process.env.CI ? '&points=20000' : ''}`);
     try {
       await page.waitForFunction(() => window.__order, null, {timeout: 60_000, polling: 50});
       const {times, ...orderChecks} = await page.evaluate(() => window.__order);
       ordered[layer] = orderChecks;
       if (times) {
         console.log(
-          `  [${layer}] 300 000 points while the view moves, a frame (median, slowest): ${Object.entries(times)
+          `  [${layer}] ${process.env.CI ? '20 000' : '300 000'} points while the view moves, a frame (median, slowest): ${Object.entries(times)
             .map(([, t]) => `${t.levels || 1} z-index: ${t.median} ms, ${t.slowest} ms`)
             .join('; ')}`,
         );

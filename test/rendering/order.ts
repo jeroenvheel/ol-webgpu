@@ -18,6 +18,8 @@ import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 const params = new URLSearchParams(location.search);
 const Layer = params.get('layer') === 'webgpu' ? WebGPUVectorLayer : WebGL2VectorLayer;
 
+// for the frame times; fewer where drawing is slow (software rendering in CI)
+const POINTS = Number(params.get('points') ?? 300_000);
 const RED = [215, 25, 28];
 const GREEN = [26, 150, 65];
 const BLUE = [44, 123, 182];
@@ -180,7 +182,7 @@ const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [asThey
     const frames = async (numbers: number) => {
       const many = new Layer({
         source: new VectorSource({
-          features: Array.from({length: 300_000}, (_v, i) => new Feature({geometry: new Point([(i % 600) - 300, Math.floor(i / 600) - 250]), color: css(RED), z: i % numbers})),
+          features: Array.from({length: POINTS}, (_v, i) => new Feature({geometry: new Point([(i % 600) - 300, Math.floor(i / 600) - 250]), color: css(RED), z: i % numbers})),
           useSpatialIndex: false,
         }),
         style: {'circle-radius': 2, 'circle-fill-color': ['get', 'color'], 'z-index': ['get', 'z']},
