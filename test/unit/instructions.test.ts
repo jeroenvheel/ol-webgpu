@@ -11,7 +11,7 @@ import MultiPoint from 'ol/geom/MultiPoint.js';
 import MultiPolygon from 'ol/geom/MultiPolygon.js';
 import Point from 'ol/geom/Point.js';
 import Polygon from 'ol/geom/Polygon.js';
-import MixedGeometryBatch from 'ol/render/webgl/MixedGeometryBatch.js';
+import MultiLineString from 'ol/geom/MultiLineString.js';
 import {
   generateLineStringRenderInstructions,
   generatePointRenderInstructions,
@@ -20,6 +20,7 @@ import {
 import {type Transform, compose, create as createTransform} from 'ol/transform.js';
 import LabelsArray from 'ol/webgl/LabelsArray.js';
 import {describe, expect, it, vi} from 'vitest';
+import {FeatureBatch} from '../../src/render/batch.js';
 import {InstructionBuilder, InstructionJob} from '../../src/render/instructions.js';
 import {buildStylePasses} from '../../src/render/stylePasses.js';
 import {rng} from './helpers.js';
@@ -55,7 +56,13 @@ function features(seed: number, count: number): Feature[] {
     () => new LineString([at(), at(), at()]),
     () => new LineString([[...at(), 5], [...at(), 7]], 'XYM'),
     () => new Polygon([ring()]),
-    () => new MultiPolygon([[ring()], [ring()]]),
+    () => new MultiPolygon([[ring()], [ring(), ring()]]),
+    () => new MultiLineString([[at(), at()], [at(), at(), at()]]),
+    () => new LineString([[...at(), 5], [...at(), 7]], 'XYZ'),
+    () => new LineString([[...at(), 5, 8], [...at(), 7, 9]], 'XYZM'),
+    () => new Polygon([ring().map((c) => [...c, 3])], 'XYZ'),
+    () => new Polygon([ring(), ring()]),
+    () => new MultiPoint([[...at(), 1], [...at(), 2]], 'XYZ'),
     () => new GeometryCollection([new Point(at()), new LineString([at(), at()]), new Polygon([ring()])]),
   ];
   return Array.from({length: count}, (_, i) => new Feature({geometry: shapes[i % shapes.length](), ...properties(r)}));
@@ -65,33 +72,34 @@ function view(center: number[], resolution: number): Transform {
   return compose(createTransform(), 0, 0, 2 / (resolution * 1200), 2 / (resolution * 800), 0, -center[0], -center[1]);
 }
 
-function expectSameAsOl(builder: InstructionBuilder, batch: MixedGeometryBatch, custom: any, transform: Transform) {
+function expectSameAsOl(builder: InstructionBuilder, batch: FeatureBatch, custom: any, transform: Transform) {
+  const ol = batch.toOl();
   const labels = new LabelsArray();
   const empty = new Float32Array(0);
-  expect(builder.points(batch.pointBatch, transform)).toEqual(generatePointRenderInstructions(batch.pointBatch, empty, labels, custom, transform));
-  expect(builder.lines(batch.lineStringBatch, transform)).toEqual(generateLineStringRenderInstructions(batch.lineStringBatch, empty, labels, custom, transform));
-  expect(builder.polygons(batch.polygonBatch, transform)).toEqual(generatePolygonRenderInstructions(batch.polygonBatch, empty, labels, custom, transform));
+  expect(builder.points(batch, transform)).toEqual(generatePointRenderInstructions(ol.pointBatch, empty, labels, custom, transform));
+  expect(builder.lines(batch, transform)).toEqual(generateLineStringRenderInstructions(ol.lineStringBatch, empty, labels, custom, transform));
+  expect(builder.polygons(batch, transform)).toEqual(generatePolygonRenderInstructions(ol.polygonBatch, empty, labels, custom, transform));
 }
 
 describe('render instructions with kept attributes', () => {
   it('equal those of ol, for every view', () => {
     const {customAttributes} = buildStylePasses(style as any, {});
     expect(Object.keys(customAttributes).length).toBeGreaterThan(3);
-    const batch = new MixedGeometryBatch();
+    const batch = new FeatureBatch();
     batch.addFeatures(features(3, 700));
     const builder = new InstructionBuilder(customAttributes);
-    expect(builder.points(batch.pointBatch, view([0, 0], 1000))!.length).toBeGreaterThan(0);
+    expect(builder.points(batch, view([0, 0], 1000))!.length).toBeGreaterThan(0);
     expectSameAsOl(builder, batch, customAttributes, view([0, 0], 1000));
     expectSameAsOl(builder, batch, customAttributes, view([5e6, -3e6], 2.5));
   });
 
   it('are the same when they are made in slices', () => {
     const {customAttributes} = buildStylePasses(style as any, {});
-    const batch = new MixedGeometryBatch();
+    const batch = new FeatureBatch();
     batch.addFeatures(features(5, 3000));
     const transform = view([1e6, 2e6], 40);
     const whole = new InstructionBuilder(customAttributes);
-    const job = new InstructionJob(new InstructionBuilder(customAttributes), {polygons: batch.polygonBatch, lines: batch.lineStringBatch, points: batch.pointBatch}, transform);
+    const job = new InstructionJob(new InstructionBuilder(customAttributes), batch, {polygons: true, lines: true, points: true}, transform);
     // a deadline that has passed: every slice stops at its first look at the clock
     let slices = 0;
     while (!job.step(0)) {
@@ -100,17 +108,17 @@ describe('render instructions with kept attributes', () => {
     }
     expect(slices).toBeGreaterThan(5);
     expect(job.slices).toBe(slices + 1);
-    expect(job.result('points')).toEqual(whole.points(batch.pointBatch, transform));
-    expect(job.result('lines')).toEqual(whole.lines(batch.lineStringBatch, transform));
-    expect(job.result('polygons')).toEqual(whole.polygons(batch.polygonBatch, transform));
+    expect(job.result('points')).toEqual(whole.points(batch, transform));
+    expect(job.result('lines')).toEqual(whole.lines(batch, transform));
+    expect(job.result('polygons')).toEqual(whole.polygons(batch, transform));
     expectSameAsOl(whole, batch, customAttributes, transform);
   });
 
   it('make only what is asked for, in one slice when there is time', () => {
     const {customAttributes} = buildStylePasses(style as any, {});
-    const batch = new MixedGeometryBatch();
+    const batch = new FeatureBatch();
     batch.addFeatures(features(6, 400));
-    const job = new InstructionJob(new InstructionBuilder(customAttributes), {polygons: null, lines: batch.lineStringBatch, points: null}, view([0, 0], 100));
+    const job = new InstructionJob(new InstructionBuilder(customAttributes), batch, {polygons: false, lines: true, points: false}, view([0, 0], 100));
     expect(job.step(Infinity)).toBe(true);
     expect(job.result('polygons')).toBeUndefined();
     expect(job.result('points')).toBeUndefined();
@@ -120,14 +128,14 @@ describe('render instructions with kept attributes', () => {
   it('calls the attribute callbacks once per feature, not once per rebuild', () => {
     const {customAttributes} = buildStylePasses(style as any, {});
     const list = features(4, 300);
-    const batch = new MixedGeometryBatch();
+    const batch = new FeatureBatch();
     batch.addFeatures(list);
     const get = vi.spyOn(Feature.prototype, 'get');
     const builder = new InstructionBuilder(customAttributes);
-    builder.points(batch.pointBatch, view([0, 0], 1000));
+    builder.points(batch, view([0, 0], 1000));
     const first = get.mock.calls.length;
     expect(first).toBeGreaterThan(0);
-    builder.points(batch.pointBatch, view([10, 10], 500));
+    builder.points(batch, view([10, 10], 500));
     expect(get.mock.calls.length).toBe(first);
     get.mockRestore();
   });
@@ -136,7 +144,7 @@ describe('render instructions with kept attributes', () => {
     const {customAttributes} = buildStylePasses(style as any, {});
     const r = rng(9);
     const list = features(5, 700);
-    const batch = new MixedGeometryBatch();
+    const batch = new FeatureBatch();
     batch.addFeatures(list);
     const builder = new InstructionBuilder(customAttributes);
     const transform = view([1e6, 1e6], 300);
@@ -146,12 +154,12 @@ describe('render instructions with kept attributes', () => {
       // other properties
       for (let i = round; i < list.length; i += 5) {
         list[i].setProperties(properties(r), true);
-        builder.forget(batch, list[i]);
+        builder.forget(batch.refOf(list[i]));
         batch.changeFeature(list[i]);
       }
       // removed: their refs are given to the features added next
       for (const feature of list.splice(round * 7, 60)) {
-        builder.forget(batch, feature);
+        builder.forget(batch.refOf(feature));
         batch.removeFeature(feature);
       }
       const added = features(100 + round, 90);
@@ -171,11 +179,11 @@ describe('render instructions with kept attributes', () => {
       ref: {size: 1, callback(this: any) { return this.ref ?? 0; }},
       label: {size: 3, callback: (feature: any) => String(feature.get('size'))},
     };
-    const batch = new MixedGeometryBatch();
+    const batch = new FeatureBatch();
     batch.addFeatures(features(6, 20));
     const builder = new InstructionBuilder(customAttributes as any);
-    expect(builder.points(batch.pointBatch, view([0, 0], 1000))).toBeNull();
-    expect(builder.lines(batch.lineStringBatch, view([0, 0], 1000))).toBeNull();
-    expect(builder.polygons(batch.polygonBatch, view([0, 0], 1000))).toBeNull();
+    expect(builder.points(batch, view([0, 0], 1000))).toBeNull();
+    expect(builder.lines(batch, view([0, 0], 1000))).toBeNull();
+    expect(builder.polygons(batch, view([0, 0], 1000))).toBeNull();
   });
 });

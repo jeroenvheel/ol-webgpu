@@ -169,8 +169,6 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   private readonly shaderWasmUrl?: string | URL;
   /** 4x MSAA when antialiasing is on; 1 (like ol's offscreen framebuffer) otherwise. */
   private readonly sampleCount: number;
-  // a lost device is rare, and the canvas a layer draws on does not matter to the device
-  protected override readonly keepCpuCopies = false;
   /**
    * Called once if the device or shader translator cannot be initialized.
    * Without it, the renderer tries again (see `retryInit`).
@@ -179,6 +177,8 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
   /** Failed attempts to initialize in a row. */
   private initFailures = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Builds that wait for the device with their buffers (see `whenBackend`). */
+  private deviceWaiters: Array<() => void> = [];
 
   constructor(layer: Layer<VectorSource>, options: WebGPURendererOptions) {
     super(layer, options, 'webgpu');
@@ -237,16 +237,19 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         ]);
         this.device = device;
         this.translator = translator;
+        this.backendFailed = false;
         this.format = preferredFormat();
         this.sampler = device.createSampler({minFilter: 'linear', magFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge'});
         this.zeroBuffer = device.createBuffer({size: 256, usage: GPUBufferUsage.VERTEX, label: 'ol-webgpu zeros'});
         this.initFailures = 0;
         this.applyPasses();
         this.reuploadBuffers();
+        this.deviceWaiters.splice(0).forEach((resolve) => resolve());
         this.getLayer()?.changed();
       } catch (e) {
         this.initError = e;
         this.backendPending = false; // do not block rendercomplete
+        this.backendFailed = true; // nor does the build that was made ahead and waits for a device
         this.updateReady();
         this.framesSinceReady = Infinity;
         if (this.onInitError) {
@@ -260,6 +263,10 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       }
     })();
     return false;
+  }
+
+  protected override whenBackend(): Promise<unknown> | null {
+    return this.device && this.translator ? null : new Promise<void>((resolve) => this.deviceWaiters.push(resolve));
   }
 
   /**
@@ -465,7 +472,8 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     const context = surface.getContext()!;
     const width = surface.canvas.width;
     const height = surface.canvas.height;
-    surface.record({redraw: () => this.draw(frameState, worlds, worldWidth, opacity)});
+    // not for a layer that was disposed between its frame and the redraw on rendercomplete
+    surface.record({redraw: () => this.surface && this.draw(frameState, worlds, worldWidth, opacity)});
 
     const text = this.prepareText(frameState);
     const labels = this.prepareLabels(frameState);

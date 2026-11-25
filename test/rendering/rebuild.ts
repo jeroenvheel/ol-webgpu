@@ -134,7 +134,8 @@ const names = (coordinate: number[]) => map.getFeaturesAtPixel(map.getPixelFromC
     const firstBuilds = brokenWorker || failingBuild ? 2 : 1;
     if (lateDevice || failingBuild) {
       // meanwhile the layer is ready (it does not hold back rendercomplete) and empty
-      for (let i = 0; (renderer()?.builds ?? 0) < firstBuilds; i++) {
+      // (with a late device the build is made ahead and waits for the device with its buffers)
+      for (let i = 0; lateDevice ? !(renderer() as any)?.getDevice?.() : (renderer()?.builds ?? 0) < firstBuilds; i++) {
         await frame();
         if (i > 600) {
           throw new Error('the layer did not try again');

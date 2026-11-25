@@ -65,7 +65,8 @@ while (!results) {
   try {
     [results, partial] = await Promise.race([
       page.evaluate(() => [window.__bench ?? null, window.__benchPartial ?? null]),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('page unresponsive for 5 min')), 5 * 60_000)),
+      // unref: the timer must not keep the runner alive for 5 minutes after the results are in
+      new Promise((_, reject) => setTimeout(() => reject(new Error('page unresponsive for 5 min')), 5 * 60_000).unref()),
     ]);
   } catch (e) {
     died ??= String(e.message ?? e);

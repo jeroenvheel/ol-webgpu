@@ -71,10 +71,36 @@ export function edgeInstructions(polygons: Float32Array, customSize: number): Fl
 }
 
 /**
+ * The hit index of a build made with `indexLater`, from the instructions
+ * that build kept.
+ * @return the index (null: it could not be built) and the milliseconds it took
+ */
+export function runIndex(req: BuildRequest, kept: KeptInstructions, core: Core): {index: Float32Array | null; time: number} {
+  const t0 = performance.now();
+  let index: Float32Array | null = null;
+  try {
+    index = core.buildIndex(kept.points, kept.lines, kept.polygons, req.customSize, req.refOffset, req.indexTransform!);
+    core.resetIndex();
+  } catch {
+    // picking is without this build: the layer is drawn all the same
+  }
+  return {index, time: performance.now() - t0};
+}
+
+/** The instructions of a build, for the hit index that is made after its buffers went out. */
+export interface KeptInstructions {
+  points: Float32Array | null;
+  lines: Float32Array | null;
+  polygons: Float32Array | null;
+}
+
+/**
  * @param core the wasm core, or null to build with ol's JS code (no hit index then)
+ * @param indexLater an object to keep the instructions in: the hit index is
+ *     then not made here but with `runIndex` (the response has `indexFollows`)
  * @return the response; a failed build has `error` set
  */
-export function runBuild(req: BuildRequest, core: Core | null): BuildResponse {
+export function runBuild(req: BuildRequest, core: Core | null, indexLater?: Partial<KeptInstructions>): BuildResponse {
   const timings: Record<string, number> = {};
   const time = <T>(name: string, fn: () => T): T => {
     const t0 = performance.now();
@@ -99,8 +125,14 @@ export function runBuild(req: BuildRequest, core: Core | null): BuildResponse {
     const invert = req.invert as [number, number, number, number, number, number];
     // the point instances are the point instructions, which go back as they came
     response.points = points && time('points', () => buildPointsJs(points, req.customSize));
+    const later = !!indexLater && !!core && !!req.indexTransform;
+    if (later) {
+      // the point instances leave with the response: the index is made of a copy
+      Object.assign(indexLater!, {points: points && points.slice(), lines, polygons});
+      response.indexFollows = true;
+    }
     if (core) {
-      const built = core.buildAll(points, lines, polygons, req.customSize, invert, req.indexTransform, req.refOffset, timings);
+      const built = core.buildAll(points, lines, polygons, req.customSize, invert, later ? null : req.indexTransform, req.refOffset, timings);
       response.lines = built.lines;
       response.polygons = built.polygons;
       response.index = built.index;

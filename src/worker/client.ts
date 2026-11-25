@@ -8,7 +8,7 @@
  */
 import {type Core, defaultWasmUrl, loadCore} from '../wasm/core.js';
 import {runBuild} from './build.js';
-import type {BuildRequest, BuildResponse, InitMessage, ReadyMessage} from './protocol.js';
+import type {BuildRequest, BuildResponse, IndexMessage, InitMessage, ReadyMessage} from './protocol.js';
 
 export interface WorkerOptions {
   /** Override the wasm URL (e.g. when serving assets from a CDN). */
@@ -41,6 +41,8 @@ interface Pending {
   resolve(r: BuildResponse): void;
   reject(e: Error): void;
   bytes: number;
+  /** Gets the hit index when it comes after the buffers (null: it will not come). */
+  onIndex?: (index: Float32Array | null, time: number) => void;
 }
 
 /** A worker and the builds it has. */
@@ -111,7 +113,7 @@ export class WorkerClient {
     const slot: Slot = {worker, pending: new Map(), bytes: 0, idle: null};
     this.slots.push(slot);
     this.mostWorkers = Math.max(this.mostWorkers, this.slots.length);
-    worker.addEventListener('message', (e: MessageEvent<ReadyMessage | BuildResponse>) => {
+    worker.addEventListener('message', (e: MessageEvent<ReadyMessage | BuildResponse | IndexMessage>) => {
       const data = e.data;
       if (data.type === 'ready') {
         if (data.error) {
@@ -121,9 +123,22 @@ export class WorkerClient {
       } else if (data.type === 'build') {
         const pending = slot.pending.get(data.id);
         if (pending) {
+          if (data.indexFollows && !data.error) {
+            // the worker is still at this build: it stays with the slot until its index is in
+            pending.resolve(data);
+            return;
+          }
           slot.pending.delete(data.id);
           slot.bytes -= pending.bytes;
           settle(pending, data);
+          this.rest(slot);
+        }
+      } else if (data.type === 'index') {
+        const pending = slot.pending.get(data.id);
+        if (pending) {
+          slot.pending.delete(data.id);
+          slot.bytes -= pending.bytes;
+          pending.onIndex?.(data.index, data.time);
           this.rest(slot);
         }
       }
@@ -198,10 +213,19 @@ export class WorkerClient {
     this.local.then((core) => this.resolveReady(core ? 'wasm' : 'js'));
     const lost = slots.flatMap((slot) => [...slot.pending.values()]);
     const error = new WorkerFailedError(reason);
-    lost.forEach((p) => p.reject(error));
+    lost.forEach((p) => {
+      p.reject(error); // nothing happens when its buffers were in already
+      p.onIndex?.(null, 0);
+    });
   }
 
-  build(request: Omit<BuildRequest, 'type' | 'id'>): Promise<BuildResponse> {
+  /**
+   * @param onIndex called with the hit index when the response has
+   *     `indexFollows`: the buffers do not wait for the index then. With null
+   *     when the index will not come (it could not be built, or the worker
+   *     failed after the buffers).
+   */
+  build(request: Omit<BuildRequest, 'type' | 'id'>, onIndex?: (index: Float32Array | null, time: number) => void): Promise<BuildResponse> {
     const id = this.nextId++;
     const message: BuildRequest = {...request, type: 'build', id};
     // the worker with the least to do; another one when that is a lot and there may be more
@@ -229,7 +253,7 @@ export class WorkerClient {
     const bytes = transfer.reduce((sum, b) => sum + b.byteLength, 1);
     target.bytes += bytes;
     return new Promise((resolve, reject) => {
-      target.pending.set(id, {resolve, reject, bytes});
+      target.pending.set(id, {resolve, reject, bytes, onIndex});
       target.worker.postMessage(message, transfer);
     });
   }

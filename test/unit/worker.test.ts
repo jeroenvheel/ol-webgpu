@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {WorkerClient, type WorkerDeps, WorkerFailedError} from '../../src/worker/client.js';
+import {type KeptInstructions, runBuild, runIndex} from '../../src/worker/build.js';
 import type {BuildRequest, BuildResponse} from '../../src/worker/protocol.js';
 import {loadTestCore} from './helpers.js';
 
@@ -236,5 +237,66 @@ describe('WorkerClient', () => {
     expect(error).not.toBeInstanceOf(WorkerFailedError);
     expect(error.message).toBe('boom');
     expect(c.onMainThread).toBe(false);
+  });
+
+  it('gives the buffers before the hit index when the worker sends them first', async () => {
+    const {worker, client: c} = client();
+    const got: Array<Float32Array | null> = [];
+    const build = c.build(request(), (index) => got.push(index));
+    const sent = worker.messages.find((m) => m.type === 'build') as BuildRequest;
+    worker.answer({...answerTo(sent), indexFollows: true});
+    const response = await build;
+    expect(response.indexFollows).toBe(true);
+    expect(got).toEqual([]);
+    const index = new Float32Array([1, 2, 3]);
+    worker.answer({type: 'index', id: sent.id, index, time: 1});
+    expect(got).toEqual([index]);
+    // once: the build is no longer with the worker
+    worker.answer({type: 'index', id: sent.id, index, time: 1});
+    expect(got.length).toBe(1);
+  });
+
+  it('tells that no hit index comes when the worker fails after the buffers', async () => {
+    const {worker, client: c} = client();
+    const got: Array<Float32Array | null> = [];
+    const build = c.build(request(), (index) => got.push(index));
+    const sent = worker.messages.find((m) => m.type === 'build') as BuildRequest;
+    worker.answer({...answerTo(sent), indexFollows: true});
+    await build;
+    worker.fail();
+    expect(got).toEqual([null]);
+    expect(c.onMainThread).toBe(true);
+  });
+});
+
+describe('a build with the hit index after the buffers', () => {
+  it('makes the same buffers and the same index as a build with both at once', async () => {
+    const core = await loadTestCore();
+    const message = (): BuildRequest => ({
+      ...request(),
+      lines: new Float32Array([7, 2, 0, 0, 0, 0.5, 0.25, 0]).buffer as ArrayBuffer,
+      type: 'build',
+      id: 1,
+    });
+    const whole = runBuild(message(), core);
+    const kept: Partial<KeptInstructions> = {};
+    const req = message();
+    const first = runBuild(req, core, kept);
+    expect(first.error).toBeUndefined();
+    expect(first.indexFollows).toBe(true);
+    expect(first.index).toBeNull();
+    expect(Array.from(first.points!.instances)).toEqual(Array.from(whole.points!.instances));
+    expect(Array.from(first.lines!.vertices)).toEqual(Array.from(whole.lines!.vertices));
+    // the point instances leave with the response: the index does not need them
+    structuredClone(first.points!.instances, {transfer: [first.points!.instances.buffer as ArrayBuffer]});
+    const {index} = runIndex(req, kept as KeptInstructions, core);
+    expect(whole.index).not.toBeNull();
+    expect(Array.from(index!)).toEqual(Array.from(whole.index!));
+  });
+
+  it('makes the index at once without WebAssembly or without hit detection', async () => {
+    const core = await loadTestCore();
+    expect(runBuild({...request(), type: 'build', id: 1}, null, {}).indexFollows).toBeUndefined();
+    expect(runBuild({...request(), indexTransform: null, type: 'build', id: 1}, core, {}).indexFollows).toBeUndefined();
   });
 });

@@ -9,40 +9,17 @@
  * The values are kept in one array, at the position of the feature's ref in
  * the batch. A ref goes to another feature once its feature is removed, and
  * a changed feature keeps its ref: whoever changes the batch calls `forget`
- * for the feature first (or `reset` when the batch is cleared).
+ * for the ref first (or `reset` when the batch is cleared).
+ *
+ * The coordinates are read from the geometries of the features (see
+ * batch.ts), in the parts and the order ol's MixedGeometryBatch has them in.
  */
 import {UNDEFINED_PROP_VALUE} from 'ol/expr/gpu.js';
 import type {Transform} from 'ol/transform.js';
-import {getUid} from 'ol/util.js';
+import {type FeatureBatch, type GeometryVisitor, visitGeometry} from './batch.js';
 import type {AttributeDefinition} from './stylePasses.js';
 import {type LevelStarts, mergeStarts} from './levels.js';
 import {type Less, Merger, Sorter} from './sort.js';
-
-/** An entry of ol's MixedGeometryBatch. */
-interface BatchEntry {
-  feature: unknown;
-  flatCoordss: number[][];
-  ref?: number;
-  ringsVerticesCounts?: number[][];
-}
-
-interface PointBatch {
-  entries: Record<string, BatchEntry>;
-  geometriesCount: number;
-}
-interface LineStringBatch extends PointBatch {
-  verticesCount: number;
-}
-interface PolygonBatch extends LineStringBatch {
-  ringsCount: number;
-}
-
-/** The part of ol's MixedGeometryBatch that tells the ref of a feature. */
-interface Batch {
-  pointBatch: PointBatch;
-  lineStringBatch: PointBatch;
-  polygonBatch: PointBatch;
-}
 
 export type InstructionKind = 'points' | 'lines' | 'polygons';
 
@@ -59,8 +36,9 @@ export interface InstructionOrder {
 /** The entries of a batch being put in order (see `InstructionBuilder.startOrdering`). */
 interface Ordering {
   kind: InstructionKind;
-  /** As they are in the batch. */
-  entries: BatchEntry[];
+  batch: FeatureBatch;
+  /** The refs, as they are in the batch. */
+  entries: Uint32Array;
   /** The number of each entry (null: there are none). */
   z: Float64Array | null;
   /** 0: the numbers, 1: who has a place from the last build, 2: sorting the others, 3: putting them among the first, 4: the result. */
@@ -73,16 +51,17 @@ interface Ordering {
   sorter: Sorter | null;
   merger: Merger | null;
   /** The entries in order, and their numbers. */
-  result: BatchEntry[] | null;
+  result: Uint32Array | null;
   resultZ: Float64Array | null;
 }
 
 /** Instructions of one kind in the making (see `InstructionBuilder.start`). */
 export interface InstructionRun {
   kind: InstructionKind;
+  batch: FeatureBatch;
   transform: Transform;
-  /** The entries in the order to draw them in, once `ordering` is done, and the number of each (null: all the same). */
-  entries: BatchEntry[];
+  /** The refs in the order to draw them in, once `ordering` is done, and the number of each (null: all the same). */
+  entries: Uint32Array;
   z: Float64Array | null;
   /** Puts the entries in order, in slices (see `InstructionBuilder.startOrdering`); null when that is done or not needed. */
   ordering: Ordering | null;
@@ -117,17 +96,18 @@ export class InstructionJob {
 
   constructor(
     private readonly builder: InstructionBuilder,
-    batches: {polygons: PolygonBatch | null; lines: LineStringBatch | null; points: PointBatch | null},
+    batch: FeatureBatch,
+    kinds: {polygons: boolean; lines: boolean; points: boolean},
     transform: Transform,
   ) {
-    if (batches.polygons) {
-      this.runs.push(builder.start('polygons', batches.polygons, transform));
+    if (kinds.polygons) {
+      this.runs.push(builder.start('polygons', batch, transform));
     }
-    if (batches.lines) {
-      this.runs.push(builder.start('lines', batches.lines, transform));
+    if (kinds.lines) {
+      this.runs.push(builder.start('lines', batch, transform));
     }
-    if (batches.points) {
-      this.runs.push(builder.start('points', batches.points, transform));
+    if (kinds.points) {
+      this.runs.push(builder.start('points', batch, transform));
     }
   }
 
@@ -208,7 +188,7 @@ export class InstructionBuilder {
    * kind: entries that are in the batch as they were then are in that order
    * still, and only the others are sorted and put among them.
    */
-  private startOrdering(kind: InstructionKind, entries: BatchEntry[]): Ordering | null {
+  private startOrdering(kind: InstructionKind, batch: FeatureBatch, entries: Uint32Array): Ordering | null {
     const order = this.order;
     // one entry needs no order, but its number says where it is drawn among the other kinds
     if (!order || !entries.length || (entries.length < 2 && !order.key)) {
@@ -217,7 +197,7 @@ export class InstructionBuilder {
     if (order.key && order.volatile) {
       this.keyKnown.fill(0);
     }
-    return {kind, entries, z: order.key ? new Float64Array(entries.length) : null, phase: 0, i: 0, others: 0, index: null, slots: null, sorter: null, merger: null, result: null, resultZ: null};
+    return {kind, batch, entries, z: order.key ? new Float64Array(entries.length) : null, phase: 0, i: 0, others: 0, index: null, slots: null, sorter: null, merger: null, result: null, resultZ: null};
   }
 
   /** Works until `deadline`; true when `result` and `resultZ` are there. */
@@ -259,8 +239,9 @@ export class InstructionBuilder {
   private stepKeys(o: Ordering, key: (feature: any) => number, deadline: number): boolean {
     const entries = o.entries;
     const z = o.z!;
+    const batch = o.batch;
     for (let i = o.i, n = entries.length; i < n; i++) {
-      const ref = entries[i].ref ?? 0;
+      const ref = entries[i];
       if (ref >= this.keyKnown.length) {
         const capacity = Math.max(this.keyKnown.length * 2, ref + 1, 1024);
         const keys = new Float64Array(capacity);
@@ -271,7 +252,7 @@ export class InstructionBuilder {
         this.keyKnown = known;
       }
       if (this.keyKnown[ref] !== 1) {
-        this.keys[ref] = key(entries[i].feature);
+        this.keys[ref] = key(batch.getFeatureFromRef(ref));
         this.keyKnown[ref] = 1;
         z[i] = this.keys[ref];
         if (i % CLOCK_EVERY === 0 && performance.now() >= deadline) {
@@ -302,7 +283,7 @@ export class InstructionBuilder {
     }
     // The different numbers in order (the sort of a typed array), the place of every
     // entry among them, and then the entries per number, in their own order.
-    const out: BatchEntry[] = new Array(n);
+    const out = new Uint32Array(n);
     const zOut = new Float64Array(n);
     const different = z.slice().sort();
     let m = 0;
@@ -361,7 +342,7 @@ export class InstructionBuilder {
     if (slots) {
       let others = o.others;
       for (let i = o.i; i >= 0; i--) {
-        const ref = entries[i].ref ?? 0;
+        const ref = entries[i];
         if (ref < place.known.length && place.known[ref] === 1 && slots[place.at[ref]] === 0) {
           slots[place.at[ref]] = i + 1;
         } else {
@@ -387,9 +368,11 @@ export class InstructionBuilder {
     const z = o.z;
     const compare = order.compare!;
     // a total order: the number, the comparison, the place in the batch
+    const batch = o.batch;
+    const feature = (i: number) => batch.getFeatureFromRef(entries[i]);
     const less: Less = z
-      ? (a, b) => (z[a] - z[b] || compare(entries[a].feature, entries[b].feature) || a - b) < 0
-      : (a, b) => (compare(entries[a].feature, entries[b].feature) || a - b) < 0;
+      ? (a, b) => (z[a] - z[b] || compare(feature(a), feature(b)) || a - b) < 0
+      : (a, b) => (compare(feature(a), feature(b)) || a - b) < 0;
     o.sorter = new Sorter(index, kept, n, less);
     o.merger = new Merger(index, kept, less);
     o.i = 0;
@@ -406,19 +389,18 @@ export class InstructionBuilder {
     if (!o.result) {
       place.known.fill(0);
       place.count = 0; // until all places are there
-      o.result = new Array(n);
+      o.result = new Uint32Array(n);
       o.resultZ = z ? new Float64Array(n) : null;
       o.i = 0;
     }
     const out = o.result;
     const zOut = o.resultZ;
     for (let i = o.i; i < n; i++) {
-      const entry = entries[index[i]];
-      out[i] = entry;
+      const ref = entries[index[i]];
+      out[i] = ref;
       if (zOut) {
         zOut[i] = z![index[i]];
       }
-      const ref = entry.ref ?? 0;
       if (ref >= place.at.length) {
         const capacity = Math.max(place.at.length * 2, ref + 1, 1024);
         const at = new Uint32Array(capacity);
@@ -462,20 +444,17 @@ export class InstructionBuilder {
   }
 
   /**
-   * To call before `feature` is changed in or removed from the batch: its
-   * values are computed again when its ref is next used.
+   * To call before the feature of `ref` is changed in or removed from the
+   * batch: its values are computed again when the ref is next used.
    */
-  forget(batch: Batch, feature: unknown) {
-    const uid = getUid(feature);
-    const entry = batch.pointBatch.entries[uid] ?? batch.lineStringBatch.entries[uid] ?? batch.polygonBatch.entries[uid];
-    const ref = entry?.ref;
-    if (ref !== undefined && ref < this.known.length) {
+  forget(ref: number) {
+    if (ref < this.known.length) {
       this.known[ref] = 0;
     }
-    if (ref !== undefined && ref < this.keyKnown.length) {
+    if (ref < this.keyKnown.length) {
       this.keyKnown[ref] = 0;
     }
-    if (ref !== undefined) {
+    {
       for (const kind in this.places) {
         const place = this.places[kind as InstructionKind]!;
         if (ref < place.known.length) {
@@ -485,10 +464,12 @@ export class InstructionBuilder {
     }
   }
 
-  /** Position of the entry's values in `values` (-1: not usable, see `usable`). */
-  private slot(entry: BatchEntry): number {
+  /** What the callbacks get as `this`, as ol gives them the entry of its batch. */
+  private readonly entry: {ref: number; feature: unknown} = {ref: 0, feature: undefined};
+
+  /** Position of the values of a ref in `values` (-1: not usable, see `usable`). */
+  private slot(ref: number, batch: FeatureBatch): number {
     const size = this.customSize;
-    const ref = entry.ref ?? 0;
     const at = ref * size;
     if (this.known[ref] === 1) {
       return at;
@@ -503,6 +484,9 @@ export class InstructionBuilder {
       this.known = known;
     }
     const values = this.values;
+    const entry = this.entry;
+    entry.ref = ref;
+    entry.feature = batch.getFeatureFromRef(ref);
     let k = at;
     for (let i = 0, ii = this.callbacks.length; i < ii; i++) {
       // same handling of the value as ol's pushCustomAttributesInRenderInstructions
@@ -531,22 +515,24 @@ export class InstructionBuilder {
   }
 
   /** Starts the instructions of one kind, to make with `step`. */
-  start(kind: InstructionKind, batch: PointBatch | LineStringBatch | PolygonBatch, transform: Transform): InstructionRun {
+  start(kind: InstructionKind, batch: FeatureBatch, transform: Transform): InstructionRun {
     const size = this.customSize;
+    const geometries = batch.geometriesCount(kind);
     const length =
       kind === 'points'
-        ? (2 + size) * batch.geometriesCount
+        ? (2 + size) * geometries
         : kind === 'lines'
-          ? 3 * (batch as LineStringBatch).verticesCount + (1 + size) * batch.geometriesCount
-          : 2 * (batch as PolygonBatch).verticesCount + (1 + size) * batch.geometriesCount + (batch as PolygonBatch).ringsCount;
-    const entries = Object.values(batch.entries) as BatchEntry[];
+          ? 3 * batch.verticesCount('lines') + (1 + size) * geometries
+          : 2 * batch.verticesCount('polygons') + (1 + size) * geometries + batch.ringsCount();
+    const entries = batch.refsOf(kind);
     return {
       kind,
+      batch,
       transform,
       entries,
       z: null,
-      // in the order of ol's for-in (and much faster), unless an order is set
-      ordering: this.startOrdering(kind, entries),
+      // in the order of ol's for-in, unless an order is set
+      ordering: this.startOrdering(kind, batch, entries),
       n: 0,
       k: 0,
       levels: [],
@@ -581,65 +567,89 @@ export class InstructionBuilder {
   }
 
   /** [x0, y0, customAttr0, ..., xN, yN, customAttrN] */
-  points(batch: PointBatch, transform: Transform): Float32Array | null {
+  points(batch: FeatureBatch, transform: Transform): Float32Array | null {
     const run = this.start('points', batch, transform);
     this.step(run, Infinity);
     return run.out;
   }
 
   /** [customAttr0, ..., customAttrN, numberOfVertices0, x0, y0, m0, ..., xN, yN, mN, ...] */
-  lines(batch: LineStringBatch, transform: Transform): Float32Array | null {
+  lines(batch: FeatureBatch, transform: Transform): Float32Array | null {
     const run = this.start('lines', batch, transform);
     this.step(run, Infinity);
     return run.out;
   }
 
   /** [customAttr0, ..., customAttrN, numberOfRings, numberOfVerticesInRing0, ..., x0, y0, ..., xN, yN, ...] */
-  polygons(batch: PolygonBatch, transform: Transform): Float32Array | null {
+  polygons(batch: FeatureBatch, transform: Transform): Float32Array | null {
     const run = this.start('polygons', batch, transform);
     this.step(run, Infinity);
     return run.out;
   }
 
-  /** True when done, false when the deadline came first, null when a value cannot be kept. */
+  /**
+   * The geometries of the refs of a run, one ref after the other, until the
+   * deadline: `visitor` gets their parts, after `begin` was told where the
+   * values of the ref are. True when done, false when the deadline came
+   * first, null when a value cannot be kept.
+   */
+  private walk(run: InstructionRun, deadline: number, visitor: GeometryVisitor, begin: (at: number, z: number, first: boolean) => void): boolean | null {
+    const entries = run.entries;
+    const batch = run.batch;
+    const z = run.z;
+    for (let n = run.n, nn = entries.length; n < nn; n++) {
+      if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
+        run.n = n;
+        return false;
+      }
+      const ref = entries[n];
+      const at = this.slot(ref, batch);
+      if (at < 0) {
+        return null;
+      }
+      begin(at, z ? z[n] : 0, !!z && (n === 0 || z[n] !== z[n - 1]));
+      visitGeometry(batch.geometryOf(ref), visitor);
+    }
+    run.n = entries.length;
+    return true;
+  }
+
   private stepPoints(run: InstructionRun, deadline: number): boolean | null {
     const size = this.customSize;
     const out = run.out!;
     const [a, b, c, d, e, f] = run.transform;
     let k = run.k;
     let u = run.u;
-    const entries = run.entries;
-    const z = run.z;
-    for (let n = run.n, nn = entries.length; n < nn; n++) {
-      if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
-        run.n = n;
-        run.k = k;
-        run.u = u;
-        return false;
-      }
-      if (z && (n === 0 || z[n] !== z[n - 1])) {
-        run.levels.push(z[n], u, 0);
-      }
-      const entry = entries[n];
-      const at = this.slot(entry);
-      if (at < 0) {
-        return null;
-      }
-      const values = this.values;
-      const coordss = entry.flatCoordss;
-      u += coordss.length;
-      for (let i = 0, ii = coordss.length; i < ii; i++) {
-        const x = coordss[i][0];
-        const y = coordss[i][1];
-        out[k++] = a * x + c * y + e;
-        out[k++] = b * x + d * y + f;
-        for (let j = 0; j < size; j++) {
-          out[k++] = values[at + j];
+    let at = 0;
+    let values = this.values;
+    const done = this.walk(
+      run,
+      deadline,
+      {
+        point(flat, i) {
+          const x = flat[i];
+          const y = flat[i + 1];
+          out[k++] = a * x + c * y + e;
+          out[k++] = b * x + d * y + f;
+          for (let j = 0; j < size; j++) {
+            out[k++] = values[at + j];
+          }
+          u++;
+        },
+        line() {},
+        polygon() {},
+      },
+      (slot, z, first) => {
+        at = slot;
+        values = this.values;
+        if (first) {
+          run.levels.push(z, u, 0);
         }
-      }
-    }
+      },
+    );
+    run.k = k;
     run.u = u;
-    return true;
+    return done;
   }
 
   private stepLines(run: InstructionRun, deadline: number): boolean | null {
@@ -648,43 +658,41 @@ export class InstructionBuilder {
     const [a, b, c, d, e, f] = run.transform;
     let k = run.k;
     let u = run.u;
-    const entries = run.entries;
-    const z = run.z;
-    for (let n = run.n, nn = entries.length; n < nn; n++) {
-      if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
-        run.n = n;
-        run.k = k;
-        run.u = u;
-        return false;
-      }
-      if (z && (n === 0 || z[n] !== z[n - 1])) {
-        run.levels.push(z[n], u, 0);
-      }
-      const entry = entries[n];
-      const at = this.slot(entry);
-      if (at < 0) {
-        return null;
-      }
-      const values = this.values;
-      const coordss = entry.flatCoordss;
-      for (let i = 0, ii = coordss.length; i < ii; i++) {
-        const flat = coordss[i];
-        u += flat.length > 3 ? flat.length / 3 - 1 : 0; // a segment is an instance
-        for (let j = 0; j < size; j++) {
-          out[k++] = values[at + j];
+    let at = 0;
+    let values = this.values;
+    const done = this.walk(
+      run,
+      deadline,
+      {
+        point() {},
+        line(flat, start, end, stride, m) {
+          const count = (end - start) / stride;
+          u += count > 1 ? count - 1 : 0; // a segment is an instance
+          for (let j = 0; j < size; j++) {
+            out[k++] = values[at + j];
+          }
+          out[k++] = count;
+          for (let j = start; j < end; j += stride) {
+            const x = flat[j];
+            const y = flat[j + 1];
+            out[k++] = a * x + c * y + e;
+            out[k++] = b * x + d * y + f;
+            out[k++] = m < 0 ? 0 : flat[j + m];
+          }
+        },
+        polygon() {},
+      },
+      (slot, z, first) => {
+        at = slot;
+        values = this.values;
+        if (first) {
+          run.levels.push(z, u, 0);
         }
-        out[k++] = flat.length / 3;
-        for (let j = 0, jj = flat.length; j < jj; j += 3) {
-          const x = flat[j];
-          const y = flat[j + 1];
-          out[k++] = a * x + c * y + e;
-          out[k++] = b * x + d * y + f;
-          out[k++] = flat[j + 2];
-        }
-      }
-    }
+      },
+    );
+    run.k = k;
     run.u = u;
-    return true;
+    return done;
   }
 
   private stepPolygons(run: InstructionRun, deadline: number): boolean | null {
@@ -694,52 +702,46 @@ export class InstructionBuilder {
     let k = run.k;
     let u = run.u;
     let u2 = run.u2;
-    const entries = run.entries;
-    const z = run.z;
-    for (let n = run.n, nn = entries.length; n < nn; n++) {
-      if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
-        run.n = n;
-        run.k = k;
-        run.u = u;
-        run.u2 = u2;
-        return false;
-      }
-      if (z && (n === 0 || z[n] !== z[n - 1])) {
-        run.levels.push(z[n], u, u2);
-      }
-      const entry = entries[n];
-      const at = this.slot(entry);
-      if (at < 0) {
-        return null;
-      }
-      const values = this.values;
-      const coordss = entry.flatCoordss;
-      for (let i = 0, ii = coordss.length; i < ii; i++) {
-        const rings = entry.ringsVerticesCounts?.[i];
-        if (!rings) {
-          continue;
+    let at = 0;
+    let values = this.values;
+    const done = this.walk(
+      run,
+      deadline,
+      {
+        point() {},
+        line() {},
+        polygon(flat, start, ends, first, last, stride) {
+          const end = last > first ? ends[last - 1] : start;
+          u += (end - start) / stride;
+          for (let j = 0; j < size; j++) {
+            out[k++] = values[at + j];
+          }
+          out[k++] = last - first;
+          for (let j = first, from = start; j < last; from = ends[j++]) {
+            const count = (ends[j] - from) / stride;
+            out[k++] = count;
+            u2 += count > 1 ? count - 1 : 0;
+          }
+          for (let j = start; j < end; j += stride) {
+            const x = flat[j];
+            const y = flat[j + 1];
+            out[k++] = a * x + c * y + e;
+            out[k++] = b * x + d * y + f;
+          }
+        },
+      },
+      (slot, z, first) => {
+        at = slot;
+        values = this.values;
+        if (first) {
+          run.levels.push(z, u, u2);
         }
-        const flat = coordss[i];
-        u += flat.length >> 1;
-        for (let j = 0; j < size; j++) {
-          out[k++] = values[at + j];
-        }
-        out[k++] = rings.length;
-        for (let j = 0, jj = rings.length; j < jj; j++) {
-          out[k++] = rings[j];
-          u2 += rings[j] > 1 ? rings[j] - 1 : 0;
-        }
-        for (let j = 0, jj = flat.length; j < jj; j += 2) {
-          const x = flat[j];
-          const y = flat[j + 1];
-          out[k++] = a * x + c * y + e;
-          out[k++] = b * x + d * y + f;
-        }
-      }
-    }
+      },
+    );
+    run.k = k;
     run.u = u;
     run.u2 = u2;
-    return true;
+    return done;
   }
 }
 

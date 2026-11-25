@@ -3,7 +3,7 @@ import Feature from 'ol/Feature.js';
 import LineString from 'ol/geom/LineString.js';
 import Point from 'ol/geom/Point.js';
 import Polygon from 'ol/geom/Polygon.js';
-import MixedGeometryBatch from 'ol/render/webgl/MixedGeometryBatch.js';
+import {FeatureBatch} from '../../src/render/batch.js';
 import {create as createTransform} from 'ol/transform.js';
 import {describe, expect, it} from 'vitest';
 import {InstructionBuilder, InstructionJob} from '../../src/render/instructions.js';
@@ -40,11 +40,11 @@ const point = (x: number, z: number) => new Feature({geometry: new Point([x, 0])
 
 /** The instructions of the features and the buffers made of them, as a build does it (without the worker). */
 function build(features: Feature[], edges = false) {
-  const batch = new MixedGeometryBatch();
+  const batch = new FeatureBatch();
   batch.addFeatures(features);
   const builder = new InstructionBuilder(custom);
   builder.setOrder({key: (f) => f.get('z'), volatile: false, compare: null});
-  const job = new InstructionJob(builder, {polygons: batch.polygonBatch, lines: batch.lineStringBatch, points: batch.pointBatch}, transform);
+  const job = new InstructionJob(builder, batch, {polygons: true, lines: true, points: true}, transform);
   while (!job.step(Infinity)) {
     // goes on
   }

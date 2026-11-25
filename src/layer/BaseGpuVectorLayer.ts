@@ -31,6 +31,15 @@ export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> ex
    */
   smoothFill?: boolean;
   /**
+   * WebGL2 only: keep a copy of the layer's buffers in memory, to upload
+   * them again at once after a lost context or when the layer moves to
+   * another canvas (other layers came between it and its neighbours).
+   * Default true. With false that memory is saved (about a third of what a
+   * big layer holds besides its features); the buffers are then built again
+   * in those cases, and the layer is not drawn until they are.
+   */
+  keepBuffers?: boolean;
+  /**
    * The order of the features: a function that compares two features, as
    * `renderOrder` of ol's Canvas vector layer. Features that come first are
    * drawn first, so below the others of their kind (fills, strokes or
@@ -88,6 +97,7 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
       preserveDrawingBuffer,
       antialias,
       smoothFill,
+      keepBuffers,
       renderOrder,
       text,
       declutter,
@@ -140,6 +150,7 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
       preserveDrawingBuffer: this.gpuOptions.preserveDrawingBuffer,
       antialias: this.gpuOptions.antialias,
       smoothFill: this.gpuOptions.smoothFill,
+      keepBuffers: this.gpuOptions.keepBuffers,
       renderOrder: this.renderOrder,
       text: this.gpuOptions.text,
       declutter: this.gpuOptions.declutter,

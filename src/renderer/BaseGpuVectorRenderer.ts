@@ -1,6 +1,6 @@
 /**
  * Shared pipeline for the WebGL2 and WebGPU vector renderers:
- * source events → MixedGeometryBatch → render instructions (ol) → worker
+ * source events → FeatureBatch → render instructions → worker
  * (Rust/WASM buffers + hit index) → backend upload → draw per world.
  *
  * The transforms mirror ol's WebGLVectorLayerRenderer (ol 10.11). Features
@@ -31,6 +31,7 @@ import type VectorSource from 'ol/source/Vector.js';
 import VectorEventType from 'ol/source/VectorEventType.js';
 import type {FlatStyleLike} from 'ol/style/flat.js';
 import {type Transform, apply as applyTransform, create as createTransform, makeInverse, translate} from 'ol/transform.js';
+import type MixedGeometryBatch from 'ol/render/webgl/MixedGeometryBatch.js';
 import LabelsArray from 'ol/webgl/LabelsArray.js';
 import {toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
 import {create as createMat4} from 'ol/vec/mat4.js';
@@ -75,6 +76,11 @@ export interface GpuVectorRendererOptions extends WorkerOptions {
    * as ol's WebGL layers draw them.
    */
   smoothFill?: boolean;
+  /**
+   * WebGL2: whether the buffers are also kept in memory (default true), see
+   * `keepCpuCopies`. WebGPU never keeps them.
+   */
+  keepBuffers?: boolean;
   /**
    * The order of the features of the layer: a function that compares two
    * features, as for ol's Canvas vector layer. Features that come first are
@@ -256,6 +262,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   framesSinceReady = 0;
 
   private readonly batch = new FeatureBatch();
+  /** What ol's batch holds, for ol's instruction generators, and the `batchVersion` it was made for (see `olBatch`). */
+  private olBatchOf: {version: number; batch: MixedGeometryBatch} | null = null;
   private sourceKeys: EventsKey[] | null = null;
   /** The source the batch and the listeners are of (the layer may get another one). */
   private boundSource: VectorSource | null = null;
@@ -274,6 +282,12 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private instructions: InstructionBuilder;
   private readonly hitDetection: boolean;
   private picker: Picker | null = null;
+  /**
+   * The hit index of the buffers that are drawn is still being made: the
+   * worker sends the buffers first, so the layer is drawn before it can be
+   * picked (for tests, and `isPickingReady`).
+   */
+  indexPending = false;
   /** Latest index, kept until the main-thread wasm (and so the picker) is ready. */
   private pendingIndex: {data: Float32Array; center: number[]; resolution: number; frameState: FrameState} | null = null;
   private readonly worker: WorkerClient;
@@ -296,9 +310,11 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
    * Whether the uploaded data is also kept in memory, to upload it again
    * at once when the context is lost or the layer moves to another canvas.
    * Without it the buffers are built again then, which takes a moment, and
-   * the memory of a second copy of all buffers is saved.
+   * the memory of a second copy of all buffers is saved. WebGPU does
+   * without: a lost device is rare, and the canvas a layer draws on does not
+   * matter to the device.
    */
-  protected readonly keepCpuCopies: boolean = true;
+  protected readonly keepCpuCopies: boolean;
   // `ready` (what `rendercomplete` waits for) follows from these, see `updateReady`
   /** Buffers are being built for the current view. */
   private building = false;
@@ -306,6 +322,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private awaitingText = false;
   /** The backend cannot draw yet (the WebGPU device is being requested). */
   protected backendPending = false;
+  /** The backend could not start (no WebGPU device): it may still come, see `whenBackend`. */
+  protected backendFailed = false;
 
   constructor(layer: Layer<VectorSource>, options: GpuVectorRendererOptions, backend: SurfaceSpec['backend']) {
     super(layer);
@@ -316,6 +334,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.preserveDrawingBuffer = this.spec.preserveDrawingBuffer;
     this.antialias = this.spec.antialias;
     this.smoothFill = !!options.smoothFill;
+    this.keepCpuCopies = backend === 'webgl2' && options.keepBuffers !== false;
     this.renderOrder = options.renderOrder ?? null;
     this.passes = buildStylePasses(this.style, this.variables, this.smoothFill);
     this.instructions = new InstructionBuilder(this.passes.customAttributes);
@@ -350,6 +369,16 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   /** Prepare backend resources; return false while not ready (e.g. async WebGPU device). */
   protected abstract prepareBackend(frameState: FrameState): boolean;
   /**
+   * Resolves when the backend can take buffers (null: it can now). A build
+   * does not wait for the backend to start: the features are read and the
+   * buffers are made meanwhile, and uploaded when both are there. While
+   * the backend has given up (`backendFailed`) the build keeps waiting, without
+   * holding back `rendercomplete`.
+   */
+  protected whenBackend(): Promise<unknown> | null {
+    return null;
+  }
+  /**
    * Leaves the symbols of `hidden` features out of the point buffer: they
    * lost their place in decluttering. The instances of the build are kept,
    * and the ones to draw are uploaded again whenever the set changes.
@@ -372,10 +401,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     }
     if (hidden.size) {
       const refs = new Set<number>();
-      const entries = (this.batch as any).pointBatch.entries as Record<string, {ref?: number}>;
       for (const feature of hidden) {
-        const ref = entries[getUid(feature)]?.ref;
-        if (ref !== undefined) {
+        const ref = this.batch.refOf(feature);
+        if (ref) {
           refs.add(ref);
         }
       }
@@ -553,6 +581,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.sourceKeys?.forEach(unlistenByKey);
     this.sourceKeys = null;
     this.batchVersion++;
+    this.olBatchOf = null;
     if (this.boundSource) {
       this.batch.clear();
       this.instructions.reset();
@@ -584,19 +613,20 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       listen(source, VectorEventType.CHANGEFEATURE, (e: any) => {
         if (e.feature) {
           this.batchVersion++;
-          this.instructions.forget(this.batch, e.feature);
+          this.instructions.forget(this.batch.refOf(e.feature));
           this.batch.changeFeature(e.feature, projectionTransform);
         }
       }),
       listen(source, VectorEventType.REMOVEFEATURE, (e: any) => {
         if (e.feature) {
           this.batchVersion++;
-          this.instructions.forget(this.batch, e.feature);
+          this.instructions.forget(this.batch.refOf(e.feature));
           this.batch.removeFeature(e.feature);
         }
       }),
       listen(source, VectorEventType.CLEAR, () => {
         this.batchVersion++;
+        this.olBatchOf = null;
         this.batch.clear();
         this.instructions.reset();
       }),
@@ -633,7 +663,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   /** Sets `ready` from the state it follows from; the only place that does. */
   protected updateReady() {
-    const ready = !this.building && !this.awaitingText && !this.backendPending && !this.gpuText?.pending && this.pendingImages.size === 0;
+    const ready = (!this.building || this.backendFailed) && !this.awaitingText && !this.backendPending && !this.gpuText?.pending && this.pendingImages.size === 0;
     if (ready && !this.ready) {
       this.framesSinceReady = 0;
     }
@@ -643,9 +673,11 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   override prepareFrame(frameState: FrameState): boolean {
     this.lastZoom = frameState.viewState.zoom;
     this.updateSurface(frameState);
-    const prepared = this.prepareBackend(frameState) && this.prepareData(frameState);
+    // the data does not wait for a backend that is on its way (see `whenBackend`)
+    const backend = this.prepareBackend(frameState);
+    const data = (backend || this.backendPending) && this.prepareData(frameState);
     this.updateReady();
-    return prepared;
+    return backend && data;
   }
 
   private prepareData(frameState: FrameState): boolean {
@@ -778,23 +810,17 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     const wantPoints = (p.hasSymbol || !!text) && !empty;
     // Our instructions are made in slices, so a big layer does not hold up the
     // page: `INSTRUCTION_SLICE` ms at a time, with a pause in between.
-    const job = kept
-      ? new InstructionJob(
-          kept,
-          {polygons: wantPolygons ? batch.polygonBatch : null, lines: wantLines ? batch.lineStringBatch : null, points: wantPoints ? batch.pointBatch : null},
-          transform,
-        )
-      : null;
+    const job = kept ? new InstructionJob(kept, batch, {polygons: wantPolygons, lines: wantLines, points: wantPoints}, transform) : null;
     const send = () => {
-      // ol's generators make what ours could not (or all of it, for ol's text worker)
+      // ol's generators make what ours could not (or all of it, for ol's text worker), of what ol's batch holds
       const polygons = wantPolygons
-        ? (job?.result('polygons') ?? generatePolygonRenderInstructions(batch.polygonBatch, new Float32Array(0), labels, custom, transform))
+        ? (job?.result('polygons') ?? generatePolygonRenderInstructions(this.olBatch().polygonBatch, new Float32Array(0), labels, custom, transform))
         : null;
       const lines = wantLines
-        ? (job?.result('lines') ?? generateLineStringRenderInstructions(batch.lineStringBatch, new Float32Array(0), labels, custom, transform))
+        ? (job?.result('lines') ?? generateLineStringRenderInstructions(this.olBatch().lineStringBatch, new Float32Array(0), labels, custom, transform))
         : null;
       const points = wantPoints
-        ? (job?.result('points') ?? generatePointRenderInstructions(batch.pointBatch, new Float32Array(0), labels, custom, transform))
+        ? (job?.result('points') ?? generatePointRenderInstructions(this.olBatch().pointBatch, new Float32Array(0), labels, custom, transform))
         : null;
       // only with all instructions of ours: the starts are counted with them
       const levels = job && job.result('polygons') !== null && job.result('lines') !== null && job.result('points') !== null ? job.levels() : null;
@@ -827,6 +853,18 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     })();
   }
 
+  /**
+   * What ol's MixedGeometryBatch holds for the features of the layer, for
+   * ol's instruction generators. Kept until the features change: with ol's
+   * text worker every build needs it.
+   */
+  private olBatch(): MixedGeometryBatch {
+    if (this.olBatchOf?.version !== this.batchVersion) {
+      this.olBatchOf = {version: this.batchVersion, batch: this.batch.toOl()};
+    }
+    return this.olBatchOf.batch;
+  }
+
   /** The second half of a build: the instructions go to the worker, and what comes back is uploaded. */
   private submit(
     frameState: FrameState,
@@ -850,23 +888,58 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       text && !empty
         ? text.build({polygons, lines, points, labels: labels.getArray()}, toFlatStyleLike(this.style as any) as FlatStyleLike, p.customAttributes, transform, resolution)
         : Promise.resolve(null);
-    const geometry = this.worker.build({
-      points: p.hasSymbol ? ((points?.buffer as ArrayBuffer) ?? null) : null,
-      lines: p.hasStroke ? ((lines?.buffer as ArrayBuffer) ?? null) : null,
-      polygons: p.hasFill ? ((polygons?.buffer as ArrayBuffer) ?? null) : null,
-      edges: p.hasEdge,
-      customSize: p.customSize,
-      refOffset: p.refOffset,
-      invert: Array.from(invert),
-      // instruction space (clip, unrotated) → pixels at build time: isotropic for picking
-      indexTransform: this.hitDetection ? [size[0] / 2, 0, 0, size[1] / 2, 0, 0] : null,
-    });
+    // The hit index may come after the buffers (see the worker): it is loaded when
+    // both it and the buffers it belongs to are here, whichever is first.
+    let index: Float32Array | null | undefined;
+    let uploaded = false;
+    const loadIndex = () => {
+      if (index === undefined || !uploaded || generation !== this.generation || this.disposed) {
+        return;
+      }
+      this.indexPending = false;
+      if (!index) {
+        // lost with the worker, or it could not be made: built again (on the main thread, when the worker is gone)
+        this.picker?.clear();
+        if (this.worker.onMainThread) {
+          this.invalidate();
+          this.getLayer()?.changed();
+        }
+        return;
+      }
+      if (this.picker) {
+        this.picker.load(index, {center, resolution});
+        this.picker.measure(this.batch as any, frameState, this.getLayer().getSource()?.getRevision() ?? 0);
+      } else {
+        this.pendingIndex = {data: index, center, resolution, frameState};
+      }
+      index = undefined;
+    };
+    const geometry = this.worker.build(
+      {
+        points: p.hasSymbol ? ((points?.buffer as ArrayBuffer) ?? null) : null,
+        lines: p.hasStroke ? ((lines?.buffer as ArrayBuffer) ?? null) : null,
+        polygons: p.hasFill ? ((polygons?.buffer as ArrayBuffer) ?? null) : null,
+        edges: p.hasEdge,
+        customSize: p.customSize,
+        refOffset: p.refOffset,
+        invert: Array.from(invert),
+        // instruction space (clip, unrotated) → pixels at build time: isotropic for picking
+        indexTransform: this.hitDetection ? [size[0] / 2, 0, 0, size[1] / 2, 0, 0] : null,
+      },
+      (data, time) => {
+        index = data;
+        if (this.stats && uploaded && generation === this.generation) {
+          this.stats.worker.index = time;
+        }
+        loadIndex();
+      },
+    );
 
     // without buffers the text image for these instructions is never shown
     geometry.catch(() => textKey.then((key) => key && text?.dispose(key))).catch(() => {});
 
-    Promise.all([geometry, textKey])
-      .then(([response, key]: [BuildResponse, string | null]) => {
+    Promise.all([geometry, textKey, this.whenBackend()])
+      .then(([response, key]: [BuildResponse, string | null, unknown]) => {
         if (generation !== this.generation || this.disposed) {
           if (key) {
             text?.dispose(key);
@@ -876,7 +949,11 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         // the GPU buffers of the previous build go to the new one (see `upload`)
         const old = this.buffers;
         this.buffers = null;
-        this.disposeBuffers();
+        if (!response.indexFollows) {
+          this.picker?.clear();
+        }
+        // else the index of the build before answers until the new one is in: a layer whose
+        // features change all the time is not without hits for a moment after every change
         if (old?.textKey) {
           this.textOverlay?.dispose(old.textKey);
         }
@@ -907,14 +984,12 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         this.pointInstances = this.placesSymbols ? response.points : null;
         this.symbolVersion = -1;
         this.symbolsLeftOut = false;
+        uploaded = true;
+        this.indexPending = !!response.indexFollows;
         if (response.index) {
-          if (this.picker) {
-            this.picker.load(response.index, {center, resolution});
-            this.picker.measure(this.batch as any, frameState, this.getLayer().getSource()?.getRevision() ?? 0);
-          } else {
-            this.pendingIndex = {data: response.index, center, resolution, frameState};
-          }
+          index = response.index;
         }
+        loadIndex();
         this.buildFailures = 0;
         this.stats = {engine: response.engine, instructions: instructionsTime, worker: response.timings, total: performance.now() - t0};
         this.building = false;
@@ -1083,7 +1158,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
    * for data-driven sizes, the max size measured (picks are slower before).
    */
   isPickingReady(frameState: FrameState): boolean {
-    return !!this.picker?.loaded && this.picker.isMeasured(frameState);
+    return !this.indexPending && !!this.picker?.loaded && this.picker.isMeasured(frameState);
   }
 
   /**
@@ -1206,6 +1281,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     }
     this.buffers = null;
     this.picker?.clear();
+    this.indexPending = false;
   }
 
   /**
@@ -1218,7 +1294,13 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       return;
     }
     if (!this.keepCpuCopies) {
-      this.disposeBuffers();
+      // not released: the GPU objects are gone, or of a context that is no longer this layer's
+      if (this.buffers.textKey) {
+        this.textOverlay?.dispose(this.buffers.textKey);
+      }
+      this.buffers = null;
+      this.picker?.clear();
+      this.indexPending = false;
       this.invalidate();
       return;
     }

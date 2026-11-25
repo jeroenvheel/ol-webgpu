@@ -31,10 +31,22 @@ export interface BuildResponse {
   edges?: BufferSet | null;
   /** Serialized hit index (see crates/core/src/index.rs). */
   index: Float32Array | null;
+  /** The hit index is still being built and comes in an `IndexMessage`: the buffers do not wait for it. */
+  indexFollows?: boolean;
   /** 'wasm' or 'js' (fallback). */
   engine: 'wasm' | 'js';
   timings: Record<string, number>;
   error?: string;
+}
+
+/** The hit index of a build whose buffers went ahead (`indexFollows`). */
+export interface IndexMessage {
+  type: 'index';
+  id: number;
+  /** null: it could not be built. */
+  index: Float32Array | null;
+  /** Milliseconds it took. */
+  time: number;
 }
 
 export interface ReadyMessage {

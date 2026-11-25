@@ -301,10 +301,9 @@ export interface IndexState {
   resolution: number;
 }
 
-/** Minimal view of MixedGeometryBatch used to measure sizes. */
+/** What of the batch of a layer is used to measure sizes. */
 export interface MeasurableBatch {
-  pointBatch: {entries: Record<string, {feature: FeatureLike}>};
-  lineStringBatch: {entries: Record<string, {feature: FeatureLike}>};
+  featuresOf(kind: 'points' | 'lines'): FeatureLike[];
 }
 
 export class Picker {
@@ -384,10 +383,10 @@ export class Picker {
     this.measuring = key;
     const lists: Array<[FeatureLike[], 'point' | 'line']> = [];
     if (needPoints) {
-      lists.push([Object.values(batch.pointBatch.entries).map((e) => e.feature), 'point']);
+      lists.push([batch.featuresOf('points'), 'point']);
     }
     if (needLines) {
-      lists.push([Object.values(batch.lineStringBatch.entries).map((e) => e.feature), 'line']);
+      lists.push([batch.featuresOf('lines'), 'line']);
     }
     const variables = this.frameVariables(frameState);
     const resolution = frameState.viewState.resolution;

@@ -4,8 +4,8 @@
  * hit index, with the Rust/WASM core (JS fallback if wasm cannot load).
  */
 import {type Core, LARGE_MEMORY_BYTES, compileWasm, loadCore} from '../wasm/core.js';
-import {responseTransferables, runBuild} from './build.js';
-import type {BuildRequest, InitMessage, ReadyMessage} from './protocol.js';
+import {type KeptInstructions, responseTransferables, runBuild, runIndex} from './build.js';
+import type {BuildRequest, IndexMessage, InitMessage, ReadyMessage} from './protocol.js';
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -57,7 +57,27 @@ self.onmessage = async (event: MessageEvent<BuildRequest | InitMessage>) => {
     return;
   }
   await coreReady;
-  const response = runBuild(req, core);
+  // the buffers go out first: the layer is drawn while the hit index is made
+  const kept: Partial<KeptInstructions> = {};
+  const builder = core;
+  const response = runBuild(req, builder, kept);
+  if (response.indexFollows && !response.error) {
+    self.postMessage(response, responseTransferables(response));
+    const {index, time} = runIndex(req, kept as KeptInstructions, builder!);
+    if (!index && module) {
+      // as after a build that failed: the next one gets a new instance
+      coreReady = loadCore(module).then(
+        (c) => {
+          core = c;
+        },
+        () => {},
+      );
+    }
+    recycleWhenIdle();
+    self.postMessage({type: 'index', id: req.id, index, time} satisfies IndexMessage, index ? [index.buffer as ArrayBuffer] : []);
+    return;
+  }
+  response.indexFollows = false;
   if (response.error && core && module) {
     // whatever went wrong (out of memory, mostly), the next build gets a new instance
     coreReady = loadCore(module).then(

@@ -217,6 +217,11 @@ export class Core {
     return this.readIndex();
   }
 
+  /** Frees the index `buildIndex` made last (after it was read, its memory is of no use here). */
+  resetIndex() {
+    this.ex.olgpu_index_reset();
+  }
+
   /**
    * Loads a serialized index and returns its handle (0: not a valid index).
    * A Core holds any number of indexes: free each with `freeIndex`.

@@ -7,6 +7,7 @@ import Feature from 'ol/Feature.js';
 import Map from 'ol/Map.js';
 import View from 'ol/View.js';
 import Point from 'ol/geom/Point.js';
+import VectorLayer from 'ol/layer/Vector.js';
 import {bbox} from 'ol/loadingstrategy.js';
 import VectorSource from 'ol/source/Vector.js';
 import {frame, renderersSettled} from './settled.js';
@@ -121,7 +122,7 @@ const names = (x: number, y: number) => map.getFeaturesAtPixel([x, y]).map((f) =
     };
     const text = solid();
     const found = (await labelled.getFeatures([128, 198])).map((f) => f.get('name'));
-    check('a layer of setMap draws its labels and finds its features', framesAlone >= 2 && text > 100 && found.join() === 'labelled', {
+    check('a layer of setMap draws its labels and finds its features', framesAlone >= 1 && text > 100 && found.join() === 'labelled', {
       frames: framesAlone,
       text,
       found,
@@ -129,6 +130,35 @@ const names = (x: number, y: number) => map.getFeaturesAtPixel([x, y]).map((f) =
     labelled.setMap(null);
     labelled.dispose();
     await settle();
+
+    // A layer that goes to another canvas (a layer of another kind comes before it). WebGL2
+    // uploads its buffers again there: from its copy, or built again without one
+    // (`keepBuffers: false`). To WebGPU the canvas does not matter.
+    const canvases: Record<string, unknown> = {};
+    let movedOk = true;
+    for (const keepBuffers of [true, false]) {
+      const mover = new Layer({source: new VectorSource({features: [point(60, 100, 'mover')]}), style: circle('#1a9641'), keepBuffers});
+      map.addLayer(mover);
+      await settle();
+      const canvas = rendererOf(mover).canvas;
+      const between = new VectorLayer({source: new VectorSource()});
+      map.getLayers().insertAt(map.getLayers().getLength() - 1, between);
+      await settle();
+      const result = {
+        builds: rendererOf(mover).builds,
+        otherCanvas: rendererOf(mover).canvas !== canvas,
+        drawn: alphaAt(188, 28),
+        hit: names(188, 28),
+      };
+      canvases[`keepBuffers ${keepBuffers}`] = result;
+      const builds = params.get('layer') === 'webgpu' || keepBuffers ? 1 : 2;
+      movedOk &&= result.builds === builds && result.otherCanvas && result.drawn === 255 && result.hit.join() === 'mover';
+      map.removeLayer(between);
+      map.removeLayer(mover);
+      mover.dispose();
+      await settle();
+    }
+    check('a layer that goes to another canvas is drawn there, built again only without a copy of its buffers', movedOk, canvases);
 
     // a map that leaves the page: its layers give up their renderers, unless it is back at once
     const kept = rendererOf(layer);
