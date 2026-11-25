@@ -1,3 +1,4 @@
+import type {FeatureLike} from 'ol/Feature.js';
 import type OlMap from 'ol/Map.js';
 import {type EventsKey, listen, unlistenByKey} from 'ol/events.js';
 import Layer, {type Options as LayerOptions} from 'ol/layer/Layer.js';
@@ -30,6 +31,14 @@ export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> ex
    */
   smoothFill?: boolean;
   /**
+   * The order of the features: a function that compares two features, as
+   * `renderOrder` of ol's Canvas vector layer. Features that come first are
+   * drawn first, so below the others of their kind (fills, strokes or
+   * symbols). A `z-index` in the style goes before it. Default: the order
+   * the features came into the source.
+   */
+  renderOrder?: ((a: FeatureLike, b: FeatureLike) => number) | null;
+  /**
    * How `text-*` styles are drawn. 'gpu' (default): glyphs from an atlas
    * drawn by the layer itself, with the page's fonts, at the device pixel
    * ratio, in every world copy, and hit-detectable. 'canvas': ol's text
@@ -52,10 +61,12 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
   protected styleVariables: StyleVariables;
   protected style: FlatStyleLike;
   protected readonly gpuOptions: GpuVectorLayerOptions<S>;
+  private renderOrder: ((a: FeatureLike, b: FeatureLike) => number) | null;
 
   constructor(options: GpuVectorLayerOptions<S>) {
-    const {style, variables, disableHitDetection, wasmUrl, preserveDrawingBuffer, antialias, smoothFill, text, declutter, ...base} = options;
+    const {style, variables, disableHitDetection, wasmUrl, preserveDrawingBuffer, antialias, smoothFill, renderOrder, text, declutter, ...base} = options;
     super(base);
+    this.renderOrder = renderOrder ?? null;
     this.gpuOptions = options;
     this.style = style;
     this.styleVariables = variables ?? {};
@@ -83,6 +94,7 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
       preserveDrawingBuffer: this.gpuOptions.preserveDrawingBuffer,
       antialias: this.gpuOptions.antialias,
       smoothFill: this.gpuOptions.smoothFill,
+      renderOrder: this.renderOrder,
       text: this.gpuOptions.text,
       declutter: this.gpuOptions.declutter,
     };
@@ -91,6 +103,21 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
   /** Updates style variables and re-renders (no recompilation). */
   updateStyleVariables(variables: StyleVariables) {
     Object.assign(this.styleVariables, variables);
+    this.changed();
+  }
+
+  /** The function that orders the features (see the `renderOrder` option). */
+  getRenderOrder(): ((a: FeatureLike, b: FeatureLike) => number) | null {
+    return this.renderOrder;
+  }
+
+  /** Sets the function that orders the features (null: as they came into the source); the buffers are built again. */
+  setRenderOrder(renderOrder: ((a: FeatureLike, b: FeatureLike) => number) | null) {
+    this.renderOrder = renderOrder;
+    const renderer = this.getRenderer() as BaseGpuVectorRenderer<unknown> | null;
+    if (renderer && this.hasRenderer()) {
+      renderer.setRenderOrder(renderOrder);
+    }
     this.changed();
   }
 

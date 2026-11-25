@@ -28,8 +28,8 @@ import {type Core, HIT_KIND_LINE, HIT_KIND_POINT, HIT_KIND_POLYGON, HIT_WORDS} f
  */
 export const MAX_PICK_RADIUS_PX = 128;
 
-const ZOOM_VAR = '__olgpu_zoom';
-const TIME_VAR = '__olgpu_time';
+export const ZOOM_VAR = '__olgpu_zoom';
+export const TIME_VAR = '__olgpu_time';
 
 /**
  * ol's CPU evaluator lacks some GPU-only operators. For picking, `zoom` and
@@ -59,9 +59,9 @@ type Evaluator<T> = ((ctx: any) => T) | null;
 
 /** Operators whose value differs per feature / per view. */
 const FEATURE_OPS = new Set(['get', 'has', 'id', 'geometry-type', 'line-metric']);
-const VIEW_OPS = new Set(['var', 'zoom', 'resolution', 'time']);
+export const VIEW_OPS = new Set(['var', 'zoom', 'resolution', 'time']);
 
-function usesOps(value: unknown, ops: Set<string>): boolean {
+export function usesOps(value: unknown, ops: Set<string>): boolean {
   return Array.isArray(value) && ((typeof value[0] === 'string' && ops.has(value[0])) || value.some((v) => usesOps(v, ops)));
 }
 
@@ -79,7 +79,7 @@ function sizeKind(values: unknown[]): SizeKind {
   return !feature ? 'shared' : view ? 'mixed' : 'feature';
 }
 
-function compile<T>(value: unknown, type: number): Evaluator<T> {
+export function compile<T>(value: unknown, type: number): Evaluator<T> {
   if (value === undefined) {
     return null;
   }
@@ -90,7 +90,7 @@ function compile<T>(value: unknown, type: number): Evaluator<T> {
   }
 }
 
-function run<T>(evaluator: Evaluator<T>, ctx: any): T | undefined {
+export function run<T>(evaluator: Evaluator<T>, ctx: any): T | undefined {
   if (!evaluator) {
     return undefined;
   }

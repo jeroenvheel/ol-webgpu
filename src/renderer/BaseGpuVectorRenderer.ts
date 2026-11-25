@@ -35,6 +35,7 @@ import {toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
 import {create as createMat4} from 'ol/vec/mat4.js';
 import {FeatureBatch} from '../render/batch.js';
 import {InstructionBuilder, InstructionJob, pause} from '../render/instructions.js';
+import {featureZIndex} from '../render/order.js';
 import {Picker} from '../render/picking.js';
 import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
 import GpuText, {type LabelFrame, resolveFrameLabels} from '../text/GpuText.js';
@@ -71,6 +72,12 @@ export interface GpuVectorRendererOptions extends WorkerOptions {
    * as ol's WebGL layers draw them.
    */
   smoothFill?: boolean;
+  /**
+   * The order of the features of the layer: a function that compares two
+   * features, as for ol's Canvas vector layer. Features that come first are
+   * drawn first, below the others of their kind (see order.ts).
+   */
+  renderOrder?: ((a: FeatureLike, b: FeatureLike) => number) | null;
 }
 
 /** The sub passes of a style pass and the buffers each draws, in draw order. */
@@ -218,6 +225,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   protected readonly preserveDrawingBuffer: boolean;
   protected readonly antialias: boolean;
   private readonly smoothFill: boolean;
+  private renderOrder: ((a: FeatureLike, b: FeatureLike) => number) | null;
+  /** The zoom of the last frame, for a `z-index` that depends on it. */
+  private lastZoom = 0;
   /** Last rebuild statistics. */
   stats: RebuildStats | null = null;
   /** Buffer builds started so far (for tests and benchmarks). */
@@ -286,8 +296,10 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.preserveDrawingBuffer = this.spec.preserveDrawingBuffer;
     this.antialias = this.spec.antialias;
     this.smoothFill = !!options.smoothFill;
+    this.renderOrder = options.renderOrder ?? null;
     this.passes = buildStylePasses(this.style, this.variables, this.smoothFill);
     this.instructions = new InstructionBuilder(this.passes.customAttributes);
+    this.applyOrder();
     this.uniformState = new UniformState(this.passes.uniforms);
     this.uniformState.onPendingImage = (image) => this.awaitImage(image);
     this.worker = WorkerClient.shared(options);
@@ -317,6 +329,20 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   /** Prepare backend resources; return false while not ready (e.g. async WebGPU device). */
   protected abstract prepareBackend(frameState: FrameState): boolean;
+  /** Tells the instruction builder the order of the features: `z-index` of the style, then `renderOrder`. */
+  private applyOrder() {
+    const z = featureZIndex(toFlatStyleLike(this.style as any) as FlatStyleLike, this.variables, () => this.lastZoom);
+    this.instructions.setOrder(z || this.renderOrder ? {key: z ? (feature) => z.of(feature) : null, volatile: !!z?.volatile, compare: this.renderOrder} : null);
+  }
+
+  /** Another order for the features of the layer (see the `renderOrder` option). */
+  setRenderOrder(renderOrder: ((a: FeatureLike, b: FeatureLike) => number) | null) {
+    this.renderOrder = renderOrder;
+    this.applyOrder();
+    this.invalidate();
+    this.getLayer()?.changed();
+  }
+
   /** Compile programs / pipelines for the current `passes`. */
   protected abstract applyPasses(): void;
   /**
@@ -413,6 +439,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.disposeBuffers();
     this.updateTextMode();
     this.instructions = new InstructionBuilder(this.passes.customAttributes);
+    this.applyOrder();
     this.invalidate(); // the attribute layout changed
   }
 
@@ -515,6 +542,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   }
 
   override prepareFrame(frameState: FrameState): boolean {
+    this.lastZoom = frameState.viewState.zoom;
     this.updateSurface(frameState);
     const prepared = this.prepareBackend(frameState) && this.prepareData(frameState);
     this.updateReady();

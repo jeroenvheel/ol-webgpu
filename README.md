@@ -32,7 +32,10 @@ map.addLayer(layer);
   Extra options: `antialias` (default `false`), `smoothFill` (default
   `false`: fills without a stroke fade out over one pixel outside the
   polygon instead of ending in stairs, at about the cost of a stroke; see
-  [bench/fixes-2026-11-24.md](bench/fixes-2026-11-24.md)), `preserveDrawingBuffer`
+  [bench/fixes-2026-11-24.md](bench/fixes-2026-11-24.md)), `renderOrder` (a
+  function that compares two features, as for ol's Canvas vector layer; a
+  `z-index` in the style goes before it and orders the features too),
+  `preserveDrawingBuffer`
   (default `true`, needed for map export), `wasmUrl`, `shaderWasmUrl`, and on
   `GpuVectorLayer` `backend` (`'auto'` (default), `'webgpu'` or `'webgl2'`).
 - `text-*` styles are drawn on the GPU from a glyph atlas (`text: 'gpu'`, the

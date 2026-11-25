@@ -44,6 +44,16 @@ interface Batch {
 
 export type InstructionKind = 'points' | 'lines' | 'polygons';
 
+/** The order of the features in the instructions, when it is not the order of the batch (see order.ts). */
+export interface InstructionOrder {
+  /** A number per feature: lower ones come first. */
+  key: ((feature: any) => number) | null;
+  /** The numbers do not follow from the features alone: they are not kept between builds. */
+  volatile: boolean;
+  /** Compares two features with the same number (the `renderOrder` of the layer). */
+  compare: ((a: any, b: any) => number) | null;
+}
+
 /** Instructions of one kind in the making (see `InstructionBuilder.start`). */
 export interface InstructionRun {
   kind: InstructionKind;
@@ -123,6 +133,106 @@ export class InstructionBuilder {
    * null and the caller uses ol's.
    */
   private usable = true;
+  private order: InstructionOrder | null = null;
+  /** Per ref: the number of `order.key` for its feature, where `keyKnown` is 1. */
+  private keys = new Float64Array(0);
+  private keyKnown = new Uint8Array(0);
+
+  /** Sets the order of the features in the instructions (null: as they are in the batch). */
+  setOrder(order: InstructionOrder | null) {
+    this.order = order && (order.key || order.compare) ? order : null;
+    this.keys = new Float64Array(0);
+    this.keyKnown = new Uint8Array(0);
+  }
+
+  /** The entries of a batch in the order to draw them in. */
+  private ordered(entries: BatchEntry[]): BatchEntry[] {
+    const order = this.order;
+    if (!order || entries.length < 2) {
+      return entries;
+    }
+    const n = entries.length;
+    const z = new Float64Array(n);
+    if (order.key) {
+      if (order.volatile) {
+        this.keyKnown.fill(0);
+      }
+      for (let i = 0; i < n; i++) {
+        const ref = entries[i].ref ?? 0;
+        if (ref >= this.keyKnown.length) {
+          const capacity = Math.max(this.keyKnown.length * 2, ref + 1, 1024);
+          const keys = new Float64Array(capacity);
+          keys.set(this.keys);
+          this.keys = keys;
+          const known = new Uint8Array(capacity);
+          known.set(this.keyKnown);
+          this.keyKnown = known;
+        }
+        if (this.keyKnown[ref] !== 1) {
+          this.keys[ref] = order.key(entries[i].feature);
+          this.keyKnown[ref] = 1;
+        }
+        z[i] = this.keys[ref];
+      }
+    }
+    const compare = order.compare;
+    if (!compare) {
+      // mostly they are in order already (all the same number, or as they came)
+      let sorted = true;
+      for (let i = 1; i < n && sorted; i++) {
+        sorted = z[i] >= z[i - 1];
+      }
+      if (sorted) {
+        return entries;
+      }
+    }
+    const out: BatchEntry[] = new Array(n);
+    if (!compare) {
+      // By number alone, without a comparison per pair: the different numbers in
+      // order (the sort of a typed array), the place of every entry among them,
+      // and then the entries per number, in their own order.
+      const different = z.slice().sort();
+      let m = 0;
+      for (let i = 0; i < n; i++) {
+        if (i === 0 || different[i] !== different[m - 1]) {
+          different[m++] = different[i];
+        }
+      }
+      const rank = new Uint32Array(n);
+      const starts = new Uint32Array(m + 1);
+      for (let i = 0; i < n; i++) {
+        const value = z[i];
+        let low = 0;
+        let high = m - 1;
+        while (low < high) {
+          const middle = (low + high) >> 1;
+          if (different[middle] < value) {
+            low = middle + 1;
+          } else {
+            high = middle;
+          }
+        }
+        rank[i] = low;
+        starts[low + 1]++;
+      }
+      for (let r = 0; r < m; r++) {
+        starts[r + 1] += starts[r];
+      }
+      for (let i = 0; i < n; i++) {
+        out[starts[rank[i]]++] = entries[i];
+      }
+      return out;
+    }
+    const index = new Uint32Array(n);
+    for (let i = 0; i < n; i++) {
+      index[i] = i;
+    }
+    index.sort((a, b) => z[a] - z[b] || (compare ? compare(entries[a].feature, entries[b].feature) : 0) || a - b);
+    for (let i = 0; i < n; i++) {
+      out[i] = entries[index[i]];
+    }
+    return out;
+  }
 
   constructor(customAttributes: Record<string, AttributeDefinition>) {
     let customSize = 0;
@@ -139,6 +249,8 @@ export class InstructionBuilder {
   reset() {
     this.values = new Float32Array(0);
     this.known = new Uint8Array(0);
+    this.keys = new Float64Array(0);
+    this.keyKnown = new Uint8Array(0);
   }
 
   /**
@@ -151,6 +263,9 @@ export class InstructionBuilder {
     const ref = entry?.ref;
     if (ref !== undefined && ref < this.known.length) {
       this.known[ref] = 0;
+    }
+    if (ref !== undefined && ref < this.keyKnown.length) {
+      this.keyKnown[ref] = 0;
     }
   }
 
@@ -211,7 +326,7 @@ export class InstructionBuilder {
     return {
       kind,
       transform,
-      entries: Object.values(batch.entries), // in the order of ol's for-in, and much faster
+      entries: this.ordered(Object.values(batch.entries)), // in the order of ol's for-in (and much faster), unless an order is set
       n: 0,
       k: 0,
       out: this.usable ? new Float32Array(length) : null,

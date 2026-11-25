@@ -9,6 +9,7 @@ import {Attributes, convertStyleToShaders, toFlatStyleLike} from 'ol/render/webg
 import {stringToGlsl} from 'ol/expr/gpu.js';
 import {getCustomAttributesSize} from 'ol/render/webgl/renderinstructions.js';
 import {hasTextStyle} from 'ol/render/webgl/textUtil.js';
+import {styleOrder} from './order.js';
 
 /** One float attribute in an interleaved buffer; `name: null` is padding. */
 export interface AttributeDesc {
@@ -164,6 +165,13 @@ export function buildStylePasses(style: FlatStyleLike, variables: Record<string,
     }
     return pass;
   });
+
+  // styles with a number as `z-index` are drawn in the order of those numbers
+  const order = styleOrder(style);
+  if (order && order.length === passes.length) {
+    const inOrder = order.map((position) => passes[position]);
+    passes.splice(0, passes.length, ...inOrder);
+  }
 
   const flat = toFlatStyleLike(style as any);
   return {

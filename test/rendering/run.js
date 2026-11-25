@@ -63,7 +63,7 @@ const server = await createServer({
   root: here,
   logLevel: 'warn',
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
-  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'smooth.ts', 'workers.ts', 'slices.ts', 'renderfeature.ts', 'rebuild.ts']},
+  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'smooth.ts', 'workers.ts', 'slices.ts', 'order.ts', 'renderfeature.ts', 'rebuild.ts']},
   worker: {format: 'es'},
   plugins: [
     {
@@ -646,6 +646,18 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
       extra[layer] = {'slices page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
     }
   }
+  // the order features are drawn in (order.ts)
+  const ordered = {};
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    errors.length = 0;
+    await page.goto(`${base}order.html?layer=${layer}`);
+    try {
+      await page.waitForFunction(() => window.__order, null, {timeout: 60_000, polling: 50});
+      ordered[layer] = await page.evaluate(() => window.__order);
+    } catch {
+      ordered[layer] = {'order page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
+    }
+  }
   // smoothFill (smooth.ts)
   const smooth = {};
   for (const layer of layers.filter((l) => l !== 'ol')) {
@@ -660,7 +672,7 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
   }
   const checkNames = [...new Set(Object.values(checks).flatMap((c) => Object.keys(c)))];
   // the checks of smooth.ts are of the two layers only
-  for (const pages of [smooth, extra]) {
+  for (const pages of [smooth, extra, ordered]) {
     for (const name of new Set(Object.values(pages).flatMap((c) => Object.keys(c)))) {
       checkNames.push(name);
       for (const run of Object.keys(checks)) {
