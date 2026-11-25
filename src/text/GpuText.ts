@@ -15,6 +15,7 @@ import type VectorSource from 'ol/source/Vector.js';
 import type {FlatStyleLike} from 'ol/style/flat.js';
 import {getUid} from 'ol/util.js';
 import {type SymbolEvaluator, buildSymbolEvaluator} from '../render/symbols.js';
+import {FADE, HIDDEN, SHOWN, fadeAlpha, fadeFrom} from './shaders.js';
 import {worldOf} from '../render/uniforms.js';
 import {type AtlasPage, sharedAtlas} from './atlas.js';
 import {Occupancy, selectCandidates} from './declutter.js';
@@ -23,8 +24,6 @@ import {type TextEvaluator, buildTextEvaluator} from './style.js';
 
 const NONE: ReadonlySet<FeatureLike> = new Set();
 
-/** Milliseconds a label takes to fade in or out when decluttering changes. */
-const FADE = 150;
 /** Main-thread milliseconds per frame for laying out labels: first layout, view still, view moving. */
 const BUDGET_FIRST = 50;
 const BUDGET_STILL = 10;
@@ -39,17 +38,26 @@ const RESOLVE_INTERVAL = 120;
 export interface LabelWorld {
   /** Number of the world copy (0 is the central one). */
   world: number;
-  /** Opacity per glyph instance. */
+  /**
+   * The fade per glyph instance (see `SHOWN` in shaders.ts): the shader
+   * makes the opacity of it. Glyphs from `dirtyFrom` to before `dirtyTo`
+   * changed since the backend uploaded them; the backend sets the two to
+   * `Infinity` and 0 when it has.
+   */
   opacity: Float32Array;
+  dirtyFrom: number;
+  dirtyTo: number;
   /** Per label of a set with two directions: whether the second one is shown, and the view rotation that was decided for. */
   second: Uint8Array;
   rotation: number;
   /** Increases when `opacity` changes. */
   version: number;
-  /** Per label: fade state 0..1 and whether it should be shown. */
-  alpha: Float32Array;
+  /** Per label: its fade (as the glyphs have it) and whether it should be shown. */
+  fade: Float32Array;
   target: Uint8Array;
   fading: boolean;
+  /** The time (as `u_time`) at which the last fade is over. */
+  fadeEnd: number;
   /** Show the next decluttering result at once (nothing to fade from). */
   snap: boolean;
 }
@@ -61,6 +69,8 @@ export interface LabelFrame {
   page: AtlasPage;
   worlds: LabelWorld[];
   worldWidth: number;
+  /** The time of the frame, for the fades (seconds, see `SHOWN` in shaders.ts). */
+  time: number;
 }
 
 /** Numbers of the last layout and decluttering, for benchmarks and debugging. */
@@ -144,8 +154,9 @@ export default class GpuText {
   hiddenSymbols: ReadonlySet<FeatureLike> = NONE;
   symbolVersion = 0;
   private styleVersion = 0;
-  private lastFrameTime = 0;
-  private wasFading = false;
+  /** The time of the frame in the making, in seconds since `epoch` (milliseconds of the frame state). */
+  private time = 1;
+  private epoch = 0;
   private readonly unlistenAtlas: () => void;
   /** Screen boxes of the shown labels, for hit detection. */
   private hitCache: {view: string; version: number; boxes: Float64Array; labels: Uint32Array} | null = null;
@@ -382,6 +393,10 @@ export default class GpuText {
    * keep their fade state) and matches the world copies the frame shows.
    */
   begin(layer: unknown, frameState: FrameState) {
+    if (!this.epoch) {
+      this.epoch = frameState.time - 1000;
+    }
+    this.time = (frameState.time - this.epoch) / 1000;
     // per world, how visible the labels are: by their key and by what they say and where
     let carried: Map<number, [Map<number, number>, Map<number, number>]> | null = null;
     const next = this.next;
@@ -394,9 +409,10 @@ export default class GpuText {
           const alphas = new Map<number, number>();
           const same = new Map<number, number>();
           for (let i = 0; i < previous.count; i++) {
-            if (w.alpha[i] > 0) {
-              alphas.set(previous.keys[i], w.alpha[i]);
-              same.set(previous.content[i], w.alpha[i]);
+            const alpha = fadeAlpha(w.fade[i], this.time);
+            if (alpha > 0) {
+              alphas.set(previous.keys[i], alpha);
+              same.set(previous.content[i], alpha);
             }
           }
           carried.set(w.world, [alphas, same]);
@@ -405,6 +421,10 @@ export default class GpuText {
       this.set = next.set;
       this.setKey = next.key;
       this.rejectedSymbols = next.rejected;
+      // All fades are written anew for the set: time starts over, so the 32 bit
+      // floats of the shader keep telling milliseconds apart.
+      this.epoch = frameState.time - 1000;
+      this.time = 1;
       this.worlds = [];
       this.shownVersion++;
     }
@@ -422,16 +442,18 @@ export default class GpuText {
       let w = this.worlds.find((x) => x.world === world);
       if (!w) {
         changed = true;
-        const alpha = new Float32Array(set.count);
+        const fade = new Float32Array(set.count).fill(this.declutter ? HIDDEN : SHOWN);
         const from = carried?.get(world);
-        if (!this.declutter) {
-          alpha.fill(1);
-        } else if (from) {
+        if (this.declutter && from) {
           // A label of another feature object that says the same at the same place
           // is the label that was there (a source that loaded its features again).
           const [alphas, same] = from;
           for (let i = 0; i < set.count; i++) {
-            alpha[i] = alphas.get(set.keys[i]) ?? same.get(set.content[i]) ?? 0;
+            const alpha = alphas.get(set.keys[i]) ?? same.get(set.content[i]);
+            if (alpha !== undefined) {
+              // on its way in, until decluttering says otherwise
+              fade[i] = fadeFrom(alpha, this.time, true);
+            }
           }
         }
         w = {
@@ -440,9 +462,12 @@ export default class GpuText {
           second: new Uint8Array(set.twoWay ? set.count : 0),
           rotation: this.rotation,
           version: 0,
-          alpha,
+          dirtyFrom: Infinity,
+          dirtyTo: 0,
+          fade,
           target: new Uint8Array(set.count).fill(this.declutter ? 0 : 1),
           fading: false,
+          fadeEnd: 0,
           // the first labels, and a world copy that scrolls into view, do not fade in
           snap: !from,
         };
@@ -461,32 +486,39 @@ export default class GpuText {
     return `${this.set?.id ?? 0}:${this.worlds.map((w) => w.world).join('/')}`;
   }
 
+  /** Writes the fades of all labels to their glyphs. */
   private writeOpacity(w: LabelWorld) {
     const set = this.set!;
-    const {glyphStart, glyphEnd} = set;
+    if (set.twoWay) {
+      w.rotation = this.rotation;
+    }
+    for (let i = 0; i < set.count; i++) {
+      this.writeLabel(w, i);
+    }
+  }
+
+  /** Writes the fade of a label to its glyphs: only those are uploaded again. */
+  private writeLabel(w: LabelWorld, i: number) {
+    const set = this.set!;
+    const from = set.glyphStart[i];
+    const to = set.glyphEnd[i];
+    const fade = w.fade[i];
     if (set.twoWay) {
       // of a label along a line, the glyphs that are upright for this view
-      const {glyphMid, along} = set;
-      const rotation = this.rotation;
-      w.rotation = rotation;
-      for (let i = 0; i < set.count; i++) {
-        const a = w.alpha[i];
-        const second = reads(along[i * 2], along[i * 2 + 1], set.rotation, rotation);
-        w.second[i] = second ? 1 : 0;
-        const mid = glyphMid[i];
-        for (let g = glyphStart[i], e = glyphEnd[i]; g < e; g++) {
-          w.opacity[g] = g < mid === second ? 0 : a;
-        }
+      const second = reads(set.along[i * 2], set.along[i * 2 + 1], set.rotation, this.rotation);
+      w.second[i] = second ? 1 : 0;
+      const mid = set.glyphMid[i];
+      for (let g = from; g < to; g++) {
+        w.opacity[g] = g < mid === second ? HIDDEN : fade;
       }
     } else {
-      for (let i = 0; i < set.count; i++) {
-        const a = w.alpha[i];
-        for (let g = glyphStart[i], e = glyphEnd[i]; g < e; g++) {
-          w.opacity[g] = a;
-        }
-      }
+      w.opacity.fill(fade, from, to);
     }
-    w.version++;
+    if (to > from) {
+      w.dirtyFrom = Math.min(w.dirtyFrom, from);
+      w.dirtyTo = Math.max(w.dirtyTo, to);
+      w.version++;
+    }
   }
 
   /** The view turned: labels along lines that are upside down now show their other glyphs. */
@@ -497,8 +529,7 @@ export default class GpuText {
     w.rotation = rotation;
     for (let i = 0; i < set.count; i++) {
       if ((reads(along[i * 2], along[i * 2 + 1], set.rotation, rotation) ? 1 : 0) !== w.second[i]) {
-        this.writeOpacity(w);
-        return;
+        this.writeLabel(w, i);
       }
     }
   }
@@ -525,7 +556,7 @@ export default class GpuText {
       const worldOffset = w.world * this.worldWidth;
       const target = w.target;
       for (let i = 0; i < set.count; i++) {
-        was[i] = w.alpha[i] > 0 || target[i] === 1 ? 1 : 0;
+        was[i] = target[i] === 1 || fadeAlpha(w.fade[i], this.time) > 0 ? 1 : 0;
       }
       // labels already shown claim their place first, so labels do not flicker while the view moves
       for (let pass = 1; pass >= 0; pass--) {
@@ -565,19 +596,25 @@ export default class GpuText {
           }
         }
       }
-      let fading = false;
+      // A label that changes sides starts its fade here, from how visible it is now:
+      // one number per glyph, and the shader does the rest (see SHOWN in shaders.ts).
+      const time = this.time;
       for (let i = 0; i < set.count; i++) {
-        if (w.snap) {
-          w.alpha[i] = target[i];
-        } else if (w.alpha[i] !== target[i]) {
-          fading = true;
+        const show = target[i] === 1;
+        const fade = w.fade[i];
+        if (show === fade >= 0) {
+          continue; // on its way there already, or there
         }
+        if (w.snap) {
+          w.fade[i] = show ? SHOWN : HIDDEN;
+        } else {
+          w.fade[i] = fadeFrom(fadeAlpha(fade, time), time, show);
+          w.fadeEnd = time + FADE / 1000;
+        }
+        this.writeLabel(w, i);
       }
-      if (w.snap) {
-        w.snap = false;
-        this.writeOpacity(w);
-      }
-      w.fading = fading;
+      w.snap = false;
+      w.fading = time < w.fadeEnd;
     }
     this.shownVersion++;
     this.updateHiddenSymbols();
@@ -636,41 +673,18 @@ export default class GpuText {
     if (!set || !this.worlds.length) {
       return null;
     }
-    const now = frameState.time;
-    const anyFading = this.worlds.some((w) => w.fading);
-    // a fade starts in the frame that finds it: the time since the last drawn frame does not count
-    const step = this.wasFading ? Math.min(1, Math.max(0, (now - this.lastFrameTime) / FADE)) : 0;
-    this.lastFrameTime = now;
-    this.wasFading = anyFading;
     for (const w of this.worlds) {
       if (set.twoWay && w.rotation !== this.rotation) {
         this.turn(w);
       }
-      if (!w.fading) {
-        continue;
-      }
-      let fading = false;
-      if (step > 0) {
-        for (let i = 0; i < set.count; i++) {
-          const a = w.alpha[i];
-          const t = w.target[i];
-          if (a !== t) {
-            const v = t > a ? Math.min(t, a + step) : Math.max(t, a - step);
-            w.alpha[i] = v;
-            fading ||= v !== t;
-          }
-        }
-        this.writeOpacity(w);
-      } else {
-        fading = true;
-      }
-      w.fading = fading;
-      if (fading) {
+      // the fades run in the shader: frames are all they need
+      w.fading = this.time < w.fadeEnd;
+      if (w.fading) {
         frameState.animate = true;
       }
     }
     // labels without glyphs stand for symbols (see render/symbols.ts): they fade as the others, and draw nothing here
-    return set.glyphCount ? {set, page: set.page, worlds: this.worlds, worldWidth: this.worldWidth} : null;
+    return set.glyphCount ? {set, page: set.page, worlds: this.worlds, worldWidth: this.worldWidth, time: this.time} : null;
   }
 
   // --- hit detection -------------------------------------------------------

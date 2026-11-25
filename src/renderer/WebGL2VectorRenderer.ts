@@ -12,7 +12,7 @@ import {TEXT_OVERLAY_GLSL, type TextImage} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
 import type {AtlasPage} from '../text/atlas.js';
 import {INSTANCE_ATTRIBUTES, INSTANCE_FLOATS, type LabelSet} from '../text/layout.js';
-import {LABEL_GLSL, LABEL_UNIFORMS, LABEL_UNIFORM_FLOATS, QUAD, writeLabelUniforms} from '../text/shaders.js';
+import {LABEL_GLSL, LABEL_UNIFORMS, LABEL_UNIFORM_FLOATS, QUAD, fadeUploads, writeLabelUniforms} from '../text/shaders.js';
 import type {BufferSet} from '../worker/protocol.js';
 import {linkProgram, uploadCanvas} from '../webgl2/program.js';
 import {WebGL2Surface} from '../webgl2/surface.js';
@@ -593,13 +593,29 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
         o = {buffer, vao, version: -1, set: -1};
         r.opacity.set(w.world, o);
       }
-      if (o.version !== w.version || o.set !== set.id) {
-        o.version = w.version;
+      if (o.set !== set.id) {
+        // the fades of another set of labels: all of them
         o.set = set.id;
+        o.version = w.version;
         gl.bindBuffer(gl.ARRAY_BUFFER, o.buffer);
         gl.bufferData(gl.ARRAY_BUFFER, w.opacity, gl.DYNAMIC_DRAW);
+        fadeUploads.glyphs += w.opacity.length;
+        fadeUploads.uploads++;
+        w.dirtyFrom = Infinity;
+        w.dirtyTo = 0;
+      } else if (o.version !== w.version) {
+        // only the glyphs of labels whose fade changed
+        o.version = w.version;
+        if (w.dirtyTo > w.dirtyFrom) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, o.buffer);
+          gl.bufferSubData(gl.ARRAY_BUFFER, w.dirtyFrom * 4, w.opacity, w.dirtyFrom, w.dirtyTo - w.dirtyFrom);
+          fadeUploads.glyphs += w.dirtyTo - w.dirtyFrom;
+          fadeUploads.uploads++;
+        }
+        w.dirtyFrom = Infinity;
+        w.dirtyTo = 0;
       }
-      writeLabelUniforms(u, 0, frameState, set, w.world * frame.worldWidth, frame.page.canvas.width, frame.page.canvas.height);
+      writeLabelUniforms(u, 0, frameState, set, w.world * frame.worldWidth, frame.page.canvas.width, frame.page.canvas.height, frame.time);
       let at = 0;
       for (const [name, size] of LABEL_UNIFORMS) {
         const location = r.uniforms[name];

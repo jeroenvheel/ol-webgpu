@@ -19,15 +19,51 @@ export const LABEL_UNIFORMS: ReadonlyArray<readonly [string, number]> = [
   ['u_atlasSize', 2],
   ['u_rotation', 1],
   ['u_pixelRatio', 1],
+  ['u_time', 1],
 ];
 /** Floats of the uniform block (48 bytes). */
-export const LABEL_UNIFORM_FLOATS = 12;
+/** With padding to a whole number of `vec4`s, as the uniform block of WGSL has it. */
+export const LABEL_UNIFORM_FLOATS = 16;
+
+/** Milliseconds a label takes to fade in or out when decluttering changes. */
+export const FADE = 150;
+
+/**
+ * The fade of a glyph is a number, its `a_opacity`: zero or more for a
+ * glyph that fades in, from the time (seconds, as `u_time`) at which it
+ * would have been at nothing; below zero for one that fades out, from minus
+ * the time at which it would have been in full. So a glyph that is shown
+ * has `SHOWN`, one that is not has `HIDDEN`, and a fade is one number
+ * written once: the shader works out the rest for every frame.
+ */
+/** Fades uploaded so far, in glyphs and in uploads (for tests and benchmarks). */
+export const fadeUploads = {glyphs: 0, uploads: 0};
+
+export const SHOWN = 0;
+export const HIDDEN = -1e-6;
+
+/** The fade of a glyph that is at `alpha` at `time` and on its way to shown or hidden. */
+export function fadeFrom(alpha: number, time: number, show: boolean): number {
+  const seconds = FADE / 1000;
+  if (show) {
+    return alpha >= 1 ? SHOWN : Math.max(SHOWN, time - alpha * seconds);
+  }
+  return alpha <= 0 ? HIDDEN : Math.min(HIDDEN, -(time - (1 - alpha) * seconds));
+}
+
+/** How visible (0 to 1) a glyph with a fade is at `time`: what the shaders compute. */
+export function fadeAlpha(fade: number, time: number): number {
+  const seconds = FADE / 1000;
+  const progress = Math.min(1, Math.max(0, (time - Math.abs(fade)) / seconds));
+  return fade >= 0 ? progress : 1 - progress;
+}
 
 const projection = createTransform();
 
 /**
  * Uniforms for one world copy: matrix (4), translate (2), viewport in CSS
- * pixels (2), atlas size (2), view rotation, pixel ratio. The layer
+ * pixels (2), atlas size (2), view rotation, pixel ratio, the time of the
+ * frame for the fades (seconds, see `SHOWN`). The layer
  * opacity is not in here: it is applied when the layer image is composited.
  * The anchors are relative to the set's origin; the origin is projected
  * here with double precision, so labels stay exact at any zoom.
@@ -40,6 +76,7 @@ export function writeLabelUniforms(
   worldOffset: number,
   atlasWidth: number,
   atlasHeight: number,
+  time: number,
 ) {
   const p = makeProjectionTransform(frameState, projection);
   const x = set.origin[0] + worldOffset;
@@ -56,6 +93,7 @@ export function writeLabelUniforms(
   out[at + 9] = atlasHeight;
   out[at + 10] = frameState.viewState.rotation;
   out[at + 11] = frameState.pixelRatio;
+  out[at + 12] = time;
 }
 
 /** Corners of the unit quad, as a triangle strip. */
@@ -79,6 +117,7 @@ uniform vec2 u_viewport;
 uniform vec2 u_atlasSize;
 uniform float u_rotation;
 uniform float u_pixelRatio;
+uniform float u_time;
 out vec4 v_color;
 out vec2 v_texCoord;
 out float v_channel;
@@ -92,7 +131,9 @@ vec2 rotate(vec2 v, float angle) {
 }
 
 void main() {
-  float alpha = a_color.a * a_opacity;
+  // the fade (see SHOWN in shaders.ts)
+  float progress = clamp((u_time - abs(a_opacity)) / ${FADE / 1000}, 0.0, 1.0);
+  float alpha = a_color.a * (a_opacity >= 0.0 ? progress : 1.0 - progress);
   v_channel = a_angle.z;
   if (alpha <= 0.0) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -153,6 +194,7 @@ struct Uniforms {
   atlasSize: vec2<f32>,
   rotation: f32,
   pixelRatio: f32,
+  time: f32,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -186,7 +228,9 @@ fn vs(
   @location(8) opacity: f32,
 ) -> VertexOut {
   var out: VertexOut;
-  let alpha = color.a * opacity;
+  // the fade (see SHOWN in shaders.ts)
+  let progress = clamp((u.time - abs(opacity)) / ${FADE / 1000}, 0.0, 1.0);
+  let alpha = color.a * select(1.0 - progress, progress, opacity >= 0.0);
   out.channel = angle.z;
   if (alpha <= 0.0) {
     out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);

@@ -12,7 +12,7 @@ import {TEXT_OVERLAY_WGSL} from '../render/textOverlay.js';
 import {type ResolvedUniform, isTextureSource} from '../render/uniforms.js';
 import type {AtlasPage} from '../text/atlas.js';
 import {INSTANCE_ATTRIBUTES, INSTANCE_FLOATS, type LabelSet} from '../text/layout.js';
-import {LABEL_UNIFORM_FLOATS, LABEL_WGSL, QUAD, writeLabelUniforms} from '../text/shaders.js';
+import {LABEL_UNIFORM_FLOATS, LABEL_WGSL, QUAD, fadeUploads, writeLabelUniforms} from '../text/shaders.js';
 import {type ShaderTranslator, type WgslProgram, loadShaderTranslator} from '../wasm/shader.js';
 import {destroyAfterSubmit, flushSubmits, frameEncoder, getDevice, isWebGPUAvailable, onDeviceLost, preferredFormat} from '../webgpu/device.js';
 import {PREMULTIPLIED_BLEND, WebGPUSurface, compositePipeline} from '../webgpu/surface.js';
@@ -696,9 +696,24 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
         };
         r.opacity.set(w.world, o);
       }
-      if (o.version !== w.version) {
+      if (o.version === -1) {
+        // the fades of another set of labels: all of them
         o.version = w.version;
         device.queue.writeBuffer(o.buffer, 0, w.opacity);
+        fadeUploads.glyphs += w.opacity.length;
+        fadeUploads.uploads++;
+        w.dirtyFrom = Infinity;
+        w.dirtyTo = 0;
+      } else if (o.version !== w.version) {
+        // only the glyphs of labels whose fade changed
+        o.version = w.version;
+        if (w.dirtyTo > w.dirtyFrom) {
+          device.queue.writeBuffer(o.buffer, w.dirtyFrom * 4, w.opacity, w.dirtyFrom, w.dirtyTo - w.dirtyFrom);
+          fadeUploads.glyphs += w.dirtyTo - w.dirtyFrom;
+          fadeUploads.uploads++;
+        }
+        w.dirtyFrom = Infinity;
+        w.dirtyTo = 0;
       }
       opacityBuffers.push(o.buffer);
     }
@@ -717,7 +732,7 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       r.uniforms = device.createBuffer({size: Math.max(4, worlds.length) * r.slotSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'ol-webgpu label uniforms'});
     }
     worlds.forEach((w, i) => {
-      writeLabelUniforms(r.uniformData, i * floatsPerSlot, frameState, set, w.world * frame.worldWidth, atlas.canvas.width, atlas.canvas.height);
+      writeLabelUniforms(r.uniformData, i * floatsPerSlot, frameState, set, w.world * frame.worldWidth, atlas.canvas.width, atlas.canvas.height, frame.time);
     });
     device.queue.writeBuffer(r.uniforms, 0, r.uniformData, 0, worlds.length * floatsPerSlot);
     if (!r.group || r.groupResources[0] !== r.uniforms || r.groupResources[1] !== atlas.view) {

@@ -14,6 +14,7 @@ import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 import {sharedAtlas} from '../../src/text/atlas.js';
+import {fadeUploads} from '../../src/text/shaders.js';
 
 const params = new URLSearchParams(location.search);
 const Layer = params.get('layer') === 'webgpu' ? WebGPUVectorLayer : WebGL2VectorLayer;
@@ -328,6 +329,25 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
     const manyMs = performance.now() - manyStart;
     const before = drawn(...upper).count;
 
+    // a pan: labels come into view and fade in, others give way; how much of the fades is uploaded
+    const fadeStart = {...fadeUploads};
+    const centreNow = view.getCenter()!;
+    let fadeFrames = 0;
+    view.setCenter([centreNow[0] + 30, centreNow[1] + 20]);
+    for (; fadeFrames < 3 || !quiet(); fadeFrames++) {
+      await frame();
+    }
+    const lastLayer = map.getLayers().item(map.getLayers().getLength() - 1) as any;
+    const fades = {
+      glyphs: fadeUploads.glyphs - fadeStart.glyphs,
+      uploads: fadeUploads.uploads - fadeStart.uploads,
+      frames: fadeFrames,
+      // the glyphs the layer has: before, all of them were written and uploaded in every frame of a fade
+      of: lastLayer.getRenderer().gpuText.stats.glyphs as number,
+    };
+    view.setCenter(centreNow);
+    await settle();
+
     await loadFont('Label Font');
     const relayStart = performance.now();
     // until the labels are laid out with the new font, the ones on screen stay
@@ -338,7 +358,7 @@ const names = (pixel: number[], hitTolerance = 0) => map.getFeaturesAtPixel(pixe
       await frame();
     }
     // how long 40 000 labels take, for the report
-    (window as any).__labelTimes = {lines: lineLabelsMs, first: Math.round(manyMs), again: Math.round(performance.now() - relayStart), frames};
+    (window as any).__labelTimes = {fades, lines: lineLabelsMs, first: Math.round(manyMs), again: Math.round(performance.now() - relayStart), frames};
     const relaid = drawn(0, 180, 256, 256);
     check('a font of the labels starts the atlas over', atlas.generation === generation + 1 && relaid.count > 40 && relaid.alpha === 255, {
       before: generation,
