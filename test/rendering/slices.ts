@@ -24,7 +24,7 @@ for (let i = 0; i < COUNT; i++) {
   // all but the first two far outside the view: they only have to be built
   const x = i < 2 ? (i ? 60 : -60) : 1000 + (i % 1000) * 3;
   const y = i < 2 ? 0 : 1000 + Math.floor(i / 1000) * 3;
-  features.push(new Feature({geometry: new Point([x, y]), size: 3, name: `n${i}`}));
+  features.push(new Feature({geometry: new Point([x, y]), size: 3, name: `n${i}`, rank: (i * 7919) % COUNT}));
 }
 const source = new VectorSource({features, useSpatialIndex: false});
 const layer = new Layer({source, style: {'circle-radius': ['get', 'size'], 'circle-fill-color': '#d7191c'}});
@@ -103,6 +103,15 @@ const names = (x: number, y: number) => map.getFeaturesAtPixel([128 + x, 128 - y
     await settle();
     const both = {first: names(-60 + 10, 0), second: names(60 + 10, 0)};
     check('a change that comes during the slices is built too', both.first.length === 0 && both.second.join() === 'n1', both);
+
+    // renderOrder: the features are sorted in the slices too, and a change after that sorts only what changed
+    const sorted = await measure(() => layer.setRenderOrder((a, b) => a.get('rank') - b.get('rank')));
+    const resorted = await measure(() => features[0].set('rank', COUNT / 2 + 0.5));
+    results.times = {one, restyled, sorted, resorted};
+    check('renderOrder is sorted in slices, and a change sorts only what changed', sorted.slices > 20 && sorted.longTaskMs < sorted.ms / 4 && resorted.ms < sorted.ms / 2, {
+      sorted,
+      resorted,
+    });
   } catch (e) {
     check('no error', false, String(e));
   }

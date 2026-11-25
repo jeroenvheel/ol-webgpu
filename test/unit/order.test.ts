@@ -140,6 +140,60 @@ describe('InstructionBuilder with an order', () => {
     expect(key).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps the order of the last build: only what changed is compared again', () => {
+    const n = 2000;
+    const features = Array.from({length: n}, (_v, i) => point(i, {rank: (i * 7919) % n}));
+    const batch = batchOf(features);
+    const builder = new InstructionBuilder(custom);
+    const compare = vi.fn((a: Feature, b: Feature) => a.get('rank') - b.get('rank'));
+    builder.setOrder({key: null, volatile: false, compare});
+    const expected = () => features.map((f, i) => [f.get('rank'), i]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((p) => p[1]);
+    expect(xs(builder.points(batch.pointBatch, transform))).toEqual(expected());
+    expect(compare.mock.calls.length).toBeGreaterThan(n);
+    // the same batch again: nothing to compare
+    compare.mockClear();
+    expect(xs(builder.points(batch.pointBatch, transform))).toEqual(expected());
+    expect(compare).toHaveBeenCalledTimes(0);
+    // one feature changed (as the renderer does it), one removed, one added
+    builder.forget(batch as any, features[10]);
+    features[10].set('rank', 1500.5);
+    batch.changeFeature(features[10]);
+    builder.forget(batch as any, features[20]);
+    batch.removeFeature(features[20]);
+    const gone = features.splice(20, 1)[0];
+    const added = point(n, {rank: 3.5});
+    features.push(added);
+    batch.addFeature(added);
+    compare.mockClear();
+    const byX = features.map((f) => [f.get('rank'), (f.getGeometry() as Point).getCoordinates()[0]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((p) => p[1]);
+    expect(xs(builder.points(batch.pointBatch, transform))).toEqual(byX);
+    expect(gone.get('rank')).toBeDefined();
+    expect(compare.mock.calls.length).toBeLessThan(40);
+    // another comparison: everything is compared again
+    const other = vi.fn((a: Feature, b: Feature) => b.get('rank') - a.get('rank'));
+    builder.setOrder({key: null, volatile: false, compare: other});
+    builder.points(batch.pointBatch, transform);
+    expect(other.mock.calls.length).toBeGreaterThan(n);
+  });
+
+  it('makes the same instructions in slices', () => {
+    const n = 3000;
+    const features = Array.from({length: n}, (_v, i) => point(i, {z: i % 3, rank: (i * 7919) % n}));
+    const order = {key: (f: Feature) => f.get('z'), volatile: false, compare: (a: Feature, b: Feature) => a.get('rank') - b.get('rank')};
+    const whole = new InstructionBuilder(custom);
+    whole.setOrder(order);
+    const expected = xs(whole.points(batchOf(features).pointBatch, transform));
+    const sliced = new InstructionBuilder(custom);
+    sliced.setOrder(order);
+    const run = sliced.start('points', batchOf(features).pointBatch, transform);
+    let slices = 0;
+    while (!sliced.step(run, 0)) {
+      slices++; // a deadline that has passed: one stop at every look at the clock
+    }
+    expect(slices).toBeGreaterThan(20);
+    expect(xs(run.out)).toEqual(expected);
+  });
+
   it('asks again for every build when the numbers do not follow from the features alone', () => {
     const batch = batchOf([point(1, {z: 2}), point(2, {z: 1})]);
     const builder = new InstructionBuilder(custom);

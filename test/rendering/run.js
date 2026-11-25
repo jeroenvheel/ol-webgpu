@@ -639,7 +639,7 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
       if (times) {
         console.log(
           `  [${layer}] a layer of ${process.env.CI ? '400 000' : '1 000 000'} points: ${Object.entries(times)
-            .map(([what, t]) => `${what === 'one' ? 'one feature changed' : 'another style'}: built after ${t.ms} ms in ${t.slices} slices, longest frame ${t.longestFrame} ms, ${t.longTasks} long tasks (${t.longTaskMs} ms)`)
+            .map(([what, t]) => `${{one: 'one feature changed', restyled: 'another style', sorted: 'a renderOrder', resorted: 'one feature changed with it'}[what]}: built after ${t.ms} ms in ${t.slices} slices, longest frame ${t.longestFrame} ms, ${t.longTasks} long tasks (${t.longTaskMs} ms)`)
             .join('; ')}`,
         );
       }

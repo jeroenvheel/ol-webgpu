@@ -15,6 +15,7 @@ import {UNDEFINED_PROP_VALUE} from 'ol/expr/gpu.js';
 import type {Transform} from 'ol/transform.js';
 import {getUid} from 'ol/util.js';
 import type {AttributeDefinition} from './stylePasses.js';
+import {type Less, Merger, Sorter} from './sort.js';
 
 /** An entry of ol's MixedGeometryBatch. */
 interface BatchEntry {
@@ -54,11 +55,36 @@ export interface InstructionOrder {
   compare: ((a: any, b: any) => number) | null;
 }
 
+/** The entries of a batch being put in order (see `InstructionBuilder.startOrdering`). */
+interface Ordering {
+  kind: InstructionKind;
+  /** As they are in the batch. */
+  entries: BatchEntry[];
+  /** The number of each entry (null: there are none). */
+  z: Float64Array | null;
+  /** 0: the numbers, 1: who has a place from the last build, 2: sorting the others, 3: putting them among the first, 4: the result. */
+  phase: number;
+  /** Where the phase is. */
+  i: number;
+  others: number;
+  index: Uint32Array | null;
+  slots: Uint32Array | null;
+  sorter: Sorter | null;
+  merger: Merger | null;
+  /** The entries in order, and their numbers. */
+  result: BatchEntry[] | null;
+  resultZ: Float64Array | null;
+}
+
 /** Instructions of one kind in the making (see `InstructionBuilder.start`). */
 export interface InstructionRun {
   kind: InstructionKind;
   transform: Transform;
+  /** The entries in the order to draw them in, once `ordering` is done, and the number of each (null: all the same). */
   entries: BatchEntry[];
+  z: Float64Array | null;
+  /** Puts the entries in order, in slices (see `InstructionBuilder.startOrdering`); null when that is done or not needed. */
+  ordering: Ordering | null;
   /** The next entry, and where its instructions go. */
   n: number;
   k: number;
@@ -137,101 +163,255 @@ export class InstructionBuilder {
   /** Per ref: the number of `order.key` for its feature, where `keyKnown` is 1. */
   private keys = new Float64Array(0);
   private keyKnown = new Uint8Array(0);
+  /** Per kind and ref: the place of its entry in the order of the last build, where `known` is 1. */
+  private places: Partial<Record<InstructionKind, {at: Uint32Array; known: Uint8Array; count: number}>> = {};
 
   /** Sets the order of the features in the instructions (null: as they are in the batch). */
   setOrder(order: InstructionOrder | null) {
     this.order = order && (order.key || order.compare) ? order : null;
     this.keys = new Float64Array(0);
     this.keyKnown = new Uint8Array(0);
+    this.places = {};
   }
 
-  /** The entries of a batch in the order to draw them in. */
-  private ordered(entries: BatchEntry[]): BatchEntry[] {
+  /**
+   * Puts the entries of a batch in the order to draw them in, in slices:
+   * `stepOrdering` until it returns true.
+   *
+   * With a comparison of the app the order of the last build is kept per
+   * kind: entries that are in the batch as they were then are in that order
+   * still, and only the others are sorted and put among them.
+   */
+  private startOrdering(kind: InstructionKind, entries: BatchEntry[]): Ordering | null {
     const order = this.order;
     if (!order || entries.length < 2) {
-      return entries;
+      return null;
     }
-    const n = entries.length;
-    const z = new Float64Array(n);
-    if (order.key) {
-      if (order.volatile) {
-        this.keyKnown.fill(0);
+    if (order.key && order.volatile) {
+      this.keyKnown.fill(0);
+    }
+    return {kind, entries, z: order.key ? new Float64Array(entries.length) : null, phase: 0, i: 0, others: 0, index: null, slots: null, sorter: null, merger: null, result: null, resultZ: null};
+  }
+
+  /** Works until `deadline`; true when `result` and `resultZ` are there. */
+  private stepOrdering(o: Ordering, deadline: number): boolean {
+    const order = this.order!;
+    if (o.phase === 0) {
+      if (order.key && !this.stepKeys(o, order.key, deadline)) {
+        return false;
       }
-      for (let i = 0; i < n; i++) {
-        const ref = entries[i].ref ?? 0;
-        if (ref >= this.keyKnown.length) {
-          const capacity = Math.max(this.keyKnown.length * 2, ref + 1, 1024);
-          const keys = new Float64Array(capacity);
-          keys.set(this.keys);
-          this.keys = keys;
-          const known = new Uint8Array(capacity);
-          known.set(this.keyKnown);
-          this.keyKnown = known;
+      if (!order.compare) {
+        this.orderByNumber(o);
+        return true;
+      }
+      o.phase = 1;
+    }
+    if (o.phase === 1) {
+      if (!this.stepPlaces(o, order, deadline)) {
+        return false;
+      }
+      o.phase = 2;
+    }
+    if (o.phase === 2) {
+      if (!o.sorter!.step(deadline)) {
+        return false;
+      }
+      o.sorter = null;
+      o.phase = 3;
+    }
+    if (o.phase === 3) {
+      if (!o.merger!.step(deadline)) {
+        return false;
+      }
+      o.phase = 4;
+    }
+    return this.stepResult(o, deadline);
+  }
+
+  /** The numbers of the entries (`z`), asked once per feature. */
+  private stepKeys(o: Ordering, key: (feature: any) => number, deadline: number): boolean {
+    const entries = o.entries;
+    const z = o.z!;
+    for (let i = o.i, n = entries.length; i < n; i++) {
+      const ref = entries[i].ref ?? 0;
+      if (ref >= this.keyKnown.length) {
+        const capacity = Math.max(this.keyKnown.length * 2, ref + 1, 1024);
+        const keys = new Float64Array(capacity);
+        keys.set(this.keys);
+        this.keys = keys;
+        const known = new Uint8Array(capacity);
+        known.set(this.keyKnown);
+        this.keyKnown = known;
+      }
+      if (this.keyKnown[ref] !== 1) {
+        this.keys[ref] = key(entries[i].feature);
+        this.keyKnown[ref] = 1;
+        z[i] = this.keys[ref];
+        if (i % CLOCK_EVERY === 0 && performance.now() >= deadline) {
+          o.i = i + 1;
+          return false;
         }
-        if (this.keyKnown[ref] !== 1) {
-          this.keys[ref] = order.key(entries[i].feature);
-          this.keyKnown[ref] = 1;
-        }
+      } else {
         z[i] = this.keys[ref];
       }
     }
-    const compare = order.compare;
-    if (!compare) {
-      // mostly they are in order already (all the same number, or as they came)
-      let sorted = true;
-      for (let i = 1; i < n && sorted; i++) {
-        sorted = z[i] >= z[i - 1];
-      }
-      if (sorted) {
-        return entries;
-      }
+    return true;
+  }
+
+  /** The order by number alone, without a comparison per pair. */
+  private orderByNumber(o: Ordering) {
+    const entries = o.entries;
+    const z = o.z!;
+    const n = entries.length;
+    // mostly they are in order already (all the same number, or as they came)
+    let sorted = true;
+    for (let i = 1; i < n && sorted; i++) {
+      sorted = z[i] >= z[i - 1];
     }
+    if (sorted) {
+      o.result = entries;
+      o.resultZ = z;
+      return;
+    }
+    // The different numbers in order (the sort of a typed array), the place of every
+    // entry among them, and then the entries per number, in their own order.
     const out: BatchEntry[] = new Array(n);
-    if (!compare) {
-      // By number alone, without a comparison per pair: the different numbers in
-      // order (the sort of a typed array), the place of every entry among them,
-      // and then the entries per number, in their own order.
-      const different = z.slice().sort();
-      let m = 0;
-      for (let i = 0; i < n; i++) {
-        if (i === 0 || different[i] !== different[m - 1]) {
-          different[m++] = different[i];
+    const zOut = new Float64Array(n);
+    const different = z.slice().sort();
+    let m = 0;
+    for (let i = 0; i < n; i++) {
+      if (i === 0 || different[i] !== different[m - 1]) {
+        different[m++] = different[i];
+      }
+    }
+    const rank = new Uint32Array(n);
+    const starts = new Uint32Array(m + 1);
+    for (let i = 0; i < n; i++) {
+      const value = z[i];
+      let low = 0;
+      let high = m - 1;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (different[middle] < value) {
+          low = middle + 1;
+        } else {
+          high = middle;
         }
       }
-      const rank = new Uint32Array(n);
-      const starts = new Uint32Array(m + 1);
-      for (let i = 0; i < n; i++) {
-        const value = z[i];
-        let low = 0;
-        let high = m - 1;
-        while (low < high) {
-          const middle = (low + high) >> 1;
-          if (different[middle] < value) {
-            low = middle + 1;
-          } else {
-            high = middle;
-          }
+      rank[i] = low;
+      starts[low + 1]++;
+    }
+    for (let r = 0; r < m; r++) {
+      starts[r + 1] += starts[r];
+    }
+    for (let i = 0; i < n; i++) {
+      const at = starts[rank[i]]++;
+      out[at] = entries[i];
+      zOut[at] = z[i];
+    }
+    o.result = out;
+    o.resultZ = zOut;
+  }
+
+  /**
+   * With a comparison: the entries that have their place from the last build
+   * first, in that order, then the others. True when that is done.
+   */
+  private stepPlaces(o: Ordering, order: InstructionOrder, deadline: number): boolean {
+    const entries = o.entries;
+    const n = entries.length;
+    const place = (this.places[o.kind] ??= {at: new Uint32Array(0), known: new Uint8Array(0), count: 0});
+    if (!o.index) {
+      o.index = new Uint32Array(n);
+      // numbers that do not follow from the features alone may all be different now
+      o.slots = place.count && !(order.key && order.volatile) ? new Uint32Array(place.count) : null;
+      o.i = n - 1;
+      o.others = n;
+    }
+    const index = o.index;
+    const slots = o.slots; // per place of the last build: the entry, plus one
+    let kept = 0;
+    if (slots) {
+      let others = o.others;
+      for (let i = o.i; i >= 0; i--) {
+        const ref = entries[i].ref ?? 0;
+        if (ref < place.known.length && place.known[ref] === 1 && slots[place.at[ref]] === 0) {
+          slots[place.at[ref]] = i + 1;
+        } else {
+          index[--others] = i; // from the end: the others stay as they are in the batch
         }
-        rank[i] = low;
-        starts[low + 1]++;
+        if (i % CLOCK_EVERY === 0 && performance.now() >= deadline) {
+          o.i = i - 1;
+          o.others = others;
+          return false;
+        }
       }
-      for (let r = 0; r < m; r++) {
-        starts[r + 1] += starts[r];
+      for (let k = 0; k < slots.length; k++) {
+        if (slots[k]) {
+          index[kept++] = slots[k] - 1;
+        }
       }
+      o.slots = null;
+    } else {
       for (let i = 0; i < n; i++) {
-        out[starts[rank[i]]++] = entries[i];
+        index[i] = i;
       }
-      return out;
     }
-    const index = new Uint32Array(n);
-    for (let i = 0; i < n; i++) {
-      index[i] = i;
+    const z = o.z;
+    const compare = order.compare!;
+    // a total order: the number, the comparison, the place in the batch
+    const less: Less = z
+      ? (a, b) => (z[a] - z[b] || compare(entries[a].feature, entries[b].feature) || a - b) < 0
+      : (a, b) => (compare(entries[a].feature, entries[b].feature) || a - b) < 0;
+    o.sorter = new Sorter(index, kept, n, less);
+    o.merger = new Merger(index, kept, less);
+    o.i = 0;
+    return true;
+  }
+
+  /** The entries in their order, and the place of each for the next build. True when that is done. */
+  private stepResult(o: Ordering, deadline: number): boolean {
+    const entries = o.entries;
+    const n = entries.length;
+    const z = o.z;
+    const index = o.merger!.result;
+    const place = this.places[o.kind]!;
+    if (!o.result) {
+      place.known.fill(0);
+      place.count = 0; // until all places are there
+      o.result = new Array(n);
+      o.resultZ = z ? new Float64Array(n) : null;
+      o.i = 0;
     }
-    index.sort((a, b) => z[a] - z[b] || (compare ? compare(entries[a].feature, entries[b].feature) : 0) || a - b);
-    for (let i = 0; i < n; i++) {
-      out[i] = entries[index[i]];
+    const out = o.result;
+    const zOut = o.resultZ;
+    for (let i = o.i; i < n; i++) {
+      const entry = entries[index[i]];
+      out[i] = entry;
+      if (zOut) {
+        zOut[i] = z![index[i]];
+      }
+      const ref = entry.ref ?? 0;
+      if (ref >= place.at.length) {
+        const capacity = Math.max(place.at.length * 2, ref + 1, 1024);
+        const at = new Uint32Array(capacity);
+        at.set(place.at);
+        place.at = at;
+        const known = new Uint8Array(capacity);
+        known.set(place.known);
+        place.known = known;
+      }
+      place.at[ref] = i;
+      place.known[ref] = 1;
+      if (i % CLOCK_EVERY === 0 && performance.now() >= deadline) {
+        o.i = i + 1;
+        return false;
+      }
     }
-    return out;
+    place.count = n;
+    o.merger = null;
+    o.index = null;
+    return true;
   }
 
   constructor(customAttributes: Record<string, AttributeDefinition>) {
@@ -251,6 +431,7 @@ export class InstructionBuilder {
     this.known = new Uint8Array(0);
     this.keys = new Float64Array(0);
     this.keyKnown = new Uint8Array(0);
+    this.places = {};
   }
 
   /**
@@ -266,6 +447,14 @@ export class InstructionBuilder {
     }
     if (ref !== undefined && ref < this.keyKnown.length) {
       this.keyKnown[ref] = 0;
+    }
+    if (ref !== undefined) {
+      for (const kind in this.places) {
+        const place = this.places[kind as InstructionKind]!;
+        if (ref < place.known.length) {
+          place.known[ref] = 0;
+        }
+      }
     }
   }
 
@@ -323,10 +512,14 @@ export class InstructionBuilder {
         : kind === 'lines'
           ? 3 * (batch as LineStringBatch).verticesCount + (1 + size) * batch.geometriesCount
           : 2 * (batch as PolygonBatch).verticesCount + (1 + size) * batch.geometriesCount + (batch as PolygonBatch).ringsCount;
+    const entries = Object.values(batch.entries) as BatchEntry[];
     return {
       kind,
       transform,
-      entries: this.ordered(Object.values(batch.entries)), // in the order of ol's for-in (and much faster), unless an order is set
+      entries,
+      z: null,
+      // in the order of ol's for-in (and much faster), unless an order is set
+      ordering: this.startOrdering(kind, entries),
       n: 0,
       k: 0,
       out: this.usable ? new Float32Array(length) : null,
@@ -338,6 +531,14 @@ export class InstructionBuilder {
   step(run: InstructionRun, deadline: number): boolean {
     if (run.done) {
       return true;
+    }
+    if (run.ordering) {
+      if (!this.stepOrdering(run.ordering, deadline)) {
+        return false;
+      }
+      run.entries = run.ordering.result!;
+      run.z = run.ordering.resultZ;
+      run.ordering = null;
     }
     const finished = run.kind === 'points' ? this.stepPoints(run, deadline) : run.kind === 'lines' ? this.stepLines(run, deadline) : this.stepPolygons(run, deadline);
     if (finished === null) {
