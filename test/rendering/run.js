@@ -63,7 +63,7 @@ const server = await createServer({
   root: here,
   logLevel: 'warn',
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
-  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'smooth.ts', 'workers.ts', 'renderfeature.ts', 'rebuild.ts']},
+  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'smooth.ts', 'workers.ts', 'slices.ts', 'renderfeature.ts', 'rebuild.ts']},
   worker: {format: 'es'},
   plugins: [
     {
@@ -626,6 +626,26 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
       checks[run]['a second worker builds when the first is busy'] ??= {ok: true, skipped: true};
     }
   }
+  // a change in a big layer, built in slices (slices.ts)
+  const extra = {};
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    errors.length = 0;
+    await page.goto(`${base}slices.html?layer=${layer}`);
+    try {
+      await page.waitForFunction(() => window.__slices, null, {timeout: 120_000, polling: 50});
+      const {times, ...sliced} = await page.evaluate(() => window.__slices);
+      extra[layer] = sliced;
+      if (times) {
+        console.log(
+          `  [${layer}] a layer of 1 000 000 points: ${Object.entries(times)
+            .map(([what, t]) => `${what === 'one' ? 'one feature changed' : 'another style'}: built after ${t.ms} ms in ${t.slices} slices, longest frame ${t.longestFrame} ms, ${t.longTasks} long tasks (${t.longTaskMs} ms)`)
+            .join('; ')}`,
+        );
+      }
+    } catch {
+      extra[layer] = {'slices page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
+    }
+  }
   // smoothFill (smooth.ts)
   const smooth = {};
   for (const layer of layers.filter((l) => l !== 'ol')) {
@@ -640,10 +660,12 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
   }
   const checkNames = [...new Set(Object.values(checks).flatMap((c) => Object.keys(c)))];
   // the checks of smooth.ts are of the two layers only
-  for (const name of new Set(Object.values(smooth).flatMap((c) => Object.keys(c)))) {
-    checkNames.push(name);
-    for (const run of Object.keys(checks)) {
-      checks[run][name] = smooth[run]?.[name] ?? {ok: true, skipped: true};
+  for (const pages of [smooth, extra]) {
+    for (const name of new Set(Object.values(pages).flatMap((c) => Object.keys(c)))) {
+      checkNames.push(name);
+      for (const run of Object.keys(checks)) {
+        checks[run][name] = pages[run]?.[name] ?? {ok: true, skipped: true};
+      }
     }
   }
   for (const name of checkNames) {

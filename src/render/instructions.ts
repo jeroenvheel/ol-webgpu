@@ -42,6 +42,73 @@ interface Batch {
   polygonBatch: PointBatch;
 }
 
+export type InstructionKind = 'points' | 'lines' | 'polygons';
+
+/** Instructions of one kind in the making (see `InstructionBuilder.start`). */
+export interface InstructionRun {
+  kind: InstructionKind;
+  transform: Transform;
+  entries: BatchEntry[];
+  /** The next entry, and where its instructions go. */
+  n: number;
+  k: number;
+  /** The instructions; null when they cannot be made here (see `usable`). */
+  out: Float32Array | null;
+  done: boolean;
+}
+
+/**
+ * The instructions of a build, made in slices: `step` works until a
+ * deadline and tells whether everything is made. The batch must not change
+ * between the slices (the caller starts over when it does).
+ */
+export class InstructionJob {
+  private readonly runs: InstructionRun[] = [];
+  /** Milliseconds worked so far. */
+  time = 0;
+  /** Slices worked so far. */
+  slices = 0;
+
+  constructor(
+    private readonly builder: InstructionBuilder,
+    batches: {polygons: PolygonBatch | null; lines: LineStringBatch | null; points: PointBatch | null},
+    transform: Transform,
+  ) {
+    if (batches.polygons) {
+      this.runs.push(builder.start('polygons', batches.polygons, transform));
+    }
+    if (batches.lines) {
+      this.runs.push(builder.start('lines', batches.lines, transform));
+    }
+    if (batches.points) {
+      this.runs.push(builder.start('points', batches.points, transform));
+    }
+  }
+
+  /** Works until `deadline` (`performance.now()`); true when all instructions are made. */
+  step(deadline: number): boolean {
+    const t0 = performance.now();
+    this.slices++;
+    let done = true;
+    for (const run of this.runs) {
+      if (!run.done && !this.builder.step(run, deadline)) {
+        done = false;
+        break;
+      }
+    }
+    this.time += performance.now() - t0;
+    return done;
+  }
+
+  /** The instructions of a kind: undefined when not asked for, null when they cannot be made here. */
+  result(kind: InstructionKind): Float32Array | null | undefined {
+    return this.runs.find((r) => r.kind === kind)?.out;
+  }
+}
+
+/** How many entries are made between two looks at the clock. */
+const CLOCK_EVERY = 256;
+
 export class InstructionBuilder {
   private readonly callbacks: Array<AttributeDefinition['callback']> = [];
   private readonly sizes: number[] = [];
@@ -132,17 +199,75 @@ export class InstructionBuilder {
     return at;
   }
 
+  /** Starts the instructions of one kind, to make with `step`. */
+  start(kind: InstructionKind, batch: PointBatch | LineStringBatch | PolygonBatch, transform: Transform): InstructionRun {
+    const size = this.customSize;
+    const length =
+      kind === 'points'
+        ? (2 + size) * batch.geometriesCount
+        : kind === 'lines'
+          ? 3 * (batch as LineStringBatch).verticesCount + (1 + size) * batch.geometriesCount
+          : 2 * (batch as PolygonBatch).verticesCount + (1 + size) * batch.geometriesCount + (batch as PolygonBatch).ringsCount;
+    return {
+      kind,
+      transform,
+      entries: Object.values(batch.entries), // in the order of ol's for-in, and much faster
+      n: 0,
+      k: 0,
+      out: this.usable ? new Float32Array(length) : null,
+      done: !this.usable,
+    };
+  }
+
+  /** Makes instructions until `deadline` (`performance.now()`); true when the run is done. */
+  step(run: InstructionRun, deadline: number): boolean {
+    if (run.done) {
+      return true;
+    }
+    const finished = run.kind === 'points' ? this.stepPoints(run, deadline) : run.kind === 'lines' ? this.stepLines(run, deadline) : this.stepPolygons(run, deadline);
+    if (finished === null) {
+      run.out = null;
+      run.done = true;
+    } else {
+      run.done = finished;
+    }
+    return run.done;
+  }
+
   /** [x0, y0, customAttr0, ..., xN, yN, customAttrN] */
   points(batch: PointBatch, transform: Transform): Float32Array | null {
-    if (!this.usable) {
-      return null;
-    }
+    const run = this.start('points', batch, transform);
+    this.step(run, Infinity);
+    return run.out;
+  }
+
+  /** [customAttr0, ..., customAttrN, numberOfVertices0, x0, y0, m0, ..., xN, yN, mN, ...] */
+  lines(batch: LineStringBatch, transform: Transform): Float32Array | null {
+    const run = this.start('lines', batch, transform);
+    this.step(run, Infinity);
+    return run.out;
+  }
+
+  /** [customAttr0, ..., customAttrN, numberOfRings, numberOfVerticesInRing0, ..., x0, y0, ..., xN, yN, ...] */
+  polygons(batch: PolygonBatch, transform: Transform): Float32Array | null {
+    const run = this.start('polygons', batch, transform);
+    this.step(run, Infinity);
+    return run.out;
+  }
+
+  /** True when done, false when the deadline came first, null when a value cannot be kept. */
+  private stepPoints(run: InstructionRun, deadline: number): boolean | null {
     const size = this.customSize;
-    const out = new Float32Array((2 + size) * batch.geometriesCount);
-    const [a, b, c, d, e, f] = transform;
-    let k = 0;
-    const entries = Object.values(batch.entries); // in the order of ol's for-in, and much faster
-    for (let n = 0, nn = entries.length; n < nn; n++) {
+    const out = run.out!;
+    const [a, b, c, d, e, f] = run.transform;
+    let k = run.k;
+    const entries = run.entries;
+    for (let n = run.n, nn = entries.length; n < nn; n++) {
+      if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
+        run.n = n;
+        run.k = k;
+        return false;
+      }
       const entry = entries[n];
       const at = this.slot(entry);
       if (at < 0) {
@@ -160,20 +285,21 @@ export class InstructionBuilder {
         }
       }
     }
-    return out;
+    return true;
   }
 
-  /** [customAttr0, ..., customAttrN, numberOfVertices0, x0, y0, m0, ..., xN, yN, mN, ...] */
-  lines(batch: LineStringBatch, transform: Transform): Float32Array | null {
-    if (!this.usable) {
-      return null;
-    }
+  private stepLines(run: InstructionRun, deadline: number): boolean | null {
     const size = this.customSize;
-    const out = new Float32Array(3 * batch.verticesCount + (1 + size) * batch.geometriesCount);
-    const [a, b, c, d, e, f] = transform;
-    let k = 0;
-    const entries = Object.values(batch.entries); // in the order of ol's for-in, and much faster
-    for (let n = 0, nn = entries.length; n < nn; n++) {
+    const out = run.out!;
+    const [a, b, c, d, e, f] = run.transform;
+    let k = run.k;
+    const entries = run.entries;
+    for (let n = run.n, nn = entries.length; n < nn; n++) {
+      if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
+        run.n = n;
+        run.k = k;
+        return false;
+      }
       const entry = entries[n];
       const at = this.slot(entry);
       if (at < 0) {
@@ -196,20 +322,21 @@ export class InstructionBuilder {
         }
       }
     }
-    return out;
+    return true;
   }
 
-  /** [customAttr0, ..., customAttrN, numberOfRings, numberOfVerticesInRing0, ..., x0, y0, ..., xN, yN, ...] */
-  polygons(batch: PolygonBatch, transform: Transform): Float32Array | null {
-    if (!this.usable) {
-      return null;
-    }
+  private stepPolygons(run: InstructionRun, deadline: number): boolean | null {
     const size = this.customSize;
-    const out = new Float32Array(2 * batch.verticesCount + (1 + size) * batch.geometriesCount + batch.ringsCount);
-    const [a, b, c, d, e, f] = transform;
-    let k = 0;
-    const entries = Object.values(batch.entries); // in the order of ol's for-in, and much faster
-    for (let n = 0, nn = entries.length; n < nn; n++) {
+    const out = run.out!;
+    const [a, b, c, d, e, f] = run.transform;
+    let k = run.k;
+    const entries = run.entries;
+    for (let n = run.n, nn = entries.length; n < nn; n++) {
+      if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
+        run.n = n;
+        run.k = k;
+        return false;
+      }
       const entry = entries[n];
       const at = this.slot(entry);
       if (at < 0) {
@@ -238,6 +365,23 @@ export class InstructionBuilder {
         }
       }
     }
-    return out;
+    return true;
   }
+}
+
+/**
+ * Lets the page do what is waiting (input, a frame) before the work goes on:
+ * a message to itself. A timer would wait 4 ms each time, and after
+ * `scheduler.yield()` the work goes on before the next frame is drawn, so
+ * frames would wait for all of it.
+ */
+export function pause(): Promise<void> {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(null);
+  });
 }

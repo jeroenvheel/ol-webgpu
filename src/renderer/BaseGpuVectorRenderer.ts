@@ -34,7 +34,7 @@ import LabelsArray from 'ol/webgl/LabelsArray.js';
 import {toFlatStyleLike} from 'ol/render/webgl/VectorStyleRenderer.js';
 import {create as createMat4} from 'ol/vec/mat4.js';
 import {FeatureBatch} from '../render/batch.js';
-import {InstructionBuilder} from '../render/instructions.js';
+import {InstructionBuilder, InstructionJob, pause} from '../render/instructions.js';
 import {Picker} from '../render/picking.js';
 import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
 import GpuText, {type LabelFrame, resolveFrameLabels} from '../text/GpuText.js';
@@ -123,6 +123,8 @@ export interface RebuildStats {
  * some ten levels next to the centre of the build, to get there.
  */
 const MAX_DRIFT_PX = 2 ** 19;
+/** Milliseconds the instructions of a build are worked on before the page gets a turn. */
+const INSTRUCTION_SLICE = 6;
 /** How often a build that failed is made again before the layer waits for other features. */
 const MAX_BUILD_RETRIES = 3;
 
@@ -227,6 +229,10 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private sourceKeys: EventsKey[] | null = null;
   /** The source the batch and the listeners are of (the layer may get another one). */
   private boundSource: VectorSource | null = null;
+  /** Increases with every change of the batch (a job that makes instructions from it starts over). */
+  private batchVersion = 0;
+  /** Slices the instructions of the last build that needed more than one were made in (for tests). */
+  instructionSlices = 1;
   /** Builds that failed in a row (see `rebuild`). */
   private buildFailures = 0;
   private buildRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -420,6 +426,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private bindSource(source: VectorSource | null, frameState: FrameState) {
     this.sourceKeys?.forEach(unlistenByKey);
     this.sourceKeys = null;
+    this.batchVersion++;
     if (this.boundSource) {
       this.batch.clear();
       this.instructions.reset();
@@ -442,20 +449,28 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       : undefined;
     this.batch.addFeatures(source.getFeatures(), projectionTransform);
     this.sourceKeys = [
-      listen(source, VectorEventType.ADDFEATURE, (e: any) => e.feature && this.batch.addFeature(e.feature, projectionTransform)),
+      listen(source, VectorEventType.ADDFEATURE, (e: any) => {
+        if (e.feature) {
+          this.batchVersion++;
+          this.batch.addFeature(e.feature, projectionTransform);
+        }
+      }),
       listen(source, VectorEventType.CHANGEFEATURE, (e: any) => {
         if (e.feature) {
+          this.batchVersion++;
           this.instructions.forget(this.batch, e.feature);
           this.batch.changeFeature(e.feature, projectionTransform);
         }
       }),
       listen(source, VectorEventType.REMOVEFEATURE, (e: any) => {
         if (e.feature) {
+          this.batchVersion++;
           this.instructions.forget(this.batch, e.feature);
           this.batch.removeFeature(e.feature);
         }
       }),
       listen(source, VectorEventType.CLEAR, () => {
+        this.batchVersion++;
         this.batch.clear();
         this.instructions.reset();
       }),
@@ -628,19 +643,72 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     // ol's text worker reads the labels array, which only ol's generators fill
     const kept = text ? null : this.instructions;
     const batch = this.batch;
-    const polygons =
-      (p.hasFill || text) && !empty
-        ? (kept?.polygons(batch.polygonBatch, transform) ?? generatePolygonRenderInstructions(batch.polygonBatch, new Float32Array(0), labels, custom, transform))
+    const wantPolygons = (p.hasFill || !!text) && !empty;
+    const wantLines = (p.hasStroke || !!text) && !empty;
+    const wantPoints = (p.hasSymbol || !!text) && !empty;
+    // Our instructions are made in slices, so a big layer does not hold up the
+    // page: `INSTRUCTION_SLICE` ms at a time, with a pause in between.
+    const job = kept
+      ? new InstructionJob(
+          kept,
+          {polygons: wantPolygons ? batch.polygonBatch : null, lines: wantLines ? batch.lineStringBatch : null, points: wantPoints ? batch.pointBatch : null},
+          transform,
+        )
+      : null;
+    const send = () => {
+      // ol's generators make what ours could not (or all of it, for ol's text worker)
+      const polygons = wantPolygons
+        ? (job?.result('polygons') ?? generatePolygonRenderInstructions(batch.polygonBatch, new Float32Array(0), labels, custom, transform))
         : null;
-    const lines =
-      (p.hasStroke || text) && !empty
-        ? (kept?.lines(batch.lineStringBatch, transform) ?? generateLineStringRenderInstructions(batch.lineStringBatch, new Float32Array(0), labels, custom, transform))
+      const lines = wantLines
+        ? (job?.result('lines') ?? generateLineStringRenderInstructions(batch.lineStringBatch, new Float32Array(0), labels, custom, transform))
         : null;
-    const points =
-      (p.hasSymbol || text) && !empty
-        ? (kept?.points(batch.pointBatch, transform) ?? generatePointRenderInstructions(batch.pointBatch, new Float32Array(0), labels, custom, transform))
+      const points = wantPoints
+        ? (job?.result('points') ?? generatePointRenderInstructions(batch.pointBatch, new Float32Array(0), labels, custom, transform))
         : null;
-    const instructionsTime = performance.now() - t0;
+      this.submit(frameState, generation, t0, job ? job.time : performance.now() - t0, transform, center, {polygons, lines, points, labels});
+    };
+    if (!job || job.step(performance.now() + INSTRUCTION_SLICE)) {
+      send();
+      return;
+    }
+    const version = this.batchVersion;
+    void (async () => {
+      for (;;) {
+        await pause();
+        if (generation !== this.generation || this.disposed) {
+          return;
+        }
+        if (version !== this.batchVersion) {
+          // the features changed under the job: start over with what there is now
+          this.invalidate();
+          this.updateReady();
+          this.getLayer()?.changed();
+          return;
+        }
+        if (job.step(performance.now() + INSTRUCTION_SLICE)) {
+          break;
+        }
+      }
+      this.instructionSlices = job.slices;
+      send();
+    })();
+  }
+
+  /** The second half of a build: the instructions go to the worker, and what comes back is uploaded. */
+  private submit(
+    frameState: FrameState,
+    generation: number,
+    t0: number,
+    instructionsTime: number,
+    transform: Transform,
+    center: number[],
+    made: {polygons: Float32Array | null; lines: Float32Array | null; points: Float32Array | null; labels: LabelsArray},
+  ) {
+    const {polygons, lines, points, labels} = made;
+    const p = this.passes;
+    const text = this.textOverlay;
+    const empty = this.batch.isEmpty();
     const invert = makeInverse(createTransform(), transform);
     const size = frameState.size;
     const resolution = frameState.viewState.resolution;

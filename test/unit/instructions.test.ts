@@ -20,7 +20,7 @@ import {
 import {type Transform, compose, create as createTransform} from 'ol/transform.js';
 import LabelsArray from 'ol/webgl/LabelsArray.js';
 import {describe, expect, it, vi} from 'vitest';
-import {InstructionBuilder} from '../../src/render/instructions.js';
+import {InstructionBuilder, InstructionJob} from '../../src/render/instructions.js';
 import {buildStylePasses} from '../../src/render/stylePasses.js';
 import {rng} from './helpers.js';
 
@@ -83,6 +83,38 @@ describe('render instructions with kept attributes', () => {
     expect(builder.points(batch.pointBatch, view([0, 0], 1000))!.length).toBeGreaterThan(0);
     expectSameAsOl(builder, batch, customAttributes, view([0, 0], 1000));
     expectSameAsOl(builder, batch, customAttributes, view([5e6, -3e6], 2.5));
+  });
+
+  it('are the same when they are made in slices', () => {
+    const {customAttributes} = buildStylePasses(style as any, {});
+    const batch = new MixedGeometryBatch();
+    batch.addFeatures(features(5, 3000));
+    const transform = view([1e6, 2e6], 40);
+    const whole = new InstructionBuilder(customAttributes);
+    const job = new InstructionJob(new InstructionBuilder(customAttributes), {polygons: batch.polygonBatch, lines: batch.lineStringBatch, points: batch.pointBatch}, transform);
+    // a deadline that has passed: every slice stops at its first look at the clock
+    let slices = 0;
+    while (!job.step(0)) {
+      slices++;
+      expect(slices).toBeLessThan(1000);
+    }
+    expect(slices).toBeGreaterThan(5);
+    expect(job.slices).toBe(slices + 1);
+    expect(job.result('points')).toEqual(whole.points(batch.pointBatch, transform));
+    expect(job.result('lines')).toEqual(whole.lines(batch.lineStringBatch, transform));
+    expect(job.result('polygons')).toEqual(whole.polygons(batch.polygonBatch, transform));
+    expectSameAsOl(whole, batch, customAttributes, transform);
+  });
+
+  it('make only what is asked for, in one slice when there is time', () => {
+    const {customAttributes} = buildStylePasses(style as any, {});
+    const batch = new MixedGeometryBatch();
+    batch.addFeatures(features(6, 400));
+    const job = new InstructionJob(new InstructionBuilder(customAttributes), {polygons: null, lines: batch.lineStringBatch, points: null}, view([0, 0], 100));
+    expect(job.step(Infinity)).toBe(true);
+    expect(job.result('polygons')).toBeUndefined();
+    expect(job.result('points')).toBeUndefined();
+    expect(job.result('lines')!.length).toBeGreaterThan(0);
   });
 
   it('calls the attribute callbacks once per feature, not once per rebuild', () => {
