@@ -620,7 +620,10 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     if (!source || !frameExtent) {
       return true;
     }
-    const viewNotMoving = !frameState.viewHints[ViewHint.ANIMATING] && !frameState.viewHints[ViewHint.INTERACTING];
+    // as ol's vector layers: while the view moves, only when the layer asks for it
+    const hints = frameState.viewHints;
+    const viewNotMoving =
+      (!hints[ViewHint.ANIMATING] || !!(layer as any).getUpdateWhileAnimating?.()) && (!hints[ViewHint.INTERACTING] || !!(layer as any).getUpdateWhileInteracting?.());
     const extentChanged = !extentEquals(this.previousExtent, frameExtent);
     const sourceChanged = this.sourceRevision < source.getRevision();
     const layerChanged = this.layerRevision < layer.getRevision();

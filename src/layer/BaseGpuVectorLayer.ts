@@ -51,25 +51,69 @@ export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> ex
    * Default false.
    */
   declutter?: boolean | string | number;
+  /**
+   * Ask the source for the features of the view also while the view is
+   * animated (a source with a loading strategy then loads during the
+   * animation, not after it). Default false, as in ol's vector layers.
+   */
+  updateWhileAnimating?: boolean;
+  /** As `updateWhileAnimating`, while the user drags or pinches the view. Default false. */
+  updateWhileInteracting?: boolean;
 }
 
 /**
  * Common API of the ol-webgpu vector layers; mirrors `ol/layer/WebGLVector`.
- * Like WebGLVector, these layers must be disposed when no longer used.
+ *
+ * A layer that is taken from its map gives up what the garbage collector
+ * cannot free (buffers and textures on the GPU, its part of a shared canvas,
+ * its hit index and its listeners on the source), so it does not have to be
+ * disposed for that. It builds everything again when it is added to a map.
  */
 export default abstract class BaseGpuVectorLayer<S extends VectorSource = VectorSource> extends Layer<S, any> {
   protected styleVariables: StyleVariables;
   protected style: FlatStyleLike;
   protected readonly gpuOptions: GpuVectorLayerOptions<S>;
   private renderOrder: ((a: FeatureLike, b: FeatureLike) => number) | null;
+  private readonly updateWhileAnimating: boolean;
+  private readonly updateWhileInteracting: boolean;
 
   constructor(options: GpuVectorLayerOptions<S>) {
-    const {style, variables, disableHitDetection, wasmUrl, preserveDrawingBuffer, antialias, smoothFill, renderOrder, text, declutter, ...base} = options;
+    const {
+      style,
+      variables,
+      disableHitDetection,
+      wasmUrl,
+      preserveDrawingBuffer,
+      antialias,
+      smoothFill,
+      renderOrder,
+      text,
+      declutter,
+      updateWhileAnimating,
+      updateWhileInteracting,
+      map,
+      ...base
+    } = options;
     super(base);
+    this.updateWhileAnimating = !!updateWhileAnimating;
+    this.updateWhileInteracting = !!updateWhileInteracting;
     this.renderOrder = renderOrder ?? null;
     this.gpuOptions = options;
     this.style = style;
     this.styleVariables = variables ?? {};
+    if (map) {
+      this.setMap(map); // not by ol's constructor: the fields above are not there yet when it runs
+    }
+  }
+
+  /** Whether the source is asked for features while the view is animated (see the option). */
+  getUpdateWhileAnimating(): boolean {
+    return this.updateWhileAnimating;
+  }
+
+  /** Whether the source is asked for features while the user moves the view (see the option). */
+  getUpdateWhileInteracting(): boolean {
+    return this.updateWhileInteracting;
   }
 
   /** The backend the layer renders with (for `GpuVectorLayer`, the one currently in use). */
@@ -147,6 +191,7 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
     super.setMapInternal(map);
     this.mapKeys.forEach(unlistenByKey);
     this.mapKeys = [];
+    this.releaseWithoutMap();
     if (map) {
       const renderer = () => (this.hasRenderer() ? (this.getRenderer() as BaseGpuVectorRenderer<unknown>) : null);
       this.mapKeys.push(
@@ -156,7 +201,44 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
     }
   }
 
+  /** The map of a layer that is not in its layers (`setMap`). */
+  private unmanagedMap: OlMap | null = null;
+
+  override setMap(map: OlMap | null) {
+    super.setMap(map);
+    this.unmanagedMap = map;
+    this.releaseWithoutMap();
+  }
+
+  private releaseTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * A layer without a map gives up its renderer, and with it everything that
+   * is not freed by the garbage collector (see the class). Not at once: a
+   * layer that is taken out to be put back in another place of the layers,
+   * or in another map, keeps what it has built.
+   */
+  private releaseWithoutMap() {
+    if (this.releaseTimer !== null) {
+      clearTimeout(this.releaseTimer);
+      this.releaseTimer = null;
+    }
+    if (this.getMapInternal() || this.unmanagedMap || !this.hasRenderer()) {
+      return;
+    }
+    this.releaseTimer = setTimeout(() => {
+      this.releaseTimer = null;
+      if (!this.getMapInternal() && !this.unmanagedMap) {
+        this.clearRenderer();
+      }
+    }, 0);
+  }
+
   protected override disposeInternal() {
+    if (this.releaseTimer !== null) {
+      clearTimeout(this.releaseTimer);
+      this.releaseTimer = null;
+    }
     this.mapKeys.forEach(unlistenByKey);
     this.mapKeys = [];
     super.disposeInternal();

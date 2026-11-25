@@ -111,6 +111,16 @@ const scenarios: Record<string, () => Promise<void>> = {
     k.layers[0] = next;
     await settle(k.map);
   },
+  /** As swapLayer, but the layer that is removed is not disposed: being without a map is enough. */
+  async dropLayer() {
+    const k = await keep('drop', () => [new Layer({source: new VectorSource({features: features()}), style: shapes})]);
+    const old = k.layers[0];
+    const next = new Layer({source: old.getSource(), style: shapes});
+    k.map.removeLayer(old);
+    k.map.addLayer(next);
+    k.layers[0] = next;
+    await settle(k.map);
+  },
   /** The view moves and the source reports a change, so the buffers are built again. */
   async pan() {
     const k = await keep('shapes', () => [new Layer({source: new VectorSource({features: features()}), style: shapes})]);

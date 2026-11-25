@@ -35,6 +35,9 @@ map.addLayer(layer);
   [bench/fixes-2026-11-24.md](bench/fixes-2026-11-24.md)), `renderOrder` (a
   function that compares two features, as for ol's Canvas vector layer; a
   `z-index` in the style goes before it and orders the features too),
+  `updateWhileAnimating` and `updateWhileInteracting` (default `false`, as
+  for ol's vector layers: the source is asked for the features of the view
+  also while the view moves),
   `preserveDrawingBuffer`
   (default `true`, needed for map export), `wasmUrl`, `shaderWasmUrl`, and on
   `GpuVectorLayer` `backend` (`'auto'` (default), `'webgpu'` or `'webgl2'`).
@@ -43,7 +46,11 @@ map.addLayer(layer);
   world copy, hit-detectable, and with `declutter: true` (or a group name)
   without overlapping. `text: 'canvas'` draws them with ol's text worker
   instead, exactly as `ol/layer/WebGLVector` does. See [Labels](#labels).
-- Like `WebGLVector`, dispose layers you no longer use.
+- A layer that is taken from its map (`map.removeLayer()`, `setMap(null)`)
+  gives up its GPU buffers, its part of the shared canvas and its hit index
+  by itself, and builds them again when it is added to a map. A layer that
+  is put back in the same task, to move it in the layers, keeps them. Layers
+  of a map that is thrown away as a whole still have to be disposed.
 
 ## Installation
 
