@@ -15,6 +15,7 @@ import {UNDEFINED_PROP_VALUE} from 'ol/expr/gpu.js';
 import type {Transform} from 'ol/transform.js';
 import {getUid} from 'ol/util.js';
 import type {AttributeDefinition} from './stylePasses.js';
+import {type LevelStarts, mergeStarts} from './levels.js';
 import {type Less, Merger, Sorter} from './sort.js';
 
 /** An entry of ol's MixedGeometryBatch. */
@@ -88,6 +89,15 @@ export interface InstructionRun {
   /** The next entry, and where its instructions go. */
   n: number;
   k: number;
+  /**
+   * Where the entries of each number start (see levels.ts), as
+   * `[z, start, start of the edges, ...]`: counted in points, in segments of
+   * lines, or in vertices of polygons and segments of their rings.
+   */
+  levels: number[];
+  /** What is counted so far. */
+  u: number;
+  u2: number;
   /** The instructions; null when they cannot be made here (see `usable`). */
   out: Float32Array | null;
   done: boolean;
@@ -134,6 +144,22 @@ export class InstructionJob {
     }
     this.time += performance.now() - t0;
     return done;
+  }
+
+  /** Where the features of each `z-index` start in the instructions (null: not to be drawn number by number, see levels.ts). */
+  levels(): LevelStarts | null {
+    const of = (kind: InstructionKind, second = false) => {
+      const run = this.runs.find((r) => r.kind === kind);
+      if (!run || !run.out || !run.z) {
+        return null;
+      }
+      const levels: number[] = [];
+      for (let i = 0; i < run.levels.length; i += 3) {
+        levels.push(run.levels[i], run.levels[i + (second ? 2 : 1)]);
+      }
+      return {levels, end: second ? run.u2 : run.u};
+    };
+    return mergeStarts({points: of('points'), lines: of('lines'), polygons: of('polygons'), edges: of('polygons', true)});
   }
 
   /** The instructions of a kind: undefined when not asked for, null when they cannot be made here. */
@@ -184,7 +210,8 @@ export class InstructionBuilder {
    */
   private startOrdering(kind: InstructionKind, entries: BatchEntry[]): Ordering | null {
     const order = this.order;
-    if (!order || entries.length < 2) {
+    // one entry needs no order, but its number says where it is drawn among the other kinds
+    if (!order || !entries.length || (entries.length < 2 && !order.key)) {
       return null;
     }
     if (order.key && order.volatile) {
@@ -522,6 +549,9 @@ export class InstructionBuilder {
       ordering: this.startOrdering(kind, entries),
       n: 0,
       k: 0,
+      levels: [],
+      u: 0,
+      u2: 0,
       out: this.usable ? new Float32Array(length) : null,
       done: !this.usable,
     };
@@ -577,12 +607,18 @@ export class InstructionBuilder {
     const out = run.out!;
     const [a, b, c, d, e, f] = run.transform;
     let k = run.k;
+    let u = run.u;
     const entries = run.entries;
+    const z = run.z;
     for (let n = run.n, nn = entries.length; n < nn; n++) {
       if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
         run.n = n;
         run.k = k;
+        run.u = u;
         return false;
+      }
+      if (z && (n === 0 || z[n] !== z[n - 1])) {
+        run.levels.push(z[n], u, 0);
       }
       const entry = entries[n];
       const at = this.slot(entry);
@@ -591,6 +627,7 @@ export class InstructionBuilder {
       }
       const values = this.values;
       const coordss = entry.flatCoordss;
+      u += coordss.length;
       for (let i = 0, ii = coordss.length; i < ii; i++) {
         const x = coordss[i][0];
         const y = coordss[i][1];
@@ -601,6 +638,7 @@ export class InstructionBuilder {
         }
       }
     }
+    run.u = u;
     return true;
   }
 
@@ -609,12 +647,18 @@ export class InstructionBuilder {
     const out = run.out!;
     const [a, b, c, d, e, f] = run.transform;
     let k = run.k;
+    let u = run.u;
     const entries = run.entries;
+    const z = run.z;
     for (let n = run.n, nn = entries.length; n < nn; n++) {
       if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
         run.n = n;
         run.k = k;
+        run.u = u;
         return false;
+      }
+      if (z && (n === 0 || z[n] !== z[n - 1])) {
+        run.levels.push(z[n], u, 0);
       }
       const entry = entries[n];
       const at = this.slot(entry);
@@ -625,6 +669,7 @@ export class InstructionBuilder {
       const coordss = entry.flatCoordss;
       for (let i = 0, ii = coordss.length; i < ii; i++) {
         const flat = coordss[i];
+        u += flat.length > 3 ? flat.length / 3 - 1 : 0; // a segment is an instance
         for (let j = 0; j < size; j++) {
           out[k++] = values[at + j];
         }
@@ -638,6 +683,7 @@ export class InstructionBuilder {
         }
       }
     }
+    run.u = u;
     return true;
   }
 
@@ -646,12 +692,20 @@ export class InstructionBuilder {
     const out = run.out!;
     const [a, b, c, d, e, f] = run.transform;
     let k = run.k;
+    let u = run.u;
+    let u2 = run.u2;
     const entries = run.entries;
+    const z = run.z;
     for (let n = run.n, nn = entries.length; n < nn; n++) {
       if (n % CLOCK_EVERY === 0 && n > run.n && performance.now() >= deadline) {
         run.n = n;
         run.k = k;
+        run.u = u;
+        run.u2 = u2;
         return false;
+      }
+      if (z && (n === 0 || z[n] !== z[n - 1])) {
+        run.levels.push(z[n], u, u2);
       }
       const entry = entries[n];
       const at = this.slot(entry);
@@ -666,12 +720,14 @@ export class InstructionBuilder {
           continue;
         }
         const flat = coordss[i];
+        u += flat.length >> 1;
         for (let j = 0; j < size; j++) {
           out[k++] = values[at + j];
         }
         out[k++] = rings.length;
         for (let j = 0, jj = rings.length; j < jj; j++) {
           out[k++] = rings[j];
+          u2 += rings[j] > 1 ? rings[j] - 1 : 0;
         }
         for (let j = 0, jj = flat.length; j < jj; j += 2) {
           const x = flat[j];
@@ -681,6 +737,8 @@ export class InstructionBuilder {
         }
       }
     }
+    run.u = u;
+    run.u2 = u2;
     return true;
   }
 }

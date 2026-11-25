@@ -34,7 +34,9 @@ map.addLayer(layer);
   polygon instead of ending in stairs, at about the cost of a stroke; see
   [bench/fixes-2026-11-24.md](bench/fixes-2026-11-24.md)), `renderOrder` (a
   function that compares two features, as for ol's Canvas vector layer; a
-  `z-index` in the style goes before it and orders the features too),
+  `z-index` in the style goes before it and orders the features too: with a
+  `z-index` that is an expression, the fills, strokes and symbols of one
+  number are drawn before those of the next, for up to 64 different numbers),
   `updateWhileAnimating` and `updateWhileInteracting` (default `false`, as
   for ol's vector layers: the source is asked for the features of the view
   also while the view moves),

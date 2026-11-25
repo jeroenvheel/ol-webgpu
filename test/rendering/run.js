@@ -654,7 +654,15 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
     await page.goto(`${base}order.html?layer=${layer}`);
     try {
       await page.waitForFunction(() => window.__order, null, {timeout: 60_000, polling: 50});
-      ordered[layer] = await page.evaluate(() => window.__order);
+      const {times, ...orderChecks} = await page.evaluate(() => window.__order);
+      ordered[layer] = orderChecks;
+      if (times) {
+        console.log(
+          `  [${layer}] 300 000 points while the view moves, a frame (median, slowest): ${Object.entries(times)
+            .map(([, t]) => `${t.levels || 1} z-index: ${t.median} ms, ${t.slowest} ms`)
+            .join('; ')}`,
+        );
+      }
     } catch {
       ordered[layer] = {'order page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
     }

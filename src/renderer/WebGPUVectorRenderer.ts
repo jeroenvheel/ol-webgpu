@@ -17,6 +17,7 @@ import {type ShaderTranslator, type WgslProgram, loadShaderTranslator} from '../
 import {destroyAfterSubmit, flushSubmits, frameEncoder, getDevice, isWebGPUAvailable, onDeviceLost, preferredFormat} from '../webgpu/device.js';
 import {PREMULTIPLIED_BLEND, WebGPUSurface, compositePipeline} from '../webgpu/surface.js';
 import type {BufferSet} from '../worker/protocol.js';
+import type {Range} from '../render/levels.js';
 import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
 
 
@@ -42,6 +43,8 @@ interface DrawCall {
   pipe: Pipeline;
   set: UploadedSet<GPUBuffers>;
   slot: number;
+  /** A part of the buffer (see render/levels.ts): indices without instances, instances with; undefined: all of it. */
+  range?: Range;
 }
 
 /**
@@ -479,12 +482,35 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       for (const world of worlds) {
         this.worldTransform(frameState, world, worldWidth, this.transform);
         const values = this.uniformState.compute(frameState, this.transform, invert, height);
-        for (const p of this.pipelines) {
-          for (const {kind, set} of plan.draws) {
-            const pipe = p[kind];
-            if (pipe && set.gpu.vertex && set.gpu.index) {
-              calls.push({pipe, set, slot: slotValues.length});
-              slotValues.push({pipe, values});
+        if (plan.levels) {
+          // one z-index after the other: its fills, strokes and symbols, of every style;
+          // the uniforms are per world and program, whatever the part
+          const slots = new Map<Pipeline, number>();
+          for (const level of plan.levels) {
+            for (const p of this.pipelines) {
+              for (const {kind, set} of plan.draws) {
+                const pipe = p[kind];
+                const range = level[kind];
+                if (pipe && range && set.gpu.vertex && set.gpu.index) {
+                  let slot = slots.get(pipe);
+                  if (slot === undefined) {
+                    slot = slotValues.length;
+                    slots.set(pipe, slot);
+                    slotValues.push({pipe, values});
+                  }
+                  calls.push({pipe, set, slot, range});
+                }
+              }
+            }
+          }
+        } else {
+          for (const p of this.pipelines) {
+            for (const {kind, set} of plan.draws) {
+              const pipe = p[kind];
+              if (pipe && set.gpu.vertex && set.gpu.index) {
+                calls.push({pipe, set, slot: slotValues.length});
+                slotValues.push({pipe, values});
+              }
             }
           }
         }
@@ -538,9 +564,23 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       }
       pass.setVertexBuffer(2, this.zeroBuffer!);
       pass.setIndexBuffer(g.index!, 'uint32');
-      const instances = call.pipe.pass.instanced.length ? Math.floor(g.instanceFloats / stride(call.pipe.pass.instanced)) : 1;
-      if (instances > 0) {
-        pass.drawIndexed(g.indexCount, instances);
+      const instanced = call.pipe.pass.instanced.length > 0;
+      const instances = instanced ? Math.floor(g.instanceFloats / stride(call.pipe.pass.instanced)) : 1;
+      const range = call.range;
+      if (!range) {
+        if (instances > 0) {
+          pass.drawIndexed(g.indexCount, instances);
+        }
+      } else if (instanced) {
+        const count = Math.min(range[1], instances - range[0]);
+        if (count > 0) {
+          pass.drawIndexed(g.indexCount, count, 0, 0, range[0]);
+        }
+      } else {
+        const count = Math.min(range[1], g.indexCount - range[0]);
+        if (count > 0) {
+          pass.drawIndexed(count, 1, range[0]);
+        }
       }
     }
     if (text) {

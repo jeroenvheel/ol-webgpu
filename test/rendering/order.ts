@@ -6,9 +6,12 @@
 import Feature from 'ol/Feature.js';
 import Map from 'ol/Map.js';
 import View from 'ol/View.js';
+import LineString from 'ol/geom/LineString.js';
 import Point from 'ol/geom/Point.js';
+import Polygon from 'ol/geom/Polygon.js';
 import VectorSource from 'ol/source/Vector.js';
 import {frame, renderersSettled} from './settled.js';
+import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 
@@ -53,10 +56,38 @@ const rules = new Layer({
   ],
 });
 const later = new Layer({source: new VectorSource({features: three(80, 0)}), style: circle});
-const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [asTheyCame, byZIndex, byRenderOrder, both, rules, later], view: new View({center: [0, 0], resolution: 1})});
+// A fill, a stroke and a symbol on one spot. Kind by kind the symbol is on top and the
+// fill at the bottom; by z-index the fill (3) is over the stroke (2) over the symbol (1).
+const kinds = (x: number, y: number, z: {fill: number; stroke: number; symbol: number}) => [
+  new Feature({
+    geometry: new Polygon([[[x - 20, y - 20], [x + 20, y - 20], [x + 20, y + 20], [x - 20, y + 20], [x - 20, y - 20]]]),
+    name: 'fill',
+    color: css(RED),
+    z: z.fill,
+  }),
+  new Feature({geometry: new LineString([[x - 30, y], [x + 30, y]]), name: 'stroke', color: css(BLUE), z: z.stroke}),
+  new Feature({geometry: new Point([x, y]), name: 'symbol', color: css(GREEN), z: z.symbol}),
+];
+const kindStyle = {
+  'fill-color': ['get', 'color'],
+  'stroke-color': ['get', 'color'],
+  'stroke-width': 12,
+  'circle-radius': 10,
+  'circle-fill-color': ['get', 'color'],
+};
+const acrossKinds = new Layer({source: new VectorSource({features: kinds(-70, -80, {fill: 3, stroke: 2, symbol: 1})}), style: {...kindStyle, 'z-index': ['get', 'z']}});
+const withoutZ = new Layer({source: new VectorSource({features: kinds(0, -80, {fill: 3, stroke: 2, symbol: 1})}), style: kindStyle});
+// more different numbers than are drawn one by one: kind by kind again, in the order of the numbers within a kind
+const manyZ = new Layer({
+  source: new VectorSource({
+    features: [...kinds(70, -80, {fill: 300, stroke: 200, symbol: 100}), ...Array.from({length: 80}, (_v, i) => new Feature({geometry: new Point([400 + i, 400]), name: `far${i}`, color: css(RED), z: i}))],
+  }),
+  style: {...kindStyle, 'z-index': ['get', 'z']},
+});
+const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [asTheyCame, byZIndex, byRenderOrder, both, rules, later, acrossKinds, withoutZ, manyZ], view: new View({center: [0, 0], resolution: 1})});
 
 (async () => {
-  const results: Record<string, {ok: boolean; detail: string}> = {};
+  const results: Record<string, any> = {};
   const check = (name: string, ok: boolean, detail: unknown) => (results[name] = {ok, detail: JSON.stringify(detail)});
   const settle = async () => {
     map.render();
@@ -104,6 +135,78 @@ const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [asThey
     await settle();
     const unset = at(80, 0);
     check('setRenderOrder orders the features again', is(set, ['green', 'blue', 'red']) && is(unset, ['blue', 'green', 'red']), {set, unset});
+
+    // a z-index orders fills, strokes and symbols among each other
+    const across = {centre: at(-70, -80), onStroke: at(-70 + 28, -80), onFill: at(-70, -80 + 15)};
+    const kindByKind = {centre: at(0, -80), onStroke: at(28, -80)};
+    const many = {centre: at(70, -80), onStroke: at(70 + 28, -80)};
+    check(
+      'a z-index puts a fill over the stroke and the symbol of a lower one',
+      across.centre.hits.join() === 'fill,stroke,symbol' && across.centre.top === 'red' && across.onStroke.top === 'blue' && across.onFill.top === 'red',
+      {...across, levels: ([...liveRenderers].find((r) => r.getLayer() === (acrossKinds as any)) as any)?.buffers?.levels ?? null},
+    );
+    check('without a z-index symbols are over strokes over fills', kindByKind.centre.top === 'green' && kindByKind.centre.hits.join() === 'symbol,stroke,fill' && kindByKind.onStroke.top === 'blue', kindByKind);
+    check('with more than 64 different numbers the kinds are drawn one after the other', many.centre.top === 'green' && many.centre.hits.join() === 'symbol,stroke,fill', many);
+
+    // a symbol that changes its z-index goes over the fill
+    acrossKinds.getSource()!.getFeatures().find((f) => f.get('name') === 'symbol')!.set('z', 5);
+    await settle();
+    const lifted = at(-70, -80);
+    check('a changed z-index moves a symbol over a fill', lifted.top === 'green' && lifted.hits.join() === 'symbol,fill,stroke', lifted);
+
+    // with symbols that are placed: one that lost its place is left out of the buffer, and the parts move with it
+    const placed = new Layer({
+      source: new VectorSource({
+        features: [
+          new Feature({geometry: new Point([-70, -20]), name: 'first', color: css(GREEN), z: 1}),
+          new Feature({geometry: new Point([-64, -20]), name: 'second', color: css(BLUE), z: 1}), // no room next to the first
+          ...kinds(70, -20, {fill: 3, stroke: 2, symbol: 5}),
+        ],
+      }),
+      style: {...kindStyle, 'circle-declutter-mode': 'declutter', 'z-index': ['get', 'z']},
+      declutter: true,
+    });
+    map.addLayer(placed);
+    await settle();
+    const declutter = {first: at(-78, -20), second: at(-56, -20), symbol: at(70, -20), fill: at(70, -20 + 15)};
+    check(
+      'drawn by z-index with symbols that are placed',
+      declutter.first.top === 'green' && declutter.second.hits.length === 0 && declutter.symbol.top === 'green' && declutter.symbol.hits.join() === 'symbol,fill,stroke' && declutter.fill.top === 'red',
+      declutter,
+    );
+    map.removeLayer(placed);
+
+    // what drawing by z-index costs: frames of a view that moves, with 300 000 points of 10 numbers and of one
+    const frames = async (numbers: number) => {
+      const many = new Layer({
+        source: new VectorSource({
+          features: Array.from({length: 300_000}, (_v, i) => new Feature({geometry: new Point([(i % 600) - 300, Math.floor(i / 600) - 250]), color: css(RED), z: i % numbers})),
+          useSpatialIndex: false,
+        }),
+        style: {'circle-radius': 2, 'circle-fill-color': ['get', 'color'], 'z-index': ['get', 'z']},
+        disableHitDetection: true,
+      });
+      map.addLayer(many);
+      await settle();
+      const levels = ([...liveRenderers].find((r) => r.getLayer() === (many as any)) as any)?.buffers?.levels?.length ?? 0;
+      const view = map.getView();
+      const times: number[] = [];
+      let last = performance.now();
+      for (let i = 0; i < 60; i++) {
+        view.setCenter([i % 2, 0]);
+        await frame();
+        const now = performance.now();
+        times.push(now - last);
+        last = now;
+      }
+      view.setCenter([0, 0]);
+      map.removeLayer(many);
+      many.dispose();
+      await settle();
+      times.sort((a, b) => a - b);
+      return {levels, median: Math.round(times[30] * 10) / 10, slowest: Math.round(times[59])};
+    };
+    results.times = {one: await frames(1), ten: await frames(10), sixty: await frames(60)};
 
     // a feature whose z-index changes moves
     byZIndex.getSource()!.getFeatures().find((f) => f.get('name') === 'blue')!.set('z', 9);

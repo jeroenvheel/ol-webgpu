@@ -11,8 +11,11 @@
  * - `z-index` of a flat style. Styles with a number as `z-index` are drawn
  *   in the order of those numbers (`styleOrder`). A `z-index` that is an
  *   expression gives every feature a number: the features are in the
- *   buffers in the order of those numbers (`featureZIndex`), so a feature
- *   with a higher one is drawn over the others of its kind.
+ *   buffers in the order of those numbers (`featureZIndex`), and the
+ *   fills, strokes and symbols of one number are drawn before those of the
+ *   next (levels.ts), so a feature with a higher one is drawn over all of
+ *   a lower one. With more different numbers than are drawn one by one,
+ *   that holds within each kind only.
  * - `renderOrder` of the layer, a function that compares two features, as
  *   for ol's Canvas vector layer: the order of features with the same
  *   `z-index`.

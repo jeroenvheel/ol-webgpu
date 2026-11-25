@@ -16,6 +16,7 @@ import {LABEL_GLSL, LABEL_UNIFORMS, LABEL_UNIFORM_FLOATS, QUAD, fadeUploads, wri
 import type {BufferSet} from '../worker/protocol.js';
 import {linkProgram, uploadCanvas} from '../webgl2/program.js';
 import {WebGL2Surface} from '../webgl2/surface.js';
+import type {Range} from '../render/levels.js';
 import BaseGpuVectorRenderer, {type GpuVectorRendererOptions, type UploadedSet} from './BaseGpuVectorRenderer.js';
 
 interface GLBuffers {
@@ -28,6 +29,8 @@ interface GLBuffers {
   capacity: [number, number, number];
   /** VAO per program, created lazily. */
   vaos: Map<WebGLProgram, WebGLVertexArrayObject>;
+  /** Per VAO: the instance its instanced attributes start at (0 unless a part was drawn last, see `drawSet`). */
+  bases: Map<WebGLVertexArrayObject, number>;
 }
 
 /**
@@ -298,10 +301,12 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     gl.bindVertexArray(null);
     const instanced = set.instances.length > 0;
     let vaos = reuse?.vaos ?? new Map<WebGLProgram, WebGLVertexArrayObject>();
+    let bases = reuse?.bases ?? new Map<WebGLVertexArrayObject, number>();
     if (reuse && !!reuse.instance !== instanced) {
       // the vertex arrays were made for other buffers
       vaos.forEach((vao) => gl.deleteVertexArray(vao));
       vaos = new Map();
+      bases = new Map();
       gl.deleteBuffer(reuse.instance);
       reuse.instance = null;
     }
@@ -313,6 +318,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       instanceFloats: set.instances.length,
       capacity,
       vaos,
+      bases,
     };
   }
 
@@ -325,6 +331,7 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     gl.bindVertexArray(null);
     b.vaos.forEach((vao) => gl.deleteVertexArray(vao));
     b.vaos.clear();
+    b.bases.clear();
     // Emptied before they are deleted: the driver gives the storage of a
     // deleted buffer back late, and with large layers the memory of several
     // rebuilds would pile up in the GPU process.
@@ -435,22 +442,55 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
     }
   }
 
-  private drawSet(prog: Program | undefined, set: UploadedSet<GLBuffers> | null, values: Map<string, ResolvedUniform>) {
-    if (!prog || !set || set.gpu.indexCount === 0) {
+  /**
+   * @param range a part of the buffer (see render/levels.ts): indices for a
+   *   buffer without instances, instances for one with; undefined: all of it
+   */
+  private drawSet(prog: Program | undefined, set: UploadedSet<GLBuffers> | null, values: Map<string, ResolvedUniform>, range?: Range | null) {
+    if (!prog || !set || set.gpu.indexCount === 0 || range === null) {
       return;
     }
     const gl = this.gl!;
     const b = set.gpu;
     gl.useProgram(prog.program);
     this.setUniforms(prog, values);
-    gl.bindVertexArray(this.vao(prog, b));
+    const vao = this.vao(prog, b);
+    gl.bindVertexArray(vao);
     if (prog.pass.instanced.length) {
-      const instances = b.instanceFloats / stride(prog.pass.instanced);
+      const all = Math.floor(b.instanceFloats / stride(prog.pass.instanced));
+      const first = range ? range[0] : 0;
+      const instances = range ? Math.min(range[1], all - first) : all;
       if (instances > 0) {
+        // WebGL has no first instance for a draw: the attributes are pointed at it
+        if ((b.bases.get(vao) ?? 0) !== first && b.instance) {
+          this.pointInstanced(prog, b.instance, first);
+          b.bases.set(vao, first);
+        }
         gl.drawElementsInstanced(gl.TRIANGLES, b.indexCount, gl.UNSIGNED_INT, 0, instances);
+      }
+    } else if (range) {
+      const count = Math.min(range[1], b.indexCount - range[0]);
+      if (count > 0) {
+        gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_INT, range[0] * 4);
       }
     } else {
       gl.drawElements(gl.TRIANGLES, b.indexCount, gl.UNSIGNED_INT, 0);
+    }
+  }
+
+  /** Points the instanced attributes of the bound VAO at the instance `first` of the buffer. */
+  private pointInstanced(prog: Program, buffer: WebGLBuffer, first: number) {
+    const gl = this.gl!;
+    const attrs = prog.pass.instanced;
+    const bytes = stride(attrs) * 4;
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    let offset = first * bytes;
+    for (const a of attrs) {
+      const loc = a.name ? gl.getAttribLocation(prog.program, a.name) : -1;
+      if (loc >= 0) {
+        gl.vertexAttribPointer(loc, a.size, gl.FLOAT, false, bytes, offset);
+      }
+      offset += a.size * 4;
     }
   }
 
@@ -482,9 +522,20 @@ export default class WebGL2VectorRenderer extends BaseGpuVectorRenderer<GLBuffer
       for (const world of worlds) {
         this.worldTransform(frameState, world, worldWidth, this.transform);
         const values = this.uniformState.compute(frameState, this.transform, invert, height);
-        for (const p of this.programs) {
-          for (const {kind, set} of plan.draws) {
-            this.drawSet(p[kind], set, values);
+        if (plan.levels) {
+          // one z-index after the other: its fills, strokes and symbols, of every style
+          for (const level of plan.levels) {
+            for (const p of this.programs) {
+              for (const {kind, set} of plan.draws) {
+                this.drawSet(p[kind], set, values, level[kind]);
+              }
+            }
+          }
+        } else {
+          for (const p of this.programs) {
+            for (const {kind, set} of plan.draws) {
+              this.drawSet(p[kind], set, values);
+            }
           }
         }
       }
