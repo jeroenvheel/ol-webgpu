@@ -14,11 +14,14 @@ import {getWorldParameters} from 'ol/renderer/webgl/worldUtil.js';
 import type VectorSource from 'ol/source/Vector.js';
 import type {FlatStyleLike} from 'ol/style/flat.js';
 import {getUid} from 'ol/util.js';
+import {type SymbolEvaluator, buildSymbolEvaluator} from '../render/symbols.js';
 import {worldOf} from '../render/uniforms.js';
 import {type AtlasPage, sharedAtlas} from './atlas.js';
 import {Occupancy, selectCandidates} from './declutter.js';
 import {LabelBuilder, type LabelSet, type LayoutOptions, MODE_DECLUTTER, MODE_NONE, partBox, reads} from './layout.js';
 import {type TextEvaluator, buildTextEvaluator} from './style.js';
+
+const NONE: ReadonlySet<FeatureLike> = new Set();
 
 /** Milliseconds a label takes to fade in or out when decluttering changes. */
 const FADE = 150;
@@ -108,12 +111,12 @@ function isMoving(frameState: FrameState): boolean {
 const tmp = [0, 0, 0, 0];
 
 export default class GpuText {
-  private evaluator: TextEvaluator | null;
+  private evaluator: TextEvaluator | null = null;
   private readonly atlas = sharedAtlas();
   private set: LabelSet | null = null;
   private setKey: LayoutKey | null = null;
   /** Finished layout, shown from the start of the next frame. */
-  private next: {set: LabelSet; key: LayoutKey} | null = null;
+  private next: {set: LabelSet; key: LayoutKey; rejected: ReadonlySet<FeatureLike>} | null = null;
   private job: {
     builder: LabelBuilder;
     key: LayoutKey;
@@ -123,6 +126,8 @@ export default class GpuText {
     measured: number;
     time: number;
     frames: number;
+    /** Features whose symbol cannot win a place (see `prepare`). */
+    rejected: ReadonlySet<FeatureLike>;
   } | null = null;
   /** Numbers of the last layout and decluttering. */
   stats: LabelStats = {features: 0, labels: 0, glyphs: 0, measured: 0, layout: 0, frames: 0, declutter: 0};
@@ -130,6 +135,14 @@ export default class GpuText {
   private worldWidth = 0;
   /** Rotation of the view of the frame in the making. */
   private rotation = 0;
+  private zoom = 0;
+  /** Tells the symbol of a feature that is placed with the labels (null: none are). */
+  private symbolOf: SymbolEvaluator | null = null;
+  /** Features whose symbol could not win a place in the laid out area. */
+  private rejectedSymbols: ReadonlySet<FeatureLike> = NONE;
+  /** The features whose symbol is not drawn; `symbolVersion` increases when it changes. */
+  hiddenSymbols: ReadonlySet<FeatureLike> = NONE;
+  symbolVersion = 0;
   private styleVersion = 0;
   private lastFrameTime = 0;
   private wasFading = false;
@@ -146,18 +159,26 @@ export default class GpuText {
     public declutter: string | null,
     private readonly requestRender: () => void,
   ) {
-    this.evaluator = buildTextEvaluator(style, variables);
     this.unlistenAtlas = this.atlas.onReset(() => this.requestRender());
+    this.setStyle(style, variables);
   }
 
   setStyle(style: FlatStyleLike, variables: Record<string, any>) {
     this.variables = variables;
-    this.evaluator = buildTextEvaluator(style, variables);
+    this.symbolOf = this.declutter ? buildSymbolEvaluator(style, variables, () => this.zoom) : null;
+    // a layer without text still places its symbols
+    this.evaluator = buildTextEvaluator(style, variables) ?? (this.symbolOf ? () => {} : null);
+    this.hiddenSymbols = NONE;
+    this.rejectedSymbols = NONE;
+    this.symbolVersion++;
     this.styleVersion++;
   }
 
   /** Forgets the labels: they are of a source the layer no longer has. */
   clear() {
+    this.hiddenSymbols = NONE;
+    this.rejectedSymbols = NONE;
+    this.symbolVersion++;
     this.job = null;
     this.next = null;
     this.set = null;
@@ -246,6 +267,14 @@ export default class GpuText {
           features.add(measured.features[i]);
         }
       }
+      // a symbol that cannot win a place anywhere in the laid out area is not drawn
+      const rejected = new Set<FeatureLike>();
+      for (let i = 0; i < measured.count; i++) {
+        if (measured.symbol[i] === 1 && !features.has(measured.features[i])) {
+          rejected.add(measured.features[i]);
+        }
+      }
+      job.rejected = rejected;
       job.measuring = false;
       job.measured = measured.count;
       job.builder = new LabelBuilder([...features], this.evaluator, this.atlas, {...job.builder.options, boxesOnly: false, accept});
@@ -269,7 +298,7 @@ export default class GpuText {
     }
     const t1 = performance.now();
     const set = job.builder.finish();
-    this.next = {set, key: job.key};
+    this.next = {set, key: job.key, rejected: job.rejected};
     this.stats = {
       features: job.features,
       labels: set.count,
@@ -340,9 +369,10 @@ export default class GpuText {
           }
         : undefined,
       boxesOnly: measuring,
+      symbol: this.symbolOf,
     };
     const builder = new LabelBuilder(list, this.evaluator!, this.atlas, options);
-    return {builder, key: {...want, coverage}, measuring, features: list.length, measured: 0, time: performance.now() - t0, frames: 0};
+    return {builder, key: {...want, coverage}, measuring, features: list.length, measured: 0, time: performance.now() - t0, frames: 0, rejected: NONE};
   }
 
   // --- frame ---------------------------------------------------------------
@@ -374,6 +404,7 @@ export default class GpuText {
       }
       this.set = next.set;
       this.setKey = next.key;
+      this.rejectedSymbols = next.rejected;
       this.worlds = [];
       this.shownVersion++;
     }
@@ -382,6 +413,7 @@ export default class GpuText {
       return;
     }
     this.rotation = frameState.viewState.rotation;
+    this.zoom = frameState.viewState.zoom ?? 0;
     const [start, end, worldWidth] = getWorldParameters(frameState, layer);
     this.worldWidth = worldWidth;
     const worlds: LabelWorld[] = [];
@@ -548,15 +580,60 @@ export default class GpuText {
       w.fading = fading;
     }
     this.shownVersion++;
+    this.updateHiddenSymbols();
     this.stats.declutter = performance.now() - t0;
     return this.stats.declutter;
+  }
+
+  /**
+   * The features whose symbol is not drawn: it lost its place (in every
+   * world on screen) or could not win one in the laid out area.
+   */
+  private updateHiddenSymbols() {
+    const set = this.set;
+    let hidden: Set<FeatureLike> | null = null;
+    if (set && this.symbolOf) {
+      const shown = new Set<FeatureLike>();
+      const lost: FeatureLike[] = [];
+      for (let i = 0; i < set.count; i++) {
+        if (set.symbol[i] !== 1) {
+          continue;
+        }
+        if (this.worlds.some((w) => w.target[i] === 1)) {
+          shown.add(set.features[i]);
+        } else {
+          lost.push(set.features[i]);
+        }
+      }
+      hidden = new Set(this.rejectedSymbols);
+      for (const feature of lost) {
+        if (!shown.has(feature)) {
+          hidden.add(feature);
+        }
+      }
+    }
+    const before = this.hiddenSymbols;
+    const now: ReadonlySet<FeatureLike> = hidden?.size ? hidden : NONE;
+    let same = now.size === before.size;
+    if (same && now !== before) {
+      for (const feature of now) {
+        if (!before.has(feature)) {
+          same = false;
+          break;
+        }
+      }
+    }
+    if (!same) {
+      this.hiddenSymbols = now;
+      this.symbolVersion++;
+    }
   }
 
   /** The labels to draw for this frame (null: none), with fades advanced to the frame time. */
   frame(frameState: FrameState): LabelFrame | null {
     const set = this.set;
     // a set of an earlier atlas generation is drawn from its own page until the new layout is there
-    if (!set || !set.glyphCount || !this.worlds.length) {
+    if (!set || !this.worlds.length) {
       return null;
     }
     const now = frameState.time;
@@ -592,7 +669,8 @@ export default class GpuText {
         frameState.animate = true;
       }
     }
-    return {set, page: set.page, worlds: this.worlds, worldWidth: this.worldWidth};
+    // labels without glyphs stand for symbols (see render/symbols.ts): they fade as the others, and draw nothing here
+    return set.glyphCount ? {set, page: set.page, worlds: this.worlds, worldWidth: this.worldWidth} : null;
   }
 
   // --- hit detection -------------------------------------------------------

@@ -29,6 +29,7 @@ function labels(list: Array<[number, number, number, number, number?]>, resoluti
     glyphMid: new Uint32Array(list.length),
     along: new Float32Array(list.length * 2),
     twoWay: false,
+    symbol: new Uint8Array(list.length),
     glyphStart: new Uint32Array(count),
     glyphEnd: new Uint32Array(count),
     partStart: range(0),

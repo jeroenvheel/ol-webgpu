@@ -32,6 +32,7 @@ import {
   quantizeStrokeWidth,
   segments,
 } from './atlas.js';
+import type {DeclutterSymbol, SymbolEvaluator} from '../render/symbols.js';
 import type {TextEvaluator} from './style.js';
 import {JOINING, ZWJ, joinedAdvances, joinsAcross, textOnPath} from './textpath.js';
 
@@ -124,6 +125,8 @@ export interface LabelSet {
   along: Float32Array;
   /** Some labels have their glyphs twice (see `glyphMid`). */
   twoWay: boolean;
+  /** Per label: 1 when it stands for the symbol of its feature too (see render/symbols.ts). */
+  symbol: Uint8Array;
   partStart: Uint32Array;
   partEnd: Uint32Array;
   mode: Uint8Array;
@@ -146,6 +149,8 @@ export interface LayoutOptions {
   boxesOnly?: boolean;
   /** Only lay out the labels with these keys: the second pass when decluttering. */
   accept?: Set<number>;
+  /** The symbol of a feature that is placed with its labels (see render/symbols.ts). */
+  symbol?: SymbolEvaluator | null;
 }
 
 /**
@@ -249,6 +254,11 @@ export class LabelBuilder {
   private readonly glyphMid: number[] = [];
   private readonly along: number[] = [];
   /** Of the label in the making: where its second direction starts (-1: none), and its `along`. */
+  private readonly withSymbol: number[] = [];
+  /** The symbol of the feature in the making that is placed with its labels, and whether a label took it. */
+  private currentSymbol: DeclutterSymbol | null = null;
+  private symbolHere: DeclutterSymbol | null = null;
+  private symbolPlaced = false;
   private currentMid = -1;
   private currentAlong: [number, number] = [0, 0];
   private twoWay = false;
@@ -291,8 +301,17 @@ export class LabelBuilder {
       this.current = feature;
       this.currentUid = Number(getUid(feature));
       this.currentIndex = 0;
+      this.symbolPlaced = false;
+      this.currentSymbol = null;
       try {
+        const type = this.options.symbol ? feature.getGeometry()?.getType() : undefined;
+        if (type === 'Point' || type === 'MultiPoint') {
+          this.currentSymbol = this.options.symbol!(feature, resolution);
+        }
         this.evaluator(feature, resolution, this.onText);
+        if (this.currentSymbol && !this.symbolPlaced) {
+          this.addSymbols(feature);
+        }
       } catch (e) {
         // one feature with a bad value must not stop the others
         console.warn('ol-webgpu: text style evaluation failed', e);
@@ -348,6 +367,7 @@ export class LabelBuilder {
       glyphMid: Uint32Array.from(this.glyphMid),
       along: Float32Array.from(this.along),
       twoWay: this.twoWay,
+      symbol: Uint8Array.from(this.withSymbol),
       partStart: Uint32Array.from(this.partStart),
       partEnd: Uint32Array.from(this.partEnd),
       mode: Uint8Array.from(this.mode),
@@ -388,6 +408,7 @@ export class LabelBuilder {
     replace(this.glyphEnd, glyphEnd);
     replace(this.glyphMid, glyphMid);
     replace(this.along, along);
+    replace(this.withSymbol, take(this.withSymbol));
     replace(this.labelFeatures, take(this.labelFeatures));
     replace(this.keys, take(this.keys));
     replace(this.content, take(this.content));
@@ -469,6 +490,7 @@ export class LabelBuilder {
     this.labelFeatures.push(this.current!);
     this.keys.push(this.currentKey);
     this.content.push(contentKey(value, x, y));
+    this.withSymbol.push(0);
     this.currentMid = -1;
     this.currentAlong[0] = this.currentAlong[1] = 0;
     this.glyphStart.push(this.glyphCount);
@@ -529,7 +551,39 @@ export class LabelBuilder {
     }
   }
 
+  /** The box of a symbol as a part of the label in the making: the label stands for the symbol too. */
+  private symbolPart(symbol: DeclutterSymbol, x: number, y: number) {
+    // parts have y down; a symbol does not turn with the view here (see symbols.ts)
+    this.parts.push(x, y, 0, 0, 0, 0, symbol.x - symbol.halfWidth, -symbol.y - symbol.halfHeight, symbol.x + symbol.halfWidth, -symbol.y + symbol.halfHeight, 1, 0);
+    this.withSymbol[this.withSymbol.length - 1] = 1;
+    this.symbolPlaced = true;
+  }
+
+  /** The symbols of a feature without a label at its points: each is a label without glyphs. */
+  private addSymbols(feature: FeatureLike) {
+    const symbol = this.currentSymbol!;
+    const o = this.options;
+    let geometry: any = feature.getGeometry();
+    if (o.toView && geometry) {
+      geometry = o.toView(geometry);
+    }
+    const flat: number[] = geometry.getFlatCoordinates();
+    const stride: number = geometry.getStride?.() ?? 2;
+    const [minX, minY, maxX, maxY] = o.extent;
+    for (let i = 0; i + 1 < flat.length; i += stride) {
+      const x = flat[i];
+      const y = flat[i + 1];
+      if (x < minX || x > maxX || y < minY || y > maxY || !this.take()) {
+        continue;
+      }
+      this.beginLabel(symbol.obstacle ? MODE_OBSTACLE : MODE_DECLUTTER, 0, '', x, y);
+      this.symbolPart(symbol, x, y);
+      this.endLabel();
+    }
+  }
+
   private addPointLabels(text: Text, geometry: any, type: string, style: TextValues) {
+    this.symbolHere = type === 'Point' || type === 'MultiPoint' ? this.currentSymbol : null;
     let flat: number[];
     let stride = geometry.getStride?.() ?? 2;
     let widths: number[] | null = null;
@@ -739,6 +793,9 @@ export class LabelBuilder {
       }
     }
     this.parts.push(x, y, 0, 0, rotation, rotateWithView, x0, y0, x1, y1, Math.cos(rotation), Math.sin(rotation));
+    if (this.symbolHere) {
+      this.symbolPart(this.symbolHere, x, y);
+    }
     this.endLabel();
   }
 

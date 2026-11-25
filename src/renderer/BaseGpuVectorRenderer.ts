@@ -36,6 +36,7 @@ import {create as createMat4} from 'ol/vec/mat4.js';
 import {FeatureBatch} from '../render/batch.js';
 import {InstructionBuilder, InstructionJob, pause} from '../render/instructions.js';
 import {featureZIndex} from '../render/order.js';
+import {buildSymbolEvaluator} from '../render/symbols.js';
 import {Picker} from '../render/picking.js';
 import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
 import GpuText, {type LabelFrame, resolveFrameLabels} from '../text/GpuText.js';
@@ -226,6 +227,14 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   protected readonly antialias: boolean;
   private readonly smoothFill: boolean;
   private renderOrder: ((a: FeatureLike, b: FeatureLike) => number) | null;
+  /** The style has symbols that take part in decluttering (see render/symbols.ts). */
+  private placesSymbols = false;
+  /** All point instances of the last build, when symbols are placed: the ones to draw are taken from it. */
+  private pointInstances: BufferSet | null = null;
+  /** `symbolVersion` of the labels the point buffer was made for. */
+  private symbolVersion = -1;
+  /** The point buffer does not hold all symbols of the build. */
+  private symbolsLeftOut = false;
   /** The zoom of the last frame, for a `z-index` that depends on it. */
   private lastZoom = 0;
   /** Last rebuild statistics. */
@@ -329,6 +338,56 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   /** Prepare backend resources; return false while not ready (e.g. async WebGPU device). */
   protected abstract prepareBackend(frameState: FrameState): boolean;
+  /**
+   * Leaves the symbols of `hidden` features out of the point buffer: they
+   * lost their place in decluttering. The instances of the build are kept,
+   * and the ones to draw are uploaded again whenever the set changes.
+   */
+  private hideSymbols(hidden: ReadonlySet<FeatureLike>) {
+    const all = this.pointInstances;
+    const points = this.buffers?.points;
+    if (!all || !points) {
+      return;
+    }
+    if (!hidden.size && !this.symbolsLeftOut) {
+      return; // all are in the buffer already
+    }
+    this.symbolsLeftOut = hidden.size > 0;
+    let instances = all.instances;
+    if (hidden.size) {
+      const refs = new Set<number>();
+      const entries = (this.batch as any).pointBatch.entries as Record<string, {ref?: number}>;
+      for (const feature of hidden) {
+        const ref = entries[getUid(feature)]?.ref;
+        if (ref !== undefined) {
+          refs.add(ref);
+        }
+      }
+      const stride = 2 + this.passes.customSize;
+      const refAt = 2 + this.passes.refOffset;
+      const kept = new Float32Array(instances.length);
+      let k = 0;
+      for (let i = 0; i + stride <= instances.length; i += stride) {
+        if (!refs.has(instances[i + refAt])) {
+          kept.set(instances.subarray(i, i + stride), k);
+          k += stride;
+        }
+      }
+      instances = kept.subarray(0, k);
+    }
+    if (!instances.length) {
+      // nothing to draw: the buffers stay as they are for the next time
+      points.indexCount = 0;
+      return;
+    }
+    const set = {indices: all.indices, vertices: all.vertices, instances};
+    points.gpu = this.upload(set, points.gpu);
+    points.indexCount = all.indices.length;
+    if (points.cpu) {
+      points.cpu = set;
+    }
+  }
+
   /** Tells the instruction builder the order of the features: `z-index` of the style, then `renderOrder`. */
   private applyOrder() {
     const z = featureZIndex(toFlatStyleLike(this.style as any) as FlatStyleLike, this.variables, () => this.lastZoom);
@@ -403,7 +462,9 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   /** Creates or drops the text renderer the current style needs. */
   private updateTextMode() {
     const canvas = this.passes.hasText && this.textMode === 'canvas';
-    const gpu = this.passes.hasText && this.textMode === 'gpu';
+    // also for a layer that declutters symbols and has no text (see render/symbols.ts)
+    this.placesSymbols = !!this.declutter && this.textMode === 'gpu' && this.passes.hasSymbol && !!buildSymbolEvaluator(this.style, this.variables, () => 0);
+    const gpu = (this.passes.hasText && this.textMode === 'gpu') || this.placesSymbols;
     if (canvas && !this.textOverlay) {
       this.textOverlay = new TextOverlay();
     } else if (!canvas && this.textOverlay) {
@@ -795,6 +856,10 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
           invertVerticesTransform: invert,
           textKey: key,
         };
+        // all symbols are in the new buffers: those that lost their place are taken out in the next frame
+        this.pointInstances = this.placesSymbols ? response.points : null;
+        this.symbolVersion = -1;
+        this.symbolsLeftOut = false;
         if (response.index) {
           if (this.picker) {
             this.picker.load(response.index, {center, resolution});
@@ -903,6 +968,10 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
     resolveFrameLabels(frameState);
     this.labelFrame = this.gpuText?.frame(frameState) ?? null;
+    if (this.placesSymbols && this.gpuText && this.symbolVersion !== this.gpuText.symbolVersion) {
+      this.hideSymbols(this.gpuText.hiddenSymbols);
+      this.symbolVersion = this.gpuText.symbolVersion;
+    }
 
     this.dispatch('prerender', frameState, null);
     // the layer opacity is applied when drawing, as the canvas may be shared
@@ -1000,8 +1069,10 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       }
     }
     if (this.picker) {
+      // a symbol that lost its place in decluttering is not there
+      const hidden = this.placesSymbols ? this.gpuText?.hiddenSymbols : undefined;
       for (const feature of this.picker.pick(coordinate, frameState, hitTolerance, (ref) => this.batch.getFeatureFromRef(ref))) {
-        if (!labelled.includes(feature)) {
+        if (!labelled.includes(feature) && !hidden?.has(feature)) {
           yield feature;
         }
       }

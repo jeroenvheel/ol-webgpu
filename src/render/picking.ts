@@ -112,7 +112,7 @@ function iconSize(src: string): [number, number] | undefined {
   return iconSizes.get(src);
 }
 
-interface CompiledStyle {
+export interface CompiledStyle {
   fill: boolean;
   stroke: boolean;
   strokeWidth: Evaluator<number>;
@@ -129,6 +129,8 @@ interface CompiledStyle {
   anchorXPixels: boolean;
   anchorYPixels: boolean;
   strokeOffset: Evaluator<number>;
+  /** `circle-`, `shape-` or `icon-declutter-mode` of the symbol (see symbols.ts). */
+  declutterMode: unknown;
   iconWidth: Evaluator<number>;
   iconHeight: Evaluator<number>;
   iconSrc: string | null;
@@ -170,6 +172,7 @@ function compileStyle(s: FlatStyle): CompiledStyle {
     anchorXPixels: style['icon-anchor-x-units'] === 'pixels',
     anchorYPixels: style['icon-anchor-y-units'] === 'pixels',
     strokeOffset: compile<number>(style['stroke-offset'], NumberType),
+    declutterMode: style[`${p}-declutter-mode`],
     iconWidth: compile<number>(style['icon-width'], NumberType),
     iconHeight: compile<number>(style['icon-height'], NumberType),
     iconSrc: typeof style['icon-src'] === 'string' ? (style['icon-src'] as string) : null,
@@ -179,7 +182,7 @@ function compileStyle(s: FlatStyle): CompiledStyle {
   };
 }
 
-interface CompiledRule {
+export interface CompiledRule {
   filter: Evaluator<boolean>;
   /** For `else` rules: filters of all previous rules. */
   previous: Array<Evaluator<boolean>>;
@@ -188,7 +191,7 @@ interface CompiledRule {
 }
 
 /** Same rule semantics as ol's WebGL `convertStyleToShaders`. */
-function compileRules(style: FlatStyleLike): CompiledRule[] {
+export function compileRules(style: FlatStyleLike): CompiledRule[] {
   const list = (Array.isArray(style) ? style : [style]) as any[];
   const rules: Rule[] =
     list.length && 'style' in list[0]
@@ -219,7 +222,7 @@ function compileRules(style: FlatStyleLike): CompiledRule[] {
  * turns that as well), and its half size. `round`: a circle of radius
  * `halfWidth`, else a rectangle.
  */
-interface SymbolBox {
+export interface SymbolBox {
   x: number;
   y: number;
   halfWidth: number;
@@ -231,7 +234,7 @@ interface SymbolBox {
 const box: SymbolBox = {x: 0, y: 0, halfWidth: 0, halfHeight: 0, round: true, rotation: 0};
 
 /** The box of a symbol for the feature of `ctx` (shared: copy what is kept), or null when nothing is drawn. */
-function symbolBox(s: CompiledStyle, ctx: any): SymbolBox | null {
+export function symbolBox(s: CompiledStyle, ctx: any): SymbolBox | null {
   const scaleValue = run(s.scale, ctx) ?? 1;
   const scaleX = Math.abs(Array.isArray(scaleValue) ? scaleValue[0] : scaleValue);
   const scaleY = Math.abs(Array.isArray(scaleValue) ? scaleValue[1] : scaleValue);

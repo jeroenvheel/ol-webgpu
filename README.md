@@ -298,6 +298,12 @@ two backends and GPU-evaluated styles.
   as in ol. Labels that are shown keep their place while the view moves, and
   labels fade in and out (150 ms). All labels are measured, but only those
   that can win a place get glyphs.
+  A symbol (circle, shape or icon) of a point takes part when its style has
+  `circle-`, `shape-` or `icon-declutter-mode` set to `'declutter'` or
+  `'obstacle'`: it takes space, a symbol that has no place is not drawn
+  and not hit, and a symbol and its label are drawn together or not at all.
+  Without such a mode symbols are always drawn (in ol's Canvas layers
+  `'declutter'` is the default).
 - **Hit detection.** A shown label is hit within its box (with
   `hitTolerance`), before the geometries below it.
 

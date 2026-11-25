@@ -63,7 +63,7 @@ const server = await createServer({
   root: here,
   logLevel: 'warn',
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
-  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'smooth.ts', 'workers.ts', 'slices.ts', 'order.ts', 'renderfeature.ts', 'rebuild.ts']},
+  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'smooth.ts', 'workers.ts', 'slices.ts', 'order.ts', 'symbols.ts', 'renderfeature.ts', 'rebuild.ts']},
   worker: {format: 'es'},
   plugins: [
     {
@@ -658,6 +658,22 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
       ordered[layer] = {'order page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
     }
   }
+  // symbols that take part in decluttering (symbols.ts)
+  const symbols = {};
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    errors.length = 0;
+    await page.goto(`${base}symbols.html?layer=${layer}`);
+    try {
+      await page.waitForFunction(() => window.__symbols, null, {timeout: 60_000, polling: 50});
+      const {times, ...checked} = await page.evaluate(() => window.__symbols);
+      symbols[layer] = checked;
+      if (times) {
+        console.log(`  [${layer}] 40 000 symbols: shown after ${times.plain.ms} ms; placed, after ${times.placed.ms} ms (${times.placed.hidden} not drawn)`);
+      }
+    } catch {
+      symbols[layer] = {'symbols page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
+    }
+  }
   // smoothFill (smooth.ts)
   const smooth = {};
   for (const layer of layers.filter((l) => l !== 'ol')) {
@@ -672,7 +688,7 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
   }
   const checkNames = [...new Set(Object.values(checks).flatMap((c) => Object.keys(c)))];
   // the checks of smooth.ts are of the two layers only
-  for (const pages of [smooth, extra, ordered]) {
+  for (const pages of [smooth, extra, ordered, symbols]) {
     for (const name of new Set(Object.values(pages).flatMap((c) => Object.keys(c)))) {
       checkNames.push(name);
       for (const run of Object.keys(checks)) {
