@@ -63,7 +63,7 @@ const server = await createServer({
   root: here,
   logLevel: 'warn',
   server: {port: 5181, strictPort: false, fs: {allow: [root]}},
-  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'smooth.ts', 'renderfeature.ts', 'rebuild.ts']},
+  optimizeDeps: {entries: ['harness.ts', 'cases/*/main.js', 'gputext.ts', 'labels.ts', 'bend.ts', 'smooth.ts', 'workers.ts', 'renderfeature.ts', 'rebuild.ts']},
   worker: {format: 'es'},
   plugins: [
     {
@@ -598,6 +598,32 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
       checks[name] = await page.evaluate(() => window.__rebuild);
     } catch {
       checks[name] = {'page finished': {ok: false, detail: errors.join(' | ').slice(0, 300)}};
+    }
+  }
+  // several layers that build at the same time (workers.ts), with one worker and with two
+  for (const layer of layers.filter((l) => l !== 'ol')) {
+    const runsOf = {};
+    for (const workers of [1, 2, 1, 2]) {
+      errors.length = 0;
+      await page.goto(`${base}workers.html?layer=${layer}&workers=${workers}`);
+      try {
+        await page.waitForFunction(() => window.__workers, null, {timeout: 120_000, polling: 50});
+        (runsOf[workers] ??= []).push(await page.evaluate(() => window.__workers));
+      } catch {
+        (runsOf[workers] ??= []).push(null);
+      }
+    }
+    const all = [...runsOf[1], ...runsOf[2]];
+    const ok = all.every((r) => r && r.drawn > 10_000) && runsOf[1].every((r) => r.workers === 1) && runsOf[2].every((r) => r.workers === 2);
+    const best = (list, key = 'ms') => Math.min(...list.map((r) => r?.[key] ?? Infinity));
+    if (all[0]) {
+      console.log(
+        `  [${layer}] ${all[0].layers} layers of ${all[0].lines} lines: complete after ${best(runsOf[1])} ms with one worker, ${best(runsOf[2])} ms with two; all built again in ${best(runsOf[1], 'again')} ms and ${best(runsOf[2], 'again')} ms (best of two runs)`,
+      );
+    }
+    checks[layer]['a second worker builds when the first is busy'] = {ok, detail: JSON.stringify(runsOf)};
+    for (const run of Object.keys(checks)) {
+      checks[run]['a second worker builds when the first is busy'] ??= {ok: true, skipped: true};
     }
   }
   // smoothFill (smooth.ts)

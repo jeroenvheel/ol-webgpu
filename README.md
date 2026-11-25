@@ -187,6 +187,10 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
   below 1, or with labels from the text worker, are drawn into an offscreen
   image first and composited with the layer opacity. WebGPU layers record into one command
   encoder that is submitted once per map frame.
+- **Workers.** One worker builds the buffers of all layers of the page. When
+  it has a lot to do (4 MB of instructions or more are waiting) a second one
+  starts, so a big layer does not hold up the others; it stops again after
+  10 seconds without builds.
 - **Fallbacks.** If WebAssembly cannot load, the worker uses ol's JS buffer
   code; if WebGPU is unavailable, `GpuVectorLayer` uses WebGL2. If the
   worker cannot start (its file is missing, or a Content Security Policy
