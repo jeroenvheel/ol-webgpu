@@ -9,6 +9,7 @@
  */
 import type {FeatureLike} from 'ol/Feature.js';
 import {getUid} from 'ol/util.js';
+import type OlMap from 'ol/Map.js';
 import type {FrameState} from 'ol/Map.js';
 import ViewHint from 'ol/ViewHint.js';
 import {type Coordinate, wrapX} from 'ol/coordinate.js';
@@ -472,7 +473,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       this.textOverlay = null;
     }
     if (gpu && !this.gpuText) {
-      this.gpuText = new GpuText(this.style, this.variables, this.declutter, () => this.getLayer()?.getMapInternal()?.render());
+      this.gpuText = new GpuText(this.style, this.variables, this.declutter, () => this.renderingMap()?.render());
     } else if (gpu) {
       this.gpuText!.setStyle(this.style, this.variables);
     } else if (this.gpuText) {
@@ -1097,9 +1098,14 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     return undefined;
   }
 
+  /** The map that draws the layer, also for a layer of `setMap` (see the layer). */
+  private renderingMap(): OlMap | null {
+    const layer = this.getLayer() as any;
+    return layer?.getRenderingMap?.() ?? layer?.getMapInternal?.() ?? null;
+  }
+
   override getFeatures(pixel: Pixel): Promise<FeatureLike[]> {
-    const map = this.getLayer().getMapInternal?.();
-    const frameState = (map as any)?.frameState_ as FrameState | undefined;
+    const frameState = (this.renderingMap() as any)?.frameState_ as FrameState | undefined;
     if (!frameState) {
       return Promise.resolve([]);
     }

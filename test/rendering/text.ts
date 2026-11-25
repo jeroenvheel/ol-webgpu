@@ -53,7 +53,17 @@ function readLayer(): ImageData {
 const settled = () => renderersSettled(2);
 
 (async () => {
-  while (!settled()) {
+  // First what an app waits for: the map is complete, with the first text image.
+  // `settled()` alone is not enough before the first frame: the layer has no renderer
+  // yet then, and no renderers are all settled. The first WebGPU page of a run takes
+  // longer than the wait below to get its device, and was read before anything was drawn.
+  // (Not a render in every frame while waiting: ol's text worker drops the image it is
+  // making when the next one is asked for.)
+  await new Promise((resolve) => map.once('rendercomplete', resolve));
+  for (let i = 0; !settled(); i++) {
+    if (i % 20 === 19) {
+      map.render(); // `settled` counts frames, and a map that is complete draws no more
+    }
     await frame();
   }
   await new Promise((r) => setTimeout(r, 200)); // let the text image settle

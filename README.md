@@ -46,11 +46,13 @@ map.addLayer(layer);
   world copy, hit-detectable, and with `declutter: true` (or a group name)
   without overlapping. `text: 'canvas'` draws them with ol's text worker
   instead, exactly as `ol/layer/WebGLVector` does. See [Labels](#labels).
-- A layer that is taken from its map (`map.removeLayer()`, `setMap(null)`)
-  gives up its GPU buffers, its part of the shared canvas and its hit index
-  by itself, and builds them again when it is added to a map. A layer that
-  is put back in the same task, to move it in the layers, keeps them. Layers
-  of a map that is thrown away as a whole still have to be disposed.
+- A layer that is taken from its map (`map.removeLayer()`, `setMap(null)`),
+  or whose map is taken from the page (`map.setTarget(null)`,
+  `map.dispose()`), gives up its GPU buffers, its part of the shared canvas
+  and its hit index by itself, and builds them again when it is drawn again.
+  A layer that is put back in the same task, to move it in the layers, and a
+  map that gets another target in the same task keep them. Only a map that
+  is dropped while it still has its target leaves its layers to be disposed.
 
 ## Installation
 

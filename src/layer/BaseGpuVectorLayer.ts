@@ -64,10 +64,12 @@ export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> ex
 /**
  * Common API of the ol-webgpu vector layers; mirrors `ol/layer/WebGLVector`.
  *
- * A layer that is taken from its map gives up what the garbage collector
- * cannot free (buffers and textures on the GPU, its part of a shared canvas,
- * its hit index and its listeners on the source), so it does not have to be
- * disposed for that. It builds everything again when it is added to a map.
+ * A layer that is taken from its map, or whose map is taken from the page
+ * (`map.setTarget(null)`, `map.dispose()`), gives up what the garbage
+ * collector cannot free (buffers and textures on the GPU, its part of a
+ * shared canvas, its hit index and its listeners on the source), so it does
+ * not have to be disposed for that. It builds everything again when it is
+ * drawn again.
  */
 export default abstract class BaseGpuVectorLayer<S extends VectorSource = VectorSource> extends Layer<S, any> {
   protected styleVariables: StyleVariables;
@@ -189,14 +191,30 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
    */
   override setMapInternal(map: OlMap | null) {
     super.setMapInternal(map);
+    this.watchMap();
+  }
+
+  /**
+   * The map the layer is drawn by: the one it is in the layers of, or the
+   * one of `setMap` (which ol does not keep on the layer).
+   * @internal
+   */
+  getRenderingMap(): OlMap | null {
+    return this.getMapInternal() ?? this.unmanagedMap;
+  }
+
+  private watchMap() {
     this.mapKeys.forEach(unlistenByKey);
     this.mapKeys = [];
     this.releaseWithoutMap();
+    const map = this.getRenderingMap();
     if (map) {
       const renderer = () => (this.hasRenderer() ? (this.getRenderer() as BaseGpuVectorRenderer<unknown>) : null);
       this.mapKeys.push(
         listen(map, 'postcompose', (e: any) => renderer()?.onPostCompose(e.frameState)),
         listen(map, 'rendercomplete', (e: any) => renderer()?.onRenderComplete(e.frameState)),
+        // a map without a target draws nothing (and that is how a map is thrown away)
+        listen(map, 'change:target', () => this.releaseWithoutMap()),
       );
     }
   }
@@ -207,28 +225,34 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
   override setMap(map: OlMap | null) {
     super.setMap(map);
     this.unmanagedMap = map;
-    this.releaseWithoutMap();
+    this.watchMap();
   }
 
   private releaseTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Whether the layer is of a map that is on a page. */
+  private isShown(): boolean {
+    return !!this.getRenderingMap()?.getTarget();
+  }
+
   /**
-   * A layer without a map gives up its renderer, and with it everything that
-   * is not freed by the garbage collector (see the class). Not at once: a
-   * layer that is taken out to be put back in another place of the layers,
-   * or in another map, keeps what it has built.
+   * A layer without a map, or of a map without a target, gives up its
+   * renderer, and with it everything that is not freed by the garbage
+   * collector (see the class). Not at once: a layer that is taken out to be
+   * put back in another place of the layers or in another map, and a map
+   * that is moved to another element, keep what was built.
    */
   private releaseWithoutMap() {
     if (this.releaseTimer !== null) {
       clearTimeout(this.releaseTimer);
       this.releaseTimer = null;
     }
-    if (this.getMapInternal() || this.unmanagedMap || !this.hasRenderer()) {
+    if (this.isShown() || !this.hasRenderer()) {
       return;
     }
     this.releaseTimer = setTimeout(() => {
       this.releaseTimer = null;
-      if (!this.getMapInternal() && !this.unmanagedMap) {
+      if (!this.isShown()) {
         this.clearRenderer();
       }
     }, 0);

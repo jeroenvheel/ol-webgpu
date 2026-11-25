@@ -86,6 +86,14 @@ const scenarios: Record<string, () => Promise<void>> = {
     await settle(map);
     dispose(map, layers);
   },
+  /** As lifecycle, but only the map leaves the page: neither it nor its layers are disposed. */
+  async dropMap() {
+    const layers = [new Layer({source: new VectorSource({features: features()}), style: shapes})];
+    const map = makeMap(layers);
+    await settle(map);
+    map.setTarget(undefined);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  },
   /** The same with labels drawn on the GPU, decluttered. */
   async lifecycleLabels() {
     const layers = [new Layer({source: new VectorSource({features: as(makePlaces(4000))}), style: labels, declutter: true})];

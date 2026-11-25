@@ -91,6 +91,64 @@ const names = (x: number, y: number) => map.getFeaturesAtPixel([x, y]).map((f) =
     const off = {renderers: liveRenderers.size, drawn: alphaAt(128, 68)};
     check('so does a layer of setMap', on.renderers === 3 && on.drawn === 255 && off.renderers === 2 && off.drawn === 0, {on, off});
 
+    // A layer of setMap is not in the layers of the map, and the map is not a property
+    // of it: `getFeatures` found nothing, as it looked for the frame of that property.
+    // (The labels were drawn before too: the frame after the layout comes with the
+    // layer being ready.)
+    const labelled = new Layer({
+      source: new VectorSource({features: [point(0, -70, 'labelled')]}),
+      style: {'text-value': ['get', 'name'], 'text-font': 'bold 22px sans-serif', 'text-fill-color': '#000000'},
+      declutter: true,
+    });
+    let frames = 0;
+    labelled.on('postrender', () => frames++);
+    labelled.setMap(map);
+    await new Promise((resolve) => setTimeout(resolve, 1000)); // no render is asked for here
+    const framesAlone = frames;
+    const solid = () => {
+      map.renderSync();
+      const probe = document.createElement('canvas').getContext('2d', {willReadFrequently: true})!;
+      probe.canvas.width = probe.canvas.height = 256;
+      for (const canvas of document.querySelectorAll('#map canvas')) {
+        probe.drawImage(canvas as HTMLCanvasElement, 0, 0);
+      }
+      const data = probe.getImageData(68, 178, 120, 40).data;
+      let n = 0;
+      for (let i = 3; i < data.length; i += 4) {
+        n += data[i] > 200 ? 1 : 0;
+      }
+      return n;
+    };
+    const text = solid();
+    const found = (await labelled.getFeatures([128, 198])).map((f) => f.get('name'));
+    check('a layer of setMap draws its labels and finds its features', framesAlone >= 2 && text > 100 && found.join() === 'labelled', {
+      frames: framesAlone,
+      text,
+      found,
+    });
+    labelled.setMap(null);
+    labelled.dispose();
+    await settle();
+
+    // a map that leaves the page: its layers give up their renderers, unless it is back at once
+    const kept = rendererOf(layer);
+    map.setTarget(undefined);
+    map.setTarget('map');
+    await task();
+    await settle();
+    const movedMap = {same: rendererOf(layer) === kept, builds: kept.builds, drawn: alphaAt(128, 128)};
+    map.setTarget(undefined);
+    await task();
+    const without = {renderers: liveRenderers.size, has: layer.hasRenderer()};
+    map.setTarget('map');
+    await settle();
+    const again = {renderers: liveRenderers.size, drawn: alphaAt(128, 128), other: alphaAt(68, 128), hit: names(128, 128)};
+    check(
+      'the layers of a map that leaves the page give up their renderers, and are drawn again when it is back',
+      movedMap.same && movedMap.builds === 1 && movedMap.drawn === 255 && without.renderers === 0 && !without.has && again.renderers === 2 && again.drawn === 255 && again.other === 255 && again.hit.join() === 'point',
+      {movedMap, without, again},
+    );
+
     // features of the view are loaded while it moves only when the layer asks for it
     const loads = async (options: object) => {
       const calls: number[] = [];
