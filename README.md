@@ -40,6 +40,10 @@ map.addLayer(layer);
   `updateWhileAnimating` and `updateWhileInteracting` (default `false`, as
   for ol's vector layers: the source is asked for the features of the view
   also while the view moves),
+  `keepBuffers` (WebGL2 only, default `true`: a copy of the buffers is kept
+  in memory, to upload again at once after a lost context or when the layer
+  moves to another canvas; with `false` that memory is saved and the buffers
+  are built again in those cases),
   `preserveDrawingBuffer`
   (default `true`, needed for map export), `wasmUrl`, `shaderWasmUrl`, and on
   `GpuVectorLayer` `backend` (`'auto'` (default), `'webgpu'` or `'webgl2'`).
@@ -129,7 +133,7 @@ export const isWebGPUAvailable = () => false;
 ## How it works
 
 ```
-ol/source/Vector ──► MixedGeometryBatch ──► render instructions      (main thread)
+ol/source/Vector ──► FeatureBatch ──────► render instructions      (main thread)
                                               │
                                               ▼  transferred
                               worker: Rust/WASM (crates/core)
@@ -172,13 +176,21 @@ ol/source/Vector ──► MixedGeometryBatch ──► render instructions     
   points with 7 attributes take about 30 ms instead of 150 ms. With
   `text: 'canvas'` the buffers follow the extent as in ol, because ol's text
   worker draws the text for the view of the build.
-- **Adding features.** The batch is ol's `MixedGeometryBatch` with the refs
-  kept another way (`src/render/batch.ts`): ol looks every added feature up
-  in a Map from uid to ref, which took half the time of adding features to
-  a big source. Here the ref comes from the entries and the features are in
-  an array at their ref: 200 000 points are added in about 70 ms instead of
-  230–430 ms. `test/unit/batch.test.ts` checks that it holds what ol's batch
-  holds.
+- **Adding features.** ol's `MixedGeometryBatch` keeps an entry per feature
+  and geometry kind, with a copy of the coordinates of every line and ring.
+  The layer's own batch (`src/render/batch.ts`) keeps a few numbers per
+  feature in typed arrays and reads the coordinates from the geometries when
+  instructions are made: for 300 000 points, 200 000 lines and 50 000
+  polygons it holds about 40 MB where ol's entries were 160 MB. What ol's
+  batch holds is only made for ol's own instruction generators, which are
+  used with `text: 'canvas'`. `test/unit/batch.test.ts` checks that it gives
+  what ol's batch holds.
+- **Drawn before it can be picked.** The worker sends the buffers of a build
+  first and the hit index after them, and a WebGPU layer builds while its
+  device is being requested. The first frame of a big layer comes that much
+  sooner (the index of a million points takes about 0.15 s); until the index
+  is in, hits come from the index of the build before, or there are none
+  after the first build. `renderer.isPickingReady(frameState)` tells.
 - **CPU hit detection.** WebGPU readback is asynchronous, but OpenLayers asks
   for hits synchronously, so picking uses a spatial index (built in Rust in the
   worker, queried by a main-thread wasm instance) plus the style's filter,
