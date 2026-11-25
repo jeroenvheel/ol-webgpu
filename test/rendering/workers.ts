@@ -19,7 +19,11 @@ const Layer = params.get('layer') === 'webgpu' ? WebGPUVectorLayer : WebGL2Vecto
 WorkerClient.maxWorkers = Number(params.get('workers') ?? 2);
 
 const LAYERS = 5;
-const LINES = 120_000;
+// fewer lines where drawing is slow (software rendering in CI), and then less work is worth a worker
+const LINES = Number(params.get('lines') ?? 120_000);
+if (params.has('worth')) {
+  WorkerClient.worthAWorker = Number(params.get('worth'));
+}
 const sources: VectorSource[] = [];
 for (let l = 0; l < LAYERS; l++) {
   const features: Feature[] = [];

@@ -605,7 +605,8 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
     const runsOf = {};
     for (const workers of [1, 2, 1, 2]) {
       errors.length = 0;
-      await page.goto(`${base}workers.html?layer=${layer}&workers=${workers}`);
+      // software rendering (CI) draws slowly: a sixth of the lines there
+      await page.goto(`${base}workers.html?layer=${layer}&workers=${workers}${process.env.CI ? '&lines=20000&worth=500000' : ''}`, {timeout: 120_000});
       try {
         await page.waitForFunction(() => window.__workers, null, {timeout: 120_000, polling: 50});
         (runsOf[workers] ??= []).push(await page.evaluate(() => window.__workers));
@@ -630,7 +631,7 @@ if (args.rebuild !== 'false' && (!args.match || 'rebuild'.includes(args.match) |
   const extra = {};
   for (const layer of layers.filter((l) => l !== 'ol')) {
     errors.length = 0;
-    await page.goto(`${base}slices.html?layer=${layer}`);
+    await page.goto(`${base}slices.html?layer=${layer}`, {timeout: 120_000});
     try {
       await page.waitForFunction(() => window.__slices, null, {timeout: 120_000, polling: 50});
       const {times, ...sliced} = await page.evaluate(() => window.__slices);
