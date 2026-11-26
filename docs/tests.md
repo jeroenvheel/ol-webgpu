@@ -74,6 +74,9 @@ screen for the frames it takes to lay them out again.
 `test/unit/atlas.test.ts` covers when a full atlas starts over.
 `test/unit/declutter.test.ts` covers the collision grid and the choice of
 the labels that get glyphs.
+`test/unit/wrap.test.ts` covers where `text-max-width` breaks a text, plain
+and in parts with fonts of their own, and `test/unit/layout.test.ts` the
+order of the labels and which direction a label along a line is read in.
 
 **Text while panning.** With `text: 'canvas'`, `test/rendering/text.ts` pans by whole pixels and
 reads the frame in the same task, so it shows the previous text image
@@ -136,6 +139,61 @@ themselves. `test/unit/renderfeature.test.ts` checks that RenderFeatures give
 the same render instructions, Rust/WASM buffers and text styles as Features.
 `npm run test:memory` runs each of its leak checks with both kinds of
 feature, and `--big` compares what a big layer costs with each.
+
+**The order of the features.** `test/rendering/order.ts` checks 14
+situations on both backends: features are drawn as they came into the
+source; a `z-index` of the style, a `renderOrder` of the layer and both
+together order them, and `setRenderOrder` orders them again; styles with a
+number as `z-index` are drawn in that order; a `z-index` that is an
+expression puts a fill over the stroke and the symbol of a lower one, and so
+does a `renderOrder` without a `z-index`; without either, symbols are over
+strokes over fills; with more than 64 different numbers the kinds are drawn
+one after the other and the layer warns once, with the count; a changed
+`z-index` moves a feature, also over another kind and with symbols that are
+placed. The top feature is read from the canvas and from
+`getFeaturesAtPixel`. `test/unit/order.test.ts` and
+`test/unit/levels.test.ts` cover the numbers and the parts of the buffers
+they give, and `test/unit/sort.test.ts` the sort in slices.
+
+**Symbols that take part in decluttering.** `test/rendering/symbols.ts`
+checks 9 situations: a symbol that overlaps an earlier one is not drawn and
+not hit; symbols without a declutter mode are all drawn; obstacles are drawn
+and keep labels away; a symbol and its label are drawn together or not at
+all; icons that overlap as they lie do not when they are turned a quarter; a
+symbol comes back when there is room and goes again when there is none, and
+fades out when it does; a symbol takes the place of one that is removed.
+`test/unit/symbols.test.ts` covers the box of a symbol.
+
+**Layers and maps that leave.** `test/rendering/removed.ts` checks 9
+situations: a layer that is put back at once keeps what it built; a layer
+that is taken from its map gives up its renderer and is drawn and hit again
+when it comes back, also a layer of `setMap`, with its labels; a layer that
+goes to another canvas is drawn there, and built again only without a copy
+of its buffers; the layers of a map that leaves the page (`setTarget`) give
+up their renderers and are drawn again when it is back, and so do those of a
+map whose element is taken from the page and put back; features are loaded
+during an animation only with `updateWhileAnimating`.
+
+**Big layers and the page.** `test/rendering/slices.ts`: a change in a big
+layer is built in slices, a change that comes during the slices is built
+too, and a `renderOrder` is sorted in slices, with only what changed sorted
+again. `test/rendering/workers.ts`: a second worker builds when the first
+is busy. `test/rendering/smooth.ts` checks the four cases of `smoothFill`
+(hard edges without it, a fade outside the polygon with it, a translucent
+fill that is not darker at its edge and keeps its hole, no band with a
+stroke), and `test/rendering/bend.ts` text along a line with bends.
+
+**Memory.** `npm run test:memory` repeats 14 things a layer does, 12 times
+after 3 to warm up, with `ol/Feature` and with RenderFeatures on both
+backends, and checks that the heap, the GL and WebGPU objects and the
+workers do not grow with the repetitions: a map with a layer made and
+disposed (also with labels on the GPU and with ol's text worker), a map that
+only loses its target, a map whose element is taken from the page, a layer
+swapped for another with and without `dispose()`, panning with a rebuild, a
+new style, a style variable, features added and removed, labels after a pan,
+labels with texts that were never drawn before, and picks. After everything
+is disposed no feature, map, layer, renderer, canvas or buffer may be left.
+`--big` reads the memory of one big layer step by step.
 
 **Package.** `npm run test:dist` builds a small app against `dist/` for
 production and checks in Chromium that WebGPU, WebGL2 and the runtime
