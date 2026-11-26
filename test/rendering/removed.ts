@@ -179,6 +179,30 @@ const names = (x: number, y: number) => map.getFeaturesAtPixel([x, y]).map((f) =
       {movedMap, without, again},
     );
 
+    // the element of the map is taken from the page without telling the map, and put back
+    const element = map.getTargetElement()!;
+    const parent = element.parentNode!;
+    const sibling = element.nextSibling;
+    element.remove();
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 40)));
+    const detached = {renderers: liveRenderers.size, has: layer.hasRenderer()};
+    parent.insertBefore(element, sibling);
+    map.updateSize();
+    await settle();
+    const attached = {renderers: liveRenderers.size, drawn: alphaAt(128, 128), other: alphaAt(68, 128), hit: names(128, 128)};
+    // and once more: the layers watch the element again
+    element.remove();
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 40)));
+    const detachedAgain = liveRenderers.size;
+    parent.insertBefore(element, sibling);
+    map.updateSize();
+    await settle();
+    check(
+      'the layers of a map whose element leaves the page give up their renderers, and are drawn again when it is back',
+      detached.renderers === 0 && !detached.has && attached.renderers === 2 && attached.drawn === 255 && attached.other === 255 && attached.hit.join() === 'point' && detachedAgain === 0 && alphaAt(128, 128) === 255,
+      {detached, attached, detachedAgain},
+    );
+
     // features of the view are loaded while it moves only when the layer asks for it
     const loads = async (options: object) => {
       const calls: number[] = [];

@@ -25,6 +25,45 @@
 /** With more different numbers than this, the kinds are not drawn number by number. */
 export const MAX_LEVELS = 64;
 
+/** A `renderOrder` is turned into numbers for layers of up to this many features (see `orderLevels`). */
+export const MAX_ORDERED = 4096;
+
+/**
+ * Numbers for the features of a layer with a `renderOrder` and no
+ * `z-index`, so that they are drawn as a Canvas layer draws them: all of a
+ * feature before the next one, where kind by kind a symbol is over every
+ * stroke and a stroke over every fill.
+ *
+ * A row of features in the order they are drawn in can share a number as
+ * long as kind by kind gives the same picture: until a feature has a kind
+ * that comes before a kind of an earlier one in the row (a fill after a
+ * stroke, a stroke after a symbol). Then the next number starts.
+ *
+ * @param kinds per feature, in the order of `renderOrder`: its kinds as bits (1 fill, 2 stroke, 4 symbol)
+ * @return the number of each feature, or null when one number would do or
+ *   there would be more than `MAX_LEVELS`
+ */
+export function orderLevels(kinds: ArrayLike<number>): Uint32Array | null {
+  const out = new Uint32Array(kinds.length);
+  let level = 0;
+  // the last kind of the row so far: 0 before anything is in it
+  let last = 0;
+  for (let i = 0; i < kinds.length; i++) {
+    const bits = kinds[i];
+    if (bits) {
+      const first = bits & -bits;
+      if (first < last) {
+        level++;
+        last = 0;
+      }
+      const highest = bits & 4 ? 4 : bits & 2 ? 2 : 1;
+      last = Math.max(last, highest);
+    }
+    out[i] = level;
+  }
+  return level === 0 || level + 1 > MAX_LEVELS ? null : out;
+}
+
 /** Where the features of each number start, per kind, as counted with the instructions. */
 export interface LevelStarts {
   /** The different numbers, rising. */
@@ -146,13 +185,20 @@ export function drawLevels(
  * The starts of the numbers of all kinds together: every kind gets a start
  * for every number that any kind has (an empty range where it has none).
  * @param kinds per kind `[z, start, z, start, ...]` as counted (rising z) and the end, or null
+ * @param tooMany called with the count when there are more numbers than `MAX_LEVELS`
  */
-export function mergeStarts(kinds: Record<'points' | 'lines' | 'polygons' | 'edges', {levels: number[]; end: number} | null>): LevelStarts | null {
+export function mergeStarts(
+  kinds: Record<'points' | 'lines' | 'polygons' | 'edges', {levels: number[]; end: number} | null>,
+  tooMany?: (count: number) => void,
+): LevelStarts | null {
   const all = new Set<number>();
   for (const kind of Object.values(kinds)) {
     for (let i = 0; kind && i < kind.levels.length; i += 2) {
       all.add(kind.levels[i]);
     }
+  }
+  if (all.size > MAX_LEVELS) {
+    tooMany?.(all.size);
   }
   if (all.size < 2 || all.size > MAX_LEVELS) {
     return null;

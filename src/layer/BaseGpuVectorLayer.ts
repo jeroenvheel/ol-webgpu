@@ -217,6 +217,7 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
   private watchMap() {
     this.mapKeys.forEach(unlistenByKey);
     this.mapKeys = [];
+    this.watchTarget();
     this.releaseWithoutMap();
     const map = this.getRenderingMap();
     if (map) {
@@ -225,9 +226,45 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
         listen(map, 'postcompose', (e: any) => renderer()?.onPostCompose(e.frameState)),
         listen(map, 'rendercomplete', (e: any) => renderer()?.onRenderComplete(e.frameState)),
         // a map without a target draws nothing (and that is how a map is thrown away)
-        listen(map, 'change:target', () => this.releaseWithoutMap()),
+        listen(map, 'change:target', () => {
+          this.watchTarget();
+          this.releaseWithoutMap();
+        }),
       );
     }
+  }
+
+  private targetObserver: ResizeObserver | null = null;
+
+  /**
+   * Watches the element of the map: an element that is taken from the page
+   * gets no size, which is the only thing that tells. (ol watches it too,
+   * but keeps the size the map had.)
+   */
+  private watchTarget() {
+    this.targetObserver?.disconnect();
+    this.targetObserver = null;
+    const element = this.getRenderingMap()?.getTargetElement();
+    if (element && typeof ResizeObserver !== 'undefined') {
+      this.targetObserver = new ResizeObserver(() => {
+        if (!element.isConnected) {
+          // An observer with an element keeps both, and through them the layer and
+          // its map, from the garbage collector. The layer watches again when it
+          // is drawn again (see `render`).
+          this.targetObserver?.disconnect();
+          this.targetObserver = null;
+        }
+        this.releaseWithoutMap();
+      });
+      this.targetObserver.observe(element);
+    }
+  }
+
+  override render(frameState: any, target: HTMLElement): HTMLElement | null {
+    if (!this.targetObserver) {
+      this.watchTarget(); // back on a page after its element was taken from one
+    }
+    return super.render(frameState, target);
   }
 
   /** The map of a layer that is not in its layers (`setMap`). */
@@ -243,12 +280,15 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
 
   /** Whether the layer is of a map that is on a page. */
   private isShown(): boolean {
-    return !!this.getRenderingMap()?.getTarget();
+    const map = this.getRenderingMap();
+    // An element that is not in a document shows nothing: that is how a page throws
+    // a map away without telling it (the element is removed, the map forgotten).
+    return !!map?.getTarget() && map.getTargetElement()?.isConnected !== false;
   }
 
   /**
-   * A layer without a map, or of a map without a target, gives up its
-   * renderer, and with it everything that is not freed by the garbage
+   * A layer without a map, or of a map without a target or with one that is
+   * not on the page, gives up its renderer, and with it everything that is not freed by the garbage
    * collector (see the class). Not at once: a layer that is taken out to be
    * put back in another place of the layers or in another map, and a map
    * that is moved to another element, keep what was built.
@@ -276,6 +316,8 @@ export default abstract class BaseGpuVectorLayer<S extends VectorSource = Vector
     }
     this.mapKeys.forEach(unlistenByKey);
     this.mapKeys = [];
+    this.targetObserver?.disconnect();
+    this.targetObserver = null;
     super.disposeInternal();
   }
 }

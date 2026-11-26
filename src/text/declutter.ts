@@ -62,45 +62,74 @@ const box = [0, 0, 0, 0];
  * declutter group, or the edge of the screen, hides a winner.
  */
 export function selectCandidates(set: LabelSet): Set<number> {
-  const {order, partStart, partEnd, mode, parts, keys} = set;
-  const cos = Math.cos(set.rotation);
-  const sin = Math.sin(set.rotation);
-  const r = set.resolution;
-  // coordinate to pixel, as the view's transform but around the set's origin
-  const transform = composeTransform(createTransform(), 0, 0, 1 / r, -1 / r, -set.rotation, -set.origin[0], -set.origin[1]);
-  const taken = new Uint8Array(set.count);
-  const candidates = new Set<number>();
-  const boxes: number[] = [];
-  for (let round = 0; round < ROUNDS; round++) {
-    const occupancy = new Occupancy();
-    for (let o = 0; o < order.length; o++) {
-      const i = order[o];
-      // an obstacle is in the way in every round
-      const again = taken[i] === 1 && mode[i] === MODE_OBSTACLE;
-      if (taken[i] && !again) {
-        continue;
-      }
-      if (mode[i] !== MODE_NONE) {
-        boxes.length = 0;
-        let free = true;
-        for (let part = partStart[i]; part < partEnd[i]; part++) {
-          partBox(parts, part, transform, 0, cos, sin, box);
-          if (mode[i] === MODE_DECLUTTER && occupancy.collides(box[0], box[1], box[2], box[3])) {
-            free = false;
-            break;
-          }
-          boxes.push(box[0], box[1], box[2], box[3]);
+  const selection = new CandidateSelection(set);
+  selection.step(Infinity);
+  return selection.candidates;
+}
+
+/** How many labels are placed between two looks at the clock. */
+const CLOCK_EVERY = 512;
+
+/** `selectCandidates` in slices: `step` until it returns true, then `candidates` has them. */
+export class CandidateSelection {
+  readonly candidates = new Set<number>();
+  private readonly cos: number;
+  private readonly sin: number;
+  private readonly transform: number[];
+  private readonly taken: Uint8Array;
+  private readonly boxes: number[] = [];
+  private round = 0;
+  private o = 0;
+  private occupancy = new Occupancy();
+
+  constructor(private readonly set: LabelSet) {
+    this.cos = Math.cos(set.rotation);
+    this.sin = Math.sin(set.rotation);
+    const r = set.resolution;
+    // coordinate to pixel, as the view's transform but around the set's origin
+    this.transform = composeTransform(createTransform(), 0, 0, 1 / r, -1 / r, -set.rotation, -set.origin[0], -set.origin[1]);
+    this.taken = new Uint8Array(set.count);
+  }
+
+  /** Works until `deadline` (`performance.now()`); true when all rounds are done. */
+  step(deadline: number): boolean {
+    const {order, partStart, partEnd, mode, parts, keys} = this.set;
+    const {taken, candidates, boxes, transform, cos, sin} = this;
+    for (; this.round < ROUNDS; this.round++, this.o = 0, this.occupancy = new Occupancy()) {
+      const occupancy = this.occupancy;
+      for (let o = this.o; o < order.length; o++) {
+        if (o % CLOCK_EVERY === 0 && o > this.o && performance.now() >= deadline) {
+          this.o = o;
+          return false;
         }
-        if (!free) {
+        const i = order[o];
+        // an obstacle is in the way in every round
+        const again = taken[i] === 1 && mode[i] === MODE_OBSTACLE;
+        if (taken[i] && !again) {
           continue;
         }
-        for (let b = 0; b < boxes.length; b += 4) {
-          occupancy.insert(boxes[b], boxes[b + 1], boxes[b + 2], boxes[b + 3]);
+        if (mode[i] !== MODE_NONE) {
+          boxes.length = 0;
+          let free = true;
+          for (let part = partStart[i]; part < partEnd[i]; part++) {
+            partBox(parts, part, transform, 0, cos, sin, box);
+            if (mode[i] === MODE_DECLUTTER && occupancy.collides(box[0], box[1], box[2], box[3])) {
+              free = false;
+              break;
+            }
+            boxes.push(box[0], box[1], box[2], box[3]);
+          }
+          if (!free) {
+            continue;
+          }
+          for (let b = 0; b < boxes.length; b += 4) {
+            occupancy.insert(boxes[b], boxes[b + 1], boxes[b + 2], boxes[b + 3]);
+          }
         }
+        taken[i] = 1;
+        candidates.add(keys[i]);
       }
-      taken[i] = 1;
-      candidates.add(keys[i]);
     }
+    return true;
   }
-  return candidates;
 }

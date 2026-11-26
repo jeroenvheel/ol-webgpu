@@ -9,6 +9,7 @@ import View from 'ol/View.js';
 import Point from 'ol/geom/Point.js';
 import VectorSource from 'ol/source/Vector.js';
 import {frame, renderersSettled} from './settled.js';
+import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 
@@ -56,8 +57,27 @@ const pairs = new Layer({
   },
   declutter: 'pairs',
 });
+// Icons of 40 by 10 pixels, 16 pixels apart: as they are they overlap; turned a quarter
+// they are 10 wide and stand next to each other.
+const bar = document.createElement('canvas');
+bar.width = 40;
+bar.height = 10;
+const barContext = bar.getContext('2d')!;
+barContext.fillStyle = '#d7191c';
+barContext.fillRect(0, 0, 40, 10);
+const icon = {'icon-src': bar.toDataURL(), 'icon-width': 40, 'icon-height': 10, 'icon-declutter-mode': 'declutter' as const};
+const flat = new Layer({
+  source: new VectorSource({features: [point(30, 30, 'flat a'), point(46, 30, 'flat b')]}),
+  style: icon,
+  declutter: 'flat',
+});
+const turned = new Layer({
+  source: new VectorSource({features: [point(-40, 30, 'turned a'), point(-24, 30, 'turned b')]}),
+  style: {...icon, 'icon-rotation': Math.PI / 2},
+  declutter: 'turned',
+});
 const view = new View({center: [0, 0], resolution: 1});
-const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [placed, unplaced, under, obstacles, pairs], view});
+const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [placed, unplaced, under, obstacles, pairs, flat, turned], view});
 
 (async () => {
   const results: Record<string, {ok: boolean; detail: string}> = {};
@@ -123,17 +143,29 @@ const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [placed
     const second = at(50, -62);
     check('a symbol goes with its label: neither is drawn when the label has no place', first.drawn && !second.drawn && !second.hits.includes('second label'), {first, second});
 
+    // an icon takes the space it has as it is turned, not the square around it
+    const icons = {flatA: at(14, 30), flatB: at(62, 30), turnedA: at(-40, 46), turnedB: at(-24, 46)};
+    check(
+      'icons that overlap as they lie do not when they are turned a quarter',
+      icons.flatA.drawn && !icons.flatB.drawn && icons.turnedA.drawn && icons.turnedB.drawn && icons.turnedB.hits.join() === 'turned b',
+      icons,
+    );
+
     // closer, the two circles no longer overlap: both are drawn
     view.setCenter([-74, 80]);
     view.setResolution(0.25);
     await settle();
     const near = {a: at(-80, 80), b: at(-68, 80)};
     check('a symbol comes back when there is room', near.a.drawn && near.b.drawn && near.b.hits.join() === 'b', near);
+    const fadeEnd = () => ([...liveRenderers].find((r) => r.getLayer() === (placed as any)) as any)?.symbolFadeEnd ?? 0;
+    const before = fadeEnd();
     view.setCenter([0, 0]);
     view.setResolution(1);
     await settle();
     const back = at(-60, 80);
     check('and goes again when there is none', !back.drawn && back.hits.length === 0, back);
+    // not at once: it fades out, as a label does
+    check('a symbol that loses its place fades out', fadeEnd() > before, {before, after: fadeEnd()});
 
     // the first one leaves: the second takes its place
     placed.getSource()!.removeFeature(placed.getSource()!.getFeatures().find((feature) => feature.get('name') === 'a')!);

@@ -26,11 +26,16 @@ export interface DeclutterSymbol {
   halfHeight: number;
   /** An obstacle takes space and is always drawn. */
   obstacle: boolean;
+  /** Clockwise, without the rotation of the view: the symbol is turned around its point, and so is where it is. */
+  rotation: number;
+  rotateWithView: boolean;
+  /** A circle or a shape: its space is the same however it is turned. */
+  round: boolean;
 }
 
 export type SymbolEvaluator = (feature: FeatureLike, resolution: number) => DeclutterSymbol | null;
 
-const out: DeclutterSymbol = {x: 0, y: 0, halfWidth: 0, halfHeight: 0, obstacle: false};
+const out: DeclutterSymbol = {x: 0, y: 0, halfWidth: 0, halfHeight: 0, obstacle: false, rotation: 0, rotateWithView: false, round: true};
 
 /**
  * Tells the symbol of a feature that takes part in decluttering (the object
@@ -68,14 +73,14 @@ export function buildSymbolEvaluator(style: FlatStyleLike, variables: Record<str
         if (!box) {
           continue;
         }
-        // a turned symbol takes the square around it
-        const turned = box.rotation !== 0 || s.rotateWithView;
-        const reach = turned ? Math.hypot(box.halfWidth, box.halfHeight) : 0;
         out.x = box.x;
         out.y = box.y;
-        out.halfWidth = turned && !box.round ? reach : box.halfWidth;
-        out.halfHeight = turned && !box.round ? reach : box.halfHeight;
+        out.halfWidth = box.halfWidth;
+        out.halfHeight = box.halfHeight;
         out.obstacle = s.declutterMode === 'obstacle';
+        out.rotation = box.rotation;
+        out.rotateWithView = !!s.rotateWithView;
+        out.round = box.round;
         return out;
       }
     }

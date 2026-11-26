@@ -94,6 +94,24 @@ const scenarios: Record<string, () => Promise<void>> = {
     map.setTarget(undefined);
     await new Promise((resolve) => setTimeout(resolve, 20));
   },
+  /** As dropMap, but the map is not told at first: its element is taken from the page. */
+  async detachMap() {
+    const layers = [new Layer({source: new VectorSource({features: features()}), style: shapes})];
+    const element = document.createElement('div');
+    element.style.cssText = 'width: 512px; height: 384px';
+    document.body.appendChild(element);
+    const map = new Map({target: element, pixelRatio: 1, controls: [], layers, view: new View({center: [0, 0], zoom: 2})});
+    await settle(map);
+    element.remove();
+    // the layer sees it with the next frame of the page, and lets go after it
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 40)));
+    if (layers[0].hasRenderer()) {
+      throw new Error('the layer of a map whose element left the page kept its renderer');
+    }
+    // ol itself keeps such a map (and with it its layers and features) for good: it watches
+    // the size of the element. Only what the layer held is counted here.
+    map.setTarget(undefined);
+  },
   /** The same with labels drawn on the GPU, decluttered. */
   async lifecycleLabels() {
     const layers = [new Layer({source: new VectorSource({features: as(makePlaces(4000))}), style: labels, declutter: true})];

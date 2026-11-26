@@ -127,7 +127,7 @@ export class InstructionJob {
   }
 
   /** Where the features of each `z-index` start in the instructions (null: not to be drawn number by number, see levels.ts). */
-  levels(): LevelStarts | null {
+  levels(tooMany?: (count: number) => void): LevelStarts | null {
     const of = (kind: InstructionKind, second = false) => {
       const run = this.runs.find((r) => r.kind === kind);
       if (!run || !run.out || !run.z) {
@@ -139,7 +139,7 @@ export class InstructionJob {
       }
       return {levels, end: second ? run.u2 : run.u};
     };
-    return mergeStarts({points: of('points'), lines: of('lines'), polygons: of('polygons'), edges: of('polygons', true)});
+    return mergeStarts({points: of('points'), lines: of('lines'), polygons: of('polygons'), edges: of('polygons', true)}, tooMany);
   }
 
   /** The instructions of a kind: undefined when not asked for, null when they cannot be made here. */
@@ -171,6 +171,20 @@ export class InstructionBuilder {
   private keyKnown = new Uint8Array(0);
   /** Per kind and ref: the place of its entry in the order of the last build, where `known` is 1. */
   private places: Partial<Record<InstructionKind, {at: Uint32Array; known: Uint8Array; count: number}>> = {};
+
+  /** Per ref: a number for where its feature is drawn among the kinds, when the order has none (see `setLevels`). */
+  private levelOf: Uint32Array | null = null;
+
+  /**
+   * Numbers for the features of the next instructions, for an order
+   * without a `key`: the entries stay in the order they are in, and the
+   * numbers tell where the features of each start (see levels.ts). They
+   * must rise with that order; where they do not (features that compare
+   * equal), the higher one before is taken.
+   */
+  setLevels(levelOf: Uint32Array | null) {
+    this.levelOf = levelOf;
+  }
 
   /** Sets the order of the features in the instructions (null: as they are in the batch). */
   setOrder(order: InstructionOrder | null) {
@@ -555,6 +569,15 @@ export class InstructionBuilder {
       run.entries = run.ordering.result!;
       run.z = run.ordering.resultZ;
       run.ordering = null;
+    }
+    if (!run.z && this.levelOf && run.n === 0 && run.entries.length) {
+      const levelOf = this.levelOf;
+      const z = new Float64Array(run.entries.length);
+      for (let i = 0, highest = 0; i < z.length; i++) {
+        highest = Math.max(highest, levelOf[run.entries[i]] ?? 0);
+        z[i] = highest;
+      }
+      run.z = z;
     }
     const finished = run.kind === 'points' ? this.stepPoints(run, deadline) : run.kind === 'lines' ? this.stepLines(run, deadline) : this.stepPolygons(run, deadline);
     if (finished === null) {

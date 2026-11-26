@@ -18,8 +18,8 @@ import {type SymbolEvaluator, buildSymbolEvaluator} from '../render/symbols.js';
 import {FADE, HIDDEN, SHOWN, fadeAlpha, fadeFrom} from './shaders.js';
 import {worldOf} from '../render/uniforms.js';
 import {type AtlasPage, sharedAtlas} from './atlas.js';
-import {Occupancy, selectCandidates} from './declutter.js';
-import {LabelBuilder, type LabelSet, type LayoutOptions, MODE_DECLUTTER, MODE_NONE, partBox, reads} from './layout.js';
+import {CandidateSelection, Occupancy} from './declutter.js';
+import {LabelBuilder, type LabelSet, type LayoutOptions, MODE_DECLUTTER, MODE_NONE, orderByWhole, partBox, reads} from './layout.js';
 import {type TextEvaluator, buildTextEvaluator} from './style.js';
 
 const NONE: ReadonlySet<FeatureLike> = new Set();
@@ -28,6 +28,8 @@ const NONE: ReadonlySet<FeatureLike> = new Set();
 const BUDGET_FIRST = 50;
 const BUDGET_STILL = 10;
 const BUDGET_MOVING = 4;
+/** The strips of the area whose features are collected one after the other. */
+const STRIPS = 16;
 /** Margin around the view, as a fraction of its larger side, that is laid out too. */
 const HEADROOM = 0.25;
 /** While the view moves, decluttering that took longer than this runs at most every `RESOLVE_INTERVAL` ms. */
@@ -99,6 +101,8 @@ interface LayoutKey {
   projection: unknown;
   generation: number;
   coverage: number[];
+  /** Labels along lines have their glyphs for both directions (see `turns`). */
+  twoWay: boolean;
 }
 
 function variablesKey(variables: Record<string, any>): string {
@@ -128,10 +132,24 @@ export default class GpuText {
   /** Finished layout, shown from the start of the next frame. */
   private next: {set: LabelSet; key: LayoutKey; rejected: ReadonlySet<FeatureLike>} | null = null;
   private job: {
-    builder: LabelBuilder;
+    /**
+     * A layout is made in steps, each until the frame has had its time (see
+     * `stepJob`): the features of the area are collected, strip by strip;
+     * then they are measured or laid out by a builder; with decluttering the
+     * labels that can win a place are chosen among the measured ones, and
+     * those are laid out by a second builder.
+     */
+    strips: number[][] | null;
+    collect: (extent: number[]) => void;
+    /** The features so far, and the uid of each. */
+    collected: FeatureLike[];
+    uids: number[];
+    options: LayoutOptions;
+    builder: LabelBuilder | null;
     key: LayoutKey;
     /** The builder only measures: the labels that can win a place are laid out after it. */
     measuring: boolean;
+    selection: {choice: CandidateSelection; measured: LabelSet} | null;
     features: number;
     measured: number;
     time: number;
@@ -157,6 +175,15 @@ export default class GpuText {
   /** The time of the frame in the making, in seconds since `epoch` (milliseconds of the frame state). */
   private time = 1;
   private epoch = 0;
+  /**
+   * The view has turned since the layer was first drawn. Until it does,
+   * labels along lines are laid out for the direction they are read in
+   * only; the first time it does they are laid out again with both, so that
+   * they stay upright in every frame from then on (the frames of that one
+   * layout show the labels that have to turn around as they were).
+   */
+  private turns = false;
+  private lastRotation: number | null = null;
   private readonly unlistenAtlas: () => void;
   /** Screen boxes of the shown labels, for hit detection. */
   private hitCache: {view: string; version: number; boxes: Float64Array; labels: Uint32Array} | null = null;
@@ -221,7 +248,9 @@ export default class GpuText {
       have.projection !== want.projection ||
       have.pixelRatio !== want.pixelRatio ||
       have.generation !== want.generation ||
-      !containsExtent(have.coverage, want.coverage)
+      !containsExtent(have.coverage, want.coverage) ||
+      // the view turns now: labels along lines need their other direction, also while it moves
+      (hasLine && want.twoWay && !have.twoWay)
     ) {
       return false;
     }
@@ -244,6 +273,10 @@ export default class GpuText {
     }
     const moving = isMoving(frameState);
     const viewState = frameState.viewState;
+    if (this.lastRotation !== null && this.lastRotation !== viewState.rotation) {
+      this.turns = true;
+    }
+    this.lastRotation = viewState.rotation;
     const want: LayoutKey = {
       resolution: viewState.resolution,
       rotation: viewState.rotation,
@@ -254,6 +287,7 @@ export default class GpuText {
       projection: viewState.projection,
       generation: this.atlas.generation,
       coverage: frameState.extent,
+      twoWay: this.turns,
     };
     const latest = this.next ?? (this.set && this.setKey ? {set: this.set, key: this.setKey} : null);
     if (this.fits(latest?.key, latest?.set.hasLine ?? false, want, moving)) {
@@ -267,48 +301,25 @@ export default class GpuText {
     }
     const budget = !this.set && !this.next ? BUDGET_FIRST : moving ? BUDGET_MOVING : BUDGET_STILL;
     const t0 = performance.now();
-    let done = job.builder.run(t0 + budget);
-    if (done && job.measuring && !job.builder.isStale()) {
-      // all labels are measured: lay out the ones that can win a place
-      const measured = job.builder.finish();
-      const accept = selectCandidates(measured);
-      const features = new Set<FeatureLike>();
-      for (let i = 0; i < measured.count; i++) {
-        if (accept.has(measured.keys[i])) {
-          features.add(measured.features[i]);
-        }
-      }
-      // a symbol that cannot win a place anywhere in the laid out area is not drawn
-      const rejected = new Set<FeatureLike>();
-      for (let i = 0; i < measured.count; i++) {
-        if (measured.symbol[i] === 1 && !features.has(measured.features[i])) {
-          rejected.add(measured.features[i]);
-        }
-      }
-      job.rejected = rejected;
-      job.measuring = false;
-      job.measured = measured.count;
-      job.builder = new LabelBuilder([...features], this.evaluator, this.atlas, {...job.builder.options, boxesOnly: false, accept});
-      done = job.builder.run(t0 + budget);
-    }
+    const builder = this.stepJob(job, t0 + budget);
     job.time += performance.now() - t0;
     job.frames++;
-    if (!done) {
+    if (!builder) {
       frameState.animate = true;
       return;
     }
     this.job = null;
-    if (job.builder.isStale()) {
+    if (builder.isStale()) {
       frameState.animate = true; // the atlas started over meanwhile: lay out again
       return;
     }
-    if (this.atlas.layoutDone(this, job.builder.use)) {
+    if (this.atlas.layoutDone(this, builder.use)) {
       // some glyphs did not fit and starting over makes room: lay out again
       frameState.animate = true;
       return;
     }
     const t1 = performance.now();
-    const set = job.builder.finish();
+    const set = builder.finish();
     this.next = {set, key: job.key, rejected: job.rejected};
     this.stats = {
       features: job.features,
@@ -320,6 +331,74 @@ export default class GpuText {
       declutter: this.stats.declutter,
     };
     this.requestRender();
+  }
+
+  /**
+   * Works on a layout until `deadline` (`performance.now()`). Returns the
+   * builder that has the labels when they are all laid out (or that is
+   * stale: the atlas started over), null when there is more to do.
+   */
+  private stepJob(job: NonNullable<GpuText['job']>, deadline: number): LabelBuilder | null {
+    if (job.strips) {
+      while (job.strips.length) {
+        job.collect(job.strips.pop()!);
+        if (job.strips.length && performance.now() >= deadline) {
+          return null;
+        }
+      }
+      job.strips = null;
+      // a stable order, so labels keep their place between layouts
+      const list = sortByUid(job.collected, job.uids);
+      job.collected = [];
+      job.uids = [];
+      job.features = list.length;
+      job.builder = new LabelBuilder(list, this.evaluator!, this.atlas, job.options);
+      if (performance.now() >= deadline) {
+        return null;
+      }
+    }
+    for (;;) {
+      const selection = job.selection;
+      if (selection) {
+        if (!selection.choice.step(deadline)) {
+          return null;
+        }
+        // the labels that can win a place are laid out
+        const {measured} = selection;
+        const accept = selection.choice.candidates;
+        const features = new Set<FeatureLike>();
+        for (let i = 0; i < measured.count; i++) {
+          if (accept.has(measured.keys[i])) {
+            features.add(measured.features[i]);
+          }
+        }
+        // a symbol that cannot win a place anywhere in the laid out area is not drawn
+        const rejected = new Set<FeatureLike>();
+        for (let i = 0; i < measured.count; i++) {
+          if (measured.symbol[i] === 1 && !features.has(measured.features[i])) {
+            rejected.add(measured.features[i]);
+          }
+        }
+        job.rejected = rejected;
+        job.selection = null;
+        job.builder = new LabelBuilder([...features], this.evaluator!, this.atlas, {...job.options, boxesOnly: false, accept});
+      }
+      const builder = job.builder!;
+      if (!builder.run(deadline)) {
+        return null;
+      }
+      if (!job.measuring || builder.isStale()) {
+        return builder;
+      }
+      // all labels are measured: choose the ones that can win a place
+      const measured = builder.finish();
+      job.measuring = false;
+      job.measured = measured.count;
+      job.selection = {choice: new CandidateSelection(measured), measured};
+      if (performance.now() >= deadline) {
+        return null;
+      }
+    }
   }
 
   private start(frameState: FrameState, source: VectorSource, want: LayoutKey): NonNullable<GpuText['job']> {
@@ -335,11 +414,17 @@ export default class GpuText {
     const userProjection = getUserProjection();
     const toUser = userProjection ? getTransformFromProjections(projection, userProjection) : null;
     const toView = userProjection ? getTransformFromProjections(userProjection, projection) : null;
-    const features = new Set<FeatureLike>();
+    // The features are collected strip by strip of the area (see `stepJob`): a feature
+    // that is in two strips is collected once.
+    const seen = new Set<FeatureLike>();
+    const collected: FeatureLike[] = [];
+    const uids: number[] = [];
+    const strips: number[][] = [];
     const collect = (e: number[]) => {
-      source.forEachFeatureInExtent(toUser ? applyTransform(e, toUser) : e, (f) => {
-        features.add(f);
-      });
+      const width = (e[2] - e[0]) / STRIPS;
+      for (let i = STRIPS - 1; i >= 0; i--) {
+        strips.push([e[0] + i * width, e[1], i === STRIPS - 1 ? e[2] : e[0] + (i + 1) * width, e[3]]);
+      }
     };
     if (source.getWrapX() && projection.canWrapX() && full) {
       const width = getWidth(full);
@@ -361,8 +446,6 @@ export default class GpuText {
     } else {
       collect(extent);
     }
-    // a stable order, so labels keep their place between layouts
-    const list = sortByUid([...features]);
     const measuring = !!this.declutter;
     // the anchors are 32 bit floats relative to the origin: in the world the features are in
     const originWorld = source.getWrapX() && full ? worldOf(viewState.center[0], projection) : 0;
@@ -381,9 +464,32 @@ export default class GpuText {
         : undefined,
       boxesOnly: measuring,
       symbol: this.symbolOf,
+      twoWay: want.twoWay,
     };
-    const builder = new LabelBuilder(list, this.evaluator!, this.atlas, options);
-    return {builder, key: {...want, coverage}, measuring, features: list.length, measured: 0, time: performance.now() - t0, frames: 0, rejected: NONE};
+    return {
+      strips,
+      collect: (e) => {
+        source.forEachFeatureInExtent(toUser ? applyTransform(e, toUser) : e, (f) => {
+          if (!seen.has(f)) {
+            seen.add(f);
+            collected.push(f);
+            uids.push(Number(getUid(f)));
+          }
+        });
+      },
+      collected,
+      uids,
+      options,
+      builder: null,
+      key: {...want, coverage},
+      measuring,
+      selection: null,
+      features: 0,
+      measured: 0,
+      time: performance.now() - t0,
+      frames: 0,
+      rejected: NONE,
+    };
   }
 
   // --- frame ---------------------------------------------------------------
@@ -745,16 +851,27 @@ export default class GpuText {
 }
 
 /** Sorts features by their uid (the order they were created in). */
-function sortByUid(features: FeatureLike[]): FeatureLike[] {
-  const uids = new Float64Array(features.length);
-  const order = new Uint32Array(features.length);
-  for (let i = 0; i < features.length; i++) {
-    uids[i] = Number(getUid(features[i]));
-    order[i] = i;
+function sortByUid(features: FeatureLike[], uids: number[]): FeatureLike[] {
+  const n = features.length;
+  // ol counts its uids from 1: whole numbers, which need no comparing of pairs
+  const whole = new Uint32Array(n);
+  let order: Uint32Array | null = null;
+  let fits = true;
+  for (let i = 0; i < n && fits; i++) {
+    whole[i] = uids[i];
+    fits = whole[i] === uids[i];
   }
-  order.sort((a, b) => uids[a] - uids[b]);
-  const sorted = new Array<FeatureLike>(features.length);
-  for (let i = 0; i < features.length; i++) {
+  if (fits) {
+    order = orderByWhole(whole, n);
+  } else {
+    order = new Uint32Array(n);
+    for (let i = 0; i < n; i++) {
+      order[i] = i;
+    }
+    order.sort((a, b) => uids[a] - uids[b]);
+  }
+  const sorted = new Array<FeatureLike>(n);
+  for (let i = 0; i < n; i++) {
     sorted[i] = features[order[i]];
   }
   return sorted;

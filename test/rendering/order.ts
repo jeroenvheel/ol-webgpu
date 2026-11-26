@@ -15,6 +15,17 @@ import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
 
+// the layer with more numbers than are drawn one by one says so
+const warned: string[] = [];
+const warn = console.warn;
+console.warn = (...args: unknown[]) => {
+  if (String(args[0]).includes('z-index')) {
+    warned.push(String(args[0]));
+  } else {
+    warn(...args);
+  }
+};
+
 const params = new URLSearchParams(location.search);
 const Layer = params.get('layer') === 'webgpu' ? WebGPUVectorLayer : WebGL2VectorLayer;
 
@@ -79,6 +90,12 @@ const kindStyle = {
 };
 const acrossKinds = new Layer({source: new VectorSource({features: kinds(-70, -80, {fill: 3, stroke: 2, symbol: 1})}), style: {...kindStyle, 'z-index': ['get', 'z']}});
 const withoutZ = new Layer({source: new VectorSource({features: kinds(0, -80, {fill: 3, stroke: 2, symbol: 1})}), style: kindStyle});
+// the same with a renderOrder and no z-index: the features are drawn one after the other, as on a Canvas
+const byOrderAcross = new Layer({
+  source: new VectorSource({features: kinds(0, -37, {fill: 3, stroke: 2, symbol: 1})}),
+  style: kindStyle,
+  renderOrder: (a, b) => a.get('z') - b.get('z'),
+});
 // more different numbers than are drawn one by one: kind by kind again, in the order of the numbers within a kind
 const manyZ = new Layer({
   source: new VectorSource({
@@ -86,7 +103,7 @@ const manyZ = new Layer({
   }),
   style: {...kindStyle, 'z-index': ['get', 'z']},
 });
-const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [asTheyCame, byZIndex, byRenderOrder, both, rules, later, acrossKinds, withoutZ, manyZ], view: new View({center: [0, 0], resolution: 1})});
+const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [asTheyCame, byZIndex, byRenderOrder, both, rules, later, acrossKinds, withoutZ, byOrderAcross, manyZ], view: new View({center: [0, 0], resolution: 1})});
 
 (async () => {
   const results: Record<string, any> = {};
@@ -148,7 +165,14 @@ const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [asThey
       {...across, levels: ([...liveRenderers].find((r) => r.getLayer() === (acrossKinds as any)) as any)?.buffers?.levels ?? null},
     );
     check('without a z-index symbols are over strokes over fills', kindByKind.centre.top === 'green' && kindByKind.centre.hits.join() === 'symbol,stroke,fill' && kindByKind.onStroke.top === 'blue', kindByKind);
+    const ordered = {centre: at(0, -37), onStroke: at(28, -37), onFill: at(0, -37 + 15)};
+    check(
+      'a renderOrder puts a fill over the stroke and the symbol of an earlier feature',
+      ordered.centre.hits.join() === 'fill,stroke,symbol' && ordered.centre.top === 'red' && ordered.onStroke.top === 'blue' && ordered.onFill.top === 'red',
+      ordered,
+    );
     check('with more than 64 different numbers the kinds are drawn one after the other', many.centre.top === 'green' && many.centre.hits.join() === 'symbol,stroke,fill', many);
+    check('and the layer warns about it once, with the count', warned.length === 1 && warned[0].includes('83 different numbers'), warned);
 
     // a symbol that changes its z-index goes over the fill
     acrossKinds.getSource()!.getFeatures().find((f) => f.get('name') === 'symbol')!.set('z', 5);

@@ -5,7 +5,7 @@
  * chunks of a label along a line.
  */
 import {describe, expect, it} from 'vitest';
-import {contentKey, joinChunks, reads} from '../../src/text/layout.js';
+import {contentKey, joinChunks, orderBy, orderByWhole, reads} from '../../src/text/layout.js';
 
 const ZWJ = '‍';
 // "salam" in Arabic: seen, lam, alef, meem
@@ -96,5 +96,42 @@ describe('joinChunks', () => {
   it('leaves chunks alone that do not make up the text', () => {
     const chunks = [SEEN, MEEM];
     expect(joinChunks(chunks, SEEN + LAM + MEEM)).toBe(chunks);
+  });
+});
+
+describe('orderBy', () => {
+  it('gives the places in the order of their values, equal ones as they are', () => {
+    expect([...orderBy([3, 1, 2, 1, 3], 5)!]).toEqual([1, 3, 2, 0, 4]);
+    expect([...orderBy([3, 1, 2, 1, 3], 5, true)!]).toEqual([0, 4, 2, 1, 3]);
+    expect([...orderBy([], 0)!]).toEqual([]);
+  });
+
+  it('takes numbers that are not whole, and below zero', () => {
+    expect([...orderBy([0.5, -2, 1e12, -2.5], 4)!]).toEqual([3, 1, 0, 2]);
+  });
+
+  it('keeps equal values in the order of another order', () => {
+    // by age first (place 2 is the oldest), then by z-index falling
+    const byAge = orderBy([30, 20, 10, 40], 4)!;
+    expect([...byAge]).toEqual([2, 1, 0, 3]);
+    expect([...orderBy([1, 5, 1, 5], 4, true, byAge)!]).toEqual([1, 3, 2, 0]);
+  });
+
+  it('is null for a value that is not a number', () => {
+    expect(orderBy([1, NaN], 2)).toBeNull();
+  });
+
+  it('gives what a sort with a function gives, for many values', () => {
+    const n = 20000;
+    const values = Array.from({length: n}, (_v, i) => (i * 7919) % 613);
+    const expected = Array.from({length: n}, (_v, i) => i).sort((a, b) => values[a] - values[b] || a - b);
+    expect([...orderBy(values, n)!]).toEqual(expected);
+  });
+});
+
+describe('orderByWhole', () => {
+  it('orders whole numbers of up to 32 bits, equal ones as they are', () => {
+    const values = Uint32Array.of(70000, 3, 4000000000, 3, 65536, 0);
+    expect([...orderByWhole(values, values.length)]).toEqual([5, 1, 3, 4, 0, 2]);
   });
 });

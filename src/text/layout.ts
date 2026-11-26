@@ -35,7 +35,7 @@ import {
 import type {DeclutterSymbol, SymbolEvaluator} from '../render/symbols.js';
 import type {TextEvaluator} from './style.js';
 import {JOINING, ZWJ, joinedAdvances, joinsAcross, textOnPath} from './textpath.js';
-import {wrapText} from './wrap.js';
+import {wrapChunks, wrapText} from './wrap.js';
 
 /**
  * Sizes of the attributes of an instance, in shader location order after
@@ -152,6 +152,12 @@ export interface LayoutOptions {
   accept?: Set<number>;
   /** The symbol of a feature that is placed with its labels (see render/symbols.ts). */
   symbol?: SymbolEvaluator | null;
+  /**
+   * Labels along lines that are kept upright get their glyphs for the other
+   * direction too (see `glyphMid`). Half as much again to lay out, and only
+   * of use in a view that turns: false leaves them out. Default true.
+   */
+  twoWay?: boolean;
 }
 
 /**
@@ -339,15 +345,41 @@ export class LabelBuilder {
     for (let i = 1; i < count && sorted; i++) {
       sorted = zIndices[i] >= zIndices[i - 1];
     }
-    if (!sorted) {
+    if (!sorted && !this.boxesOnly) {
+      // (labels that are only measured are not drawn: their order in the buffers is of no use)
       this.sortByZIndex();
     }
-    const order = new Uint32Array(count);
-    for (let i = 0; i < count; i++) {
-      order[i] = i;
-    }
     const {zIndex, uid} = this;
-    order.sort((a, b) => zIndex[b] - zIndex[a] || uid[a] - uid[b] || a - b);
+    // From the highest priority down: by z-index, then by age. Mostly they are in
+    // that order already (one z-index, and the features came by age).
+    let inOrder = true;
+    for (let i = 1; i < count && inOrder; i++) {
+      inOrder = zIndex[i] === zIndex[i - 1] && uid[i] >= uid[i - 1];
+    }
+    let order: Uint32Array | null = null;
+    if (inOrder) {
+      order = new Uint32Array(count);
+      for (let i = 0; i < count; i++) {
+        order[i] = i;
+      }
+    } else {
+      // by age within a z-index: mostly the labels are in that order as they are
+      let byAge: Uint32Array | null | undefined = undefined;
+      for (let i = 1; i < count; i++) {
+        if (uid[i] < uid[i - 1]) {
+          byAge = orderBy(uid, count);
+          break;
+        }
+      }
+      order = byAge === null ? null : orderBy(zIndex, count, true, byAge);
+    }
+    if (!order) {
+      order = new Uint32Array(count);
+      for (let i = 0; i < count; i++) {
+        order[i] = i;
+      }
+      order.sort((a, b) => zIndex[b] - zIndex[a] || uid[a] - uid[b] || a - b);
+    }
     const o = this.options;
     return {
       id: nextSetId++,
@@ -361,18 +393,18 @@ export class LabelBuilder {
       glyphCount: this.glyphCount,
       count,
       features: this.labelFeatures,
-      keys: Float64Array.from(this.keys),
-      content: Float64Array.from(this.content),
-      glyphStart: Uint32Array.from(this.glyphStart),
-      glyphEnd: Uint32Array.from(this.glyphEnd),
-      glyphMid: Uint32Array.from(this.glyphMid),
-      along: Float32Array.from(this.along),
+      keys: new Float64Array(this.keys),
+      content: new Float64Array(this.content),
+      glyphStart: new Uint32Array(this.glyphStart),
+      glyphEnd: new Uint32Array(this.glyphEnd),
+      glyphMid: new Uint32Array(this.glyphMid),
+      along: new Float32Array(this.along),
       twoWay: this.twoWay,
-      symbol: Uint8Array.from(this.withSymbol),
-      partStart: Uint32Array.from(this.partStart),
-      partEnd: Uint32Array.from(this.partEnd),
-      mode: Uint8Array.from(this.mode),
-      parts: Float64Array.from(this.parts),
+      symbol: new Uint8Array(this.withSymbol),
+      partStart: new Uint32Array(this.partStart),
+      partEnd: new Uint32Array(this.partEnd),
+      mode: new Uint8Array(this.mode),
+      parts: new Float64Array(this.parts),
       order,
       hasLine: this.hasLine,
     };
@@ -382,11 +414,14 @@ export class LabelBuilder {
   private sortByZIndex() {
     const count = this.labelFeatures.length;
     const zIndex = this.zIndex;
-    const draw = new Uint32Array(count);
-    for (let i = 0; i < count; i++) {
-      draw[i] = i;
+    let draw = orderBy(zIndex, count);
+    if (!draw) {
+      draw = new Uint32Array(count);
+      for (let i = 0; i < count; i++) {
+        draw[i] = i;
+      }
+      draw.sort((a, b) => zIndex[a] - zIndex[b] || a - b);
     }
-    draw.sort((a, b) => zIndex[a] - zIndex[b] || a - b);
     const instances = new Float32Array(this.glyphCount * INSTANCE_FLOATS);
     const take = <T>(values: T[]): T[] => Array.from(draw, (i) => values[i]);
     const glyphStart: number[] = [];
@@ -535,11 +570,16 @@ export class LabelBuilder {
     const type: string = geometry.getType();
     const font = quantizeFont(text.getFont() || '10px sans-serif');
     const onLine = text.getPlacement() === 'line' && (type === 'LineString' || type === 'MultiLineString' || type === 'Polygon' || type === 'MultiPolygon');
-    if (maxWidth > 0 && typeof value === 'string' && !onLine) {
+    if (maxWidth > 0 && !onLine) {
       // `text-max-width` is of the label as it is drawn (see wrap.ts)
       const scaleX = Math.abs((text.getScaleArray() as number[] | undefined)?.[0] ?? 1) || 1;
-      const metrics = this.atlas.metrics(font);
-      value = wrapText(value, maxWidth / scaleX, (piece) => metrics.advance(piece));
+      if (typeof value === 'string') {
+        const metrics = this.atlas.metrics(font);
+        value = wrapText(value, maxWidth / scaleX, (piece) => metrics.advance(piece));
+      } else {
+        // parts with fonts of their own
+        value = wrapChunks(value, maxWidth / scaleX, (piece, own) => this.atlas.metrics(own ? quantizeFont(own) : font).advance(piece));
+      }
     }
     const style = {
       value,
@@ -562,8 +602,21 @@ export class LabelBuilder {
 
   /** The box of a symbol as a part of the label in the making: the label stands for the symbol too. */
   private symbolPart(symbol: DeclutterSymbol, x: number, y: number) {
-    // parts have y down; a symbol does not turn with the view here (see symbols.ts)
-    this.parts.push(x, y, 0, 0, 0, 0, symbol.x - symbol.halfWidth, -symbol.y - symbol.halfHeight, symbol.x + symbol.halfWidth, -symbol.y + symbol.halfHeight, 1, 0);
+    // Parts have y down. The shader turns a symbol, and where it is, around its point:
+    // clockwise by its rotation, and by that of the view when it turns with it.
+    const cos = Math.cos(symbol.rotation);
+    const sin = Math.sin(symbol.rotation);
+    const withView = symbol.rotateWithView ? 1 : 0;
+    const {halfWidth, halfHeight} = symbol;
+    if (symbol.round) {
+      // a circle or a shape takes the same space however it is turned: only its place turns
+      const cx = cos * symbol.x + sin * symbol.y;
+      const cy = sin * symbol.x - cos * symbol.y;
+      this.parts.push(x, y, cx, cy, 0, withView, -halfWidth, -halfHeight, halfWidth, halfHeight, 1, 0);
+    } else {
+      // an icon: the box around it as it is turned (see `partBox`)
+      this.parts.push(x, y, 0, 0, symbol.rotation, withView, symbol.x - halfWidth, -symbol.y - halfHeight, symbol.x + halfWidth, -symbol.y + halfHeight, cos, sin);
+    }
     this.withSymbol[this.withSymbol.length - 1] = 1;
     this.symbolPlaced = true;
   }
@@ -912,7 +965,7 @@ export class LabelBuilder {
     }
     // The other direction, for when the view has turned so far that this one is
     // upside down: half a turn further ol decides the other way.
-    const turned = keepUpright && !this.boxesOnly ? onPath(o.rotation + Math.PI, true) : null;
+    const turned = keepUpright && !this.boxesOnly && o.twoWay !== false ? onPath(o.rotation + Math.PI, true) : null;
     this.hasLine = true;
     const s = style.strokeWidth;
     const height = measureTextHeight(font);
@@ -985,6 +1038,89 @@ export class LabelBuilder {
     }
     this.endLabel();
   }
+}
+
+/** The most places `orderBy` puts in order. */
+const PLACES = 2 ** 21;
+
+/**
+ * The places 0 to `count` - 1 in the order of their `values`: rising, or
+ * falling; places with the same value in the order of `within`, or as they
+ * are. Without a function per pair, which is what a sort of some hundred
+ * thousand places spends its time on: each value becomes its rank among the
+ * different values, with the place behind it in one number, and those are
+ * sorted as numbers.
+ * @return null for more than `PLACES` places, or values that are not numbers
+ */
+export function orderBy(values: ArrayLike<number>, count: number, falling = false, within?: Uint32Array): Uint32Array | null {
+  if (count > PLACES) {
+    return null;
+  }
+  const different = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    const value = values[i];
+    if (value !== value) {
+      return null;
+    }
+    different[i] = value;
+  }
+  different.sort();
+  let m = 0;
+  for (let i = 0; i < count; i++) {
+    if (m === 0 || different[i] !== different[m - 1]) {
+      different[m++] = different[i];
+    }
+  }
+  const ranks = new Uint32Array(count);
+  for (let i = 0; i < count; i++) {
+    const value = values[i];
+    let low = 0;
+    let high = m - 1;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (different[middle] < value) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    ranks[i] = falling ? m - 1 - low : low;
+  }
+  return orderByWhole(ranks, count, within);
+}
+
+/**
+ * The same for whole numbers from 0 to 2^32 - 1, rising: counted per 16
+ * bits and put in their places, twice, which is a few passes over the
+ * numbers whatever their order.
+ */
+export function orderByWhole(values: Uint32Array, count: number, within?: Uint32Array): Uint32Array {
+  let from = new Uint32Array(count);
+  let highest = 0;
+  for (let i = 0; i < count; i++) {
+    from[i] = within ? within[i] : i;
+    highest = Math.max(highest, values[i]);
+  }
+  let to = new Uint32Array(count);
+  const starts = new Uint32Array(65537);
+  for (let shift = 0; shift < 32; shift += 16) {
+    if (shift && highest < 65536) {
+      break;
+    }
+    starts.fill(0);
+    for (let i = 0; i < count; i++) {
+      starts[((values[from[i]] >>> shift) & 0xffff) + 1]++;
+    }
+    for (let b = 0; b < 65536; b++) {
+      starts[b + 1] += starts[b];
+    }
+    for (let i = 0; i < count; i++) {
+      const place = from[i];
+      to[starts[(values[place] >>> shift) & 0xffff]++] = place;
+    }
+    [from, to] = [to, from];
+  }
+  return from;
 }
 
 /**

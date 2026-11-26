@@ -42,8 +42,9 @@ import {buildSymbolEvaluator} from '../render/symbols.js';
 import {Picker} from '../render/picking.js';
 import {type TextImage, TextOverlay, overlayMatrix} from '../render/textOverlay.js';
 import GpuText, {type LabelFrame, resolveFrameLabels} from '../text/GpuText.js';
-import {type StylePasses, buildStylePasses} from '../render/stylePasses.js';
-import {type DrawLevel, type LevelStarts, type Range, drawLevels} from '../render/levels.js';
+import {type StylePasses, buildStylePasses, fadeClock} from '../render/stylePasses.js';
+import {FADE, HIDDEN, SHOWN, fadeAlpha, fadeFrom} from '../text/shaders.js';
+import {type DrawLevel, type LevelStarts, MAX_LEVELS, MAX_ORDERED, type Range, drawLevels, orderLevels} from '../render/levels.js';
 import {type Surface, type SurfaceSpec, acquireSurface, releaseSurface, surfaceSpec, surfaceType} from '../render/surface.js';
 import {UniformState, makeProjectionTransform, worldOf} from '../render/uniforms.js';
 import {type Core, LARGE_MEMORY_BYTES, loadCore} from '../wasm/core.js';
@@ -129,8 +130,6 @@ export interface Uploaded<B> {
   textKey: string | null;
   /** The parts of the buffers per `z-index` (see render/levels.ts); null: they are drawn as a whole. */
   levels: DrawLevel[] | null;
-  /** The parts of the point buffer with all symbols in it (`levels` has those of the symbols that are drawn). */
-  symbolLevels: Array<Range | null> | null;
 }
 
 /** Statistics of the last rebuild, exposed for benchmarks and debugging. */
@@ -246,12 +245,15 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private renderOrder: ((a: FeatureLike, b: FeatureLike) => number) | null;
   /** The style has symbols that take part in decluttering (see render/symbols.ts). */
   private placesSymbols = false;
-  /** All point instances of the last build, when symbols are placed: the ones to draw are taken from it. */
+  /** The point instances of the last build, when symbols are placed: they have the refs of the symbols. */
   private pointInstances: BufferSet | null = null;
+  /** The same as they are drawn, and the fade of each symbol in them (see `fadedPoints`). */
+  private pointsDrawn: BufferSet | null = null;
+  private symbolFades: Float32Array | null = null;
+  /** The time (as `fadeClock`) at which the last fade of a symbol is over. */
+  private symbolFadeEnd = 0;
   /** `symbolVersion` of the labels the point buffer was made for. */
   private symbolVersion = -1;
-  /** The point buffer does not hold all symbols of the build. */
-  private symbolsLeftOut = false;
   /** The zoom of the last frame, for a `z-index` that depends on it. */
   private lastZoom = 0;
   /** Last rebuild statistics. */
@@ -264,6 +266,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private readonly batch = new FeatureBatch();
   /** What ol's batch holds, for ol's instruction generators, and the `batchVersion` it was made for (see `olBatch`). */
   private olBatchOf: {version: number; batch: MixedGeometryBatch} | null = null;
+  private warnedLevels = false;
   private sourceKeys: EventsKey[] | null = null;
   /** The source the batch and the listeners are of (the layer may get another one). */
   private boundSource: VectorSource | null = null;
@@ -337,13 +340,13 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.keepCpuCopies = backend === 'webgl2' && options.keepBuffers !== false;
     this.renderOrder = options.renderOrder ?? null;
     this.textMode = options.text ?? 'gpu';
-    this.passes = buildStylePasses(this.style, this.variables, this.smoothFill, this.textMode === 'canvas');
+    this.declutter = options.declutter ? String(options.declutter) : null;
+    this.passes = this.buildPasses();
     this.instructions = new InstructionBuilder(this.passes.customAttributes);
     this.applyOrder();
     this.uniformState = new UniformState(this.passes.uniforms);
     this.uniformState.onPendingImage = (image) => this.awaitImage(image);
     this.worker = WorkerClient.shared(options);
-    this.declutter = options.declutter ? String(options.declutter) : null;
     this.updateTextMode();
     // Ready until the first rebuild starts, like ol's renderers: a layer outside its
     // zoom range never prepares a frame and must not hold back `rendercomplete`.
@@ -379,74 +382,69 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     return null;
   }
   /**
-   * Leaves the symbols of `hidden` features out of the point buffer: they
-   * lost their place in decluttering. The instances of the build are kept,
-   * and the ones to draw are uploaded again whenever the set changes.
+   * The point buffer as it is drawn when symbols are placed: with the fade
+   * of each symbol where the instructions have its ref (see
+   * `FADE_ATTRIBUTE`). Symbols that had no place in the build before start
+   * without one; the others are shown.
    */
-  private hideSymbols(hidden: ReadonlySet<FeatureLike>) {
+  private fadedPoints(points: BufferSet): BufferSet {
+    const stride = 2 + this.passes.customSize;
+    const refAt = 2 + this.passes.refOffset;
+    const hidden = this.hiddenRefs(this.gpuText?.hiddenSymbols);
+    const instances = points.instances.slice();
+    const fades = new Float32Array(Math.floor(instances.length / stride));
+    for (let n = 0, i = refAt; n < fades.length; n++, i += stride) {
+      fades[n] = hidden.has(instances[i]) ? HIDDEN : SHOWN;
+      instances[i] = fades[n];
+    }
+    this.symbolFades = fades;
+    this.pointsDrawn = {indices: points.indices, vertices: points.vertices, instances};
+    return this.pointsDrawn;
+  }
+
+  private hiddenRefs(hidden: ReadonlySet<FeatureLike> | undefined): Set<number> {
+    const refs = new Set<number>();
+    for (const feature of hidden ?? []) {
+      const ref = this.batch.refOf(feature);
+      if (ref) {
+        refs.add(ref);
+      }
+    }
+    return refs;
+  }
+
+  /**
+   * The symbols of `hidden` features lost their place in decluttering: they
+   * fade out, and those that have one again fade in. A fade is one number
+   * per symbol in the point buffer, which is uploaded again when the set
+   * changes; the shader makes the opacity of it for every frame.
+   */
+  private fadeSymbols(hidden: ReadonlySet<FeatureLike>) {
     const all = this.pointInstances;
+    const drawn = this.pointsDrawn;
+    const fades = this.symbolFades;
     const points = this.buffers?.points;
-    if (!all || !points) {
+    if (!all || !drawn || !fades || !points) {
       return;
     }
-    if (!hidden.size && !this.symbolsLeftOut) {
-      return; // all are in the buffer already
-    }
-    this.symbolsLeftOut = hidden.size > 0;
-    let instances = all.instances;
-    const levels = this.buffers!.levels;
-    const whole = this.buffers!.symbolLevels;
-    if (levels && whole) {
-      levels.forEach((level, l) => (level.symbol = whole[l]));
-    }
-    if (hidden.size) {
-      const refs = new Set<number>();
-      for (const feature of hidden) {
-        const ref = this.batch.refOf(feature);
-        if (ref) {
-          refs.add(ref);
-        }
+    const refs = this.hiddenRefs(hidden);
+    const stride = 2 + this.passes.customSize;
+    const refAt = 2 + this.passes.refOffset;
+    const time = fadeClock();
+    let changed = false;
+    for (let n = 0, i = refAt; n < fades.length; n++, i += stride) {
+      const show = !refs.has(all.instances[i]);
+      const fade = fades[n];
+      if (show === fade >= 0) {
+        continue; // on its way there already, or there
       }
-      const stride = 2 + this.passes.customSize;
-      const refAt = 2 + this.passes.refOffset;
-      const kept = new Float32Array(instances.length);
-      let k = 0;
-      // the parts per z-index, of what is kept
-      let l = 0;
-      let first = 0;
-      const next = () => {
-        if (levels && whole) {
-          const end = k / stride;
-          levels[l].symbol = whole[l] && end > first ? [first, end - first] : null;
-          first = end;
-          l++;
-        }
-      };
-      const ends = levels && whole ? whole.map((range) => (range ? range[0] + range[1] : -1)) : null;
-      for (let i = 0, n = 0; i + stride <= instances.length; i += stride, n++) {
-        while (ends && l < ends.length && (ends[l] < 0 || n >= ends[l])) {
-          next();
-        }
-        if (!refs.has(instances[i + refAt])) {
-          kept.set(instances.subarray(i, i + stride), k);
-          k += stride;
-        }
-      }
-      while (ends && l < ends.length) {
-        next();
-      }
-      instances = kept.subarray(0, k);
+      fades[n] = fadeFrom(fadeAlpha(fade, time), time, show);
+      drawn.instances[i] = fades[n];
+      changed = true;
     }
-    if (!instances.length) {
-      // nothing to draw: the buffers stay as they are for the next time
-      points.indexCount = 0;
-      return;
-    }
-    const set = {indices: all.indices, vertices: all.vertices, instances};
-    points.gpu = this.upload(set, points.gpu);
-    points.indexCount = all.indices.length;
-    if (points.cpu) {
-      points.cpu = set;
+    if (changed) {
+      points.gpu = this.upload(drawn, points.gpu);
+      this.symbolFadeEnd = time + FADE / 1000;
     }
   }
 
@@ -457,7 +455,67 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   private applyOrder() {
     const z = featureZIndex(toFlatStyleLike(this.style as any) as FlatStyleLike, this.variables, () => this.lastZoom);
     this.zIndex = z;
+    this.levelOf = null;
     this.instructions.setOrder(z || this.renderOrder ? {key: z ? (feature) => z.of(feature) : null, volatile: !!z?.volatile, compare: this.renderOrder} : null);
+  }
+
+  /** Per ref: the number of its feature by the `renderOrder` (see `orderLevels`); null: all the same. */
+  private levelOf: Uint32Array | null = null;
+
+  /**
+   * To call before the instructions of a build are made: with a
+   * `renderOrder` and no `z-index`, the features get numbers by which their
+   * fills, strokes and symbols are drawn feature by feature, as a Canvas
+   * layer does. For layers of up to `MAX_ORDERED` features, in one go (the
+   * comparison of the app is called some 12 times per feature).
+   */
+  private orderByKinds() {
+    this.levelOf = null;
+    this.instructions.setLevels(null);
+    const compare = this.renderOrder;
+    if (!compare || this.zIndex) {
+      return;
+    }
+    const batch = this.batch;
+    const p = this.passes;
+    const bits = new Map<number, number>();
+    const add = (kind: 'points' | 'lines' | 'polygons', kinds: number) => {
+      if (!kinds) {
+        return true;
+      }
+      const refs = batch.refsOf(kind);
+      if (bits.size + refs.length > 2 * MAX_ORDERED) {
+        return false;
+      }
+      for (let i = 0; i < refs.length; i++) {
+        bits.set(refs[i], (bits.get(refs[i]) ?? 0) | kinds);
+      }
+      return bits.size <= MAX_ORDERED;
+    };
+    if (!add('polygons', (p.hasFill ? 1 : 0) | (p.hasStroke ? 2 : 0)) || !add('lines', p.hasStroke ? 2 : 0) || !add('points', p.hasSymbol ? 4 : 0)) {
+      return;
+    }
+    let all = 0;
+    for (const kinds of bits.values()) {
+      all |= kinds;
+    }
+    if (all === 1 || all === 2 || all === 4 || !all) {
+      return; // one kind: its own order is all there is
+    }
+    const refs = [...bits.keys()].sort((a, b) => compare(batch.getFeatureFromRef(a)!, batch.getFeatureFromRef(b)!));
+    const levels = orderLevels(refs.map((ref) => bits.get(ref)!));
+    if (!levels) {
+      return;
+    }
+    let highest = 0;
+    for (const ref of refs) {
+      highest = Math.max(highest, ref);
+    }
+    const of = new Uint32Array(highest + 1);
+    refs.forEach((ref, i) => (of[ref] = levels[i]));
+    this.levelOf = of;
+    // the order itself is that of the renderOrder, as without numbers: they only say where a number starts
+    this.instructions.setLevels(of);
   }
 
   /** Another order for the features of the layer (see the `renderOrder` option). */
@@ -548,9 +606,16 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     }
   }
 
-  /** Labels are being laid out or are fading (tests wait for this). */
+  /** Labels are being laid out, or labels or symbols are fading (tests wait for this). */
   get labelsBusy(): boolean {
-    return !!this.gpuText?.busy;
+    return !!this.gpuText?.busy || fadeClock() < this.symbolFadeEnd;
+  }
+
+  /** The passes of the style as this layer draws it. */
+  private buildPasses(): StylePasses {
+    // symbols that take part in decluttering fade in and out (see render/symbols.ts)
+    const fades = !!this.declutter && this.textMode === 'gpu' && !!buildSymbolEvaluator(this.style, this.variables, () => 0);
+    return buildStylePasses(this.style, this.variables, this.smoothFill, this.textMode === 'canvas', fades);
   }
 
   // --- style -----------------------------------------------------------
@@ -558,7 +623,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   setStyle(style: FlatStyleLike, variables: Record<string, any>) {
     this.style = style;
     this.variables = variables;
-    this.passes = buildStylePasses(style, variables, this.smoothFill, this.textMode === 'canvas');
+    this.passes = this.buildPasses();
+    this.warnedLevels = false;
     this.uniformState.setStyleUniforms(this.passes.uniforms);
     this.pendingImages.clear();
     this.picker?.setStyle(style, variables);
@@ -810,6 +876,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     const wantPoints = (p.hasSymbol || !!text) && !empty;
     // Our instructions are made in slices, so a big layer does not hold up the
     // page: `INSTRUCTION_SLICE` ms at a time, with a pause in between.
+    this.orderByKinds();
     const job = kept ? new InstructionJob(kept, batch, {polygons: wantPolygons, lines: wantLines, points: wantPoints}, transform) : null;
     const send = () => {
       // ol's generators make what ours could not (or all of it, for ol's text worker), of what ol's batch holds
@@ -823,7 +890,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         ? (job?.result('points') ?? generatePointRenderInstructions(this.olBatch().pointBatch, new Float32Array(0), labels, custom, transform))
         : null;
       // only with all instructions of ours: the starts are counted with them
-      const levels = job && job.result('polygons') !== null && job.result('lines') !== null && job.result('points') !== null ? job.levels() : null;
+      const levels = job && job.result('polygons') !== null && job.result('lines') !== null && job.result('points') !== null ? job.levels((count) => this.warnLevels(count)) : null;
       this.submit(frameState, generation, t0, job ? job.time : performance.now() - t0, transform, center, {polygons, lines, points, labels, levels});
     };
     if (!job || job.step(performance.now() + INSTRUCTION_SLICE)) {
@@ -858,6 +925,20 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
    * ol's instruction generators. Kept until the features change: with ol's
    * text worker every build needs it.
    */
+  /** Tells once per style that its `z-index` has too many numbers to draw one by one (see render/levels.ts). */
+  private warnLevels(count: number) {
+    if (this.warnedLevels) {
+      return;
+    }
+    this.warnedLevels = true;
+    console.warn(
+      `ol-webgpu: the z-index of the style gives ${count} different numbers, more than ${MAX_LEVELS}. ` +
+        'The features are in the order of those numbers, but fills, strokes and symbols are drawn kind by kind: ' +
+        'a fill with a higher z-index is not drawn over the stroke or the symbol of a lower one. ' +
+        'Round the z-index to fewer numbers to have them drawn number by number.',
+    );
+  }
+
   private olBatch(): MixedGeometryBatch {
     if (this.olBatchOf?.version !== this.batchVersion) {
       this.olBatchOf = {version: this.batchVersion, batch: this.batch.toOl()};
@@ -974,16 +1055,18 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
           polygons: up(response.polygons, old?.polygons),
           edges: up(response.edges ?? null, old?.edges),
           lines: up(response.lines, old?.lines),
-          points: up(response.points, old?.points),
+          // symbols that are placed are drawn with their fades (and that is the copy that is kept)
+          points: up(response.points && this.placesSymbols ? this.fadedPoints(response.points) : response.points, old?.points),
           invertVerticesTransform: invert,
           textKey: key,
           levels,
-          symbolLevels: levels ? levels.map((level) => level.symbol) : null,
         };
-        // all symbols are in the new buffers: those that lost their place are taken out in the next frame
         this.pointInstances = this.placesSymbols ? response.points : null;
+        if (!this.pointInstances) {
+          this.pointsDrawn = null;
+          this.symbolFades = null;
+        }
         this.symbolVersion = -1;
-        this.symbolsLeftOut = false;
         uploaded = true;
         this.indexPending = !!response.indexFollows;
         if (response.index) {
@@ -1091,8 +1174,11 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     resolveFrameLabels(frameState);
     this.labelFrame = this.gpuText?.frame(frameState) ?? null;
     if (this.placesSymbols && this.gpuText && this.symbolVersion !== this.gpuText.symbolVersion) {
-      this.hideSymbols(this.gpuText.hiddenSymbols);
+      this.fadeSymbols(this.gpuText.hiddenSymbols);
       this.symbolVersion = this.gpuText.symbolVersion;
+    }
+    if (this.symbolFadeEnd && fadeClock() < this.symbolFadeEnd) {
+      frameState.animate = true; // the fades run in the shader: frames are all they need
     }
 
     this.dispatch('prerender', frameState, null);
@@ -1194,7 +1280,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       // a symbol that lost its place in decluttering is not there
       const hidden = this.placesSymbols ? this.gpuText?.hiddenSymbols : undefined;
       let picked: Iterable<FeatureLike> = this.picker.pick(coordinate, frameState, hitTolerance, (ref) => this.batch.getFeatureFromRef(ref));
-      const z = this.zIndex;
+      const levelOf = this.levelOf;
+      const z = this.zIndex ?? (levelOf ? {of: (feature: FeatureLike) => levelOf[this.batch.refOf(feature)] ?? 0} : null);
       if (z && this.buffers?.levels) {
         // The hits come symbols over strokes over fills. Drawn one z-index after the
         // other, a higher one is over a lower one first (the sort keeps the rest).

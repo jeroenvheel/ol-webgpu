@@ -31,9 +31,18 @@ describe('buildSymbolEvaluator', () => {
       {},
       () => 0,
     )!;
-    expect({...symbol(feature({size: 9}), 1)}).toEqual({x: 4, y: -6, halfWidth: 10, halfHeight: 10, obstacle: false});
+    expect({...symbol(feature({size: 9}), 1)}).toEqual({x: 4, y: -6, halfWidth: 10, halfHeight: 10, obstacle: false, rotation: 0, rotateWithView: false, round: true});
     // nothing is drawn without a radius
     expect(symbol(feature(), 1)).toBeNull();
+  });
+
+  it('gives an icon its own width and height and how it is turned, not the square around it', () => {
+    const symbol = buildSymbolEvaluator(
+      {'icon-src': 'data:,', 'icon-width': 40, 'icon-height': 10, 'icon-rotation': ['get', 'angle'], 'icon-rotate-with-view': true, 'icon-declutter-mode': 'declutter'} as any,
+      {},
+      () => 0,
+    )!;
+    expect(symbol(feature({angle: Math.PI / 2}), 1)).toMatchObject({halfWidth: 20, halfHeight: 5, rotation: Math.PI / 2, rotateWithView: true, round: false});
   });
 
   it('tells an obstacle', () => {

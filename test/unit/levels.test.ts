@@ -7,7 +7,7 @@ import {FeatureBatch} from '../../src/render/batch.js';
 import {create as createTransform} from 'ol/transform.js';
 import {describe, expect, it} from 'vitest';
 import {InstructionBuilder, InstructionJob} from '../../src/render/instructions.js';
-import {MAX_LEVELS, drawLevels, mergeStarts} from '../../src/render/levels.js';
+import {MAX_LEVELS, drawLevels, mergeStarts, orderLevels} from '../../src/render/levels.js';
 import {REF_ATTRIBUTE} from '../../src/render/stylePasses.js';
 import {edgeInstructions} from '../../src/worker/build.js';
 import {buildLinesJs, buildPointsJs, buildPolygonsJs} from '../../src/worker/fallback.js';
@@ -76,6 +76,45 @@ describe('mergeStarts', () => {
     expect(mergeStarts({points: {levels: [1, 0], end: 5}, lines: {levels: [1, 0], end: 2}, polygons: null, edges: null})).toBeNull();
     const many = Array.from({length: MAX_LEVELS + 1}, (_v, i) => [i, i]).flat();
     expect(mergeStarts({points: {levels: many, end: MAX_LEVELS + 1}, lines: null, polygons: null, edges: null})).toBeNull();
+    // and tells how many there were, which the layer warns about; not when they fit
+    const told: number[] = [];
+    mergeStarts({points: {levels: many, end: MAX_LEVELS + 1}, lines: null, polygons: null, edges: null}, (count) => told.push(count));
+    mergeStarts({points: {levels: [1, 0, 2, 3], end: 5}, lines: null, polygons: null, edges: null}, (count) => told.push(count));
+    expect(told).toEqual([MAX_LEVELS + 1]);
+  });
+});
+
+describe('orderLevels', () => {
+  const FILL = 1;
+  const STROKE = 2;
+  const SYMBOL = 4;
+
+  it('is null when kind by kind gives the same picture', () => {
+    expect(orderLevels([])).toBeNull();
+    expect(orderLevels([SYMBOL, SYMBOL, SYMBOL])).toBeNull();
+    // fills, then strokes, then symbols: as they are drawn anyway
+    expect(orderLevels([FILL, FILL, STROKE, SYMBOL, SYMBOL])).toBeNull();
+  });
+
+  it('starts a number where a feature has a kind that comes before one of an earlier feature', () => {
+    // a symbol, then a stroke over it, then a fill over both
+    expect([...orderLevels([SYMBOL, STROKE, FILL])!]).toEqual([0, 1, 2]);
+    // points stay together until something has to go over them
+    expect([...orderLevels([FILL, SYMBOL, SYMBOL, STROKE, SYMBOL])!]).toEqual([0, 0, 0, 1, 1]);
+  });
+
+  it('gives every polygon with a fill and a stroke its own number', () => {
+    // the fill of the second has to cover the stroke of the first
+    expect([...orderLevels([FILL | STROKE, FILL | STROKE, FILL | STROKE])!]).toEqual([0, 1, 2]);
+  });
+
+  it('leaves features that draw nothing where they are', () => {
+    expect([...orderLevels([SYMBOL, 0, FILL])!]).toEqual([0, 0, 1]);
+  });
+
+  it('is null with more numbers than are drawn one by one', () => {
+    expect(orderLevels(Array.from({length: MAX_LEVELS}, () => FILL | STROKE))).not.toBeNull();
+    expect(orderLevels(Array.from({length: MAX_LEVELS + 1}, () => FILL | STROKE))).toBeNull();
   });
 });
 

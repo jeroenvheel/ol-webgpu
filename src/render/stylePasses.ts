@@ -9,6 +9,7 @@ import {Attributes, convertStyleToShaders, toFlatStyleLike} from 'ol/render/webg
 import {stringToGlsl} from 'ol/expr/gpu.js';
 import {getCustomAttributesSize} from 'ol/render/webgl/renderinstructions.js';
 import {hasTextStyle} from 'ol/render/webgl/textUtil.js';
+import {FADE} from '../text/shaders.js';
 import {styleOrder} from './order.js';
 
 /** One float attribute in an interleaved buffer; `name: null` is padding. */
@@ -102,9 +103,24 @@ function withoutText(style: FlatStyleLike): FlatStyleLike {
 }
 
 /**
- * @param textAttributes also the attributes of the `text-*` properties, which only ol's text worker reads
+ * The fade of a symbol that takes part in decluttering: an attribute per
+ * symbol (in the place the ref has in the instructions, which the GPU does
+ * not read) with the number the labels have too (see `SHOWN` in
+ * text/shaders.ts), and the time to make an opacity of it.
  */
-export function buildStylePasses(style: FlatStyleLike, variables: Record<string, any>, smoothFill = false, textAttributes = true): StylePasses {
+export const FADE_ATTRIBUTE = 'a_olgFade';
+export const FADE_TIME_UNIFORM = 'u_olgFadeTime';
+
+/** The time of the fades of symbols, in seconds: never so small that a symbol that is shown looks like one that fades in. */
+export function fadeClock(): number {
+  return performance.now() / 1000 + 1;
+}
+
+/**
+ * @param textAttributes also the attributes of the `text-*` properties, which only ol's text worker reads
+ * @param symbolFade symbols fade in and out by `FADE_ATTRIBUTE`
+ */
+export function buildStylePasses(style: FlatStyleLike, variables: Record<string, any>, smoothFill = false, textAttributes = true, symbolFade = false): StylePasses {
   const styleShaders = convertStyleToShaders((textAttributes ? style : withoutText(style)) as any, variables);
 
   // the ref goes first so its offset is always 0
@@ -185,12 +201,24 @@ export function buildStylePasses(style: FlatStyleLike, variables: Record<string,
       };
     }
     if (b.getSymbolVertexShader()) {
+      let instanced = custom;
+      if (symbolFade) {
+        // After the fills and strokes were made: only the symbols get the attribute.
+        // (The builder is not used after this.)
+        const seconds = (FADE / 1000).toFixed(3);
+        const progress = `clamp((${FADE_TIME_UNIFORM} - abs(${FADE_ATTRIBUTE})) / ${seconds}, 0.0, 1.0)`;
+        b.addUniform(FADE_TIME_UNIFORM, 'float');
+        b.addAttribute(FADE_ATTRIBUTE, 'float');
+        b.setSymbolColorExpression(`((${b.getSymbolColorExpression()}) * vec4(1.0, 1.0, 1.0, mix(1.0 - ${progress}, ${progress}, step(0.0, ${FADE_ATTRIBUTE}))))`);
+        uniforms[FADE_TIME_UNIFORM] = fadeClock;
+        instanced = custom.map((attribute, i) => (i === 0 ? {...attribute, name: FADE_ATTRIBUTE} : attribute));
+      }
       pass.symbol = {
         kind: 'point',
         vertexShader: b.getSymbolVertexShader()!,
         fragmentShader: b.getSymbolFragmentShader()!,
         attributes: [{name: Attributes.LOCAL_POSITION, size: 2}],
-        instanced: [{name: Attributes.POSITION, size: 2}, ...custom],
+        instanced: [{name: Attributes.POSITION, size: 2}, ...instanced],
       };
     }
     return pass;
