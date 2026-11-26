@@ -1,6 +1,7 @@
 // Runs examples/bench.html in Playwright Chromium and stores the results.
 // Usage: npm run bench -- [--points=N] [--lines=N] [--polygons=N] [--layers=ol,webgl2,webgpu]
 //        [--style=full|fill|stroke|simple] [--smooth (smoothFill, for --style=fill)] [--timeout=minutes] [--channel=msedge] [--headed]
+//        [--browser-args=--use-angle=gl,--other-flag (more flags for the browser, after those of test/browser.js)]
 import {writeFileSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -27,10 +28,13 @@ const server = await createServer({
 await server.listen();
 const url = server.resolvedUrls.local[0];
 
+// "--browser-args=--use-angle=gl" arrives as the key "browser-args=--use-angle" with the rest as its value
+const given = process.argv.find((a) => a.startsWith('--browser-args='));
+const browserArgs = given ? given.slice('--browser-args='.length).split(',').filter(Boolean) : [];
 const browser = await launchChromium({
   channel: args.channel,
   headed: args.headed === 'true',
-  extraArgs: ['--js-flags=--max-old-space-size=8192 --expose-gc'],
+  extraArgs: ['--js-flags=--max-old-space-size=8192 --expose-gc', ...browserArgs],
 });
 const page = await browser.newPage({viewport: {width: 1100, height: 900}});
 page.on('console', (m) => console.log('[page]', m.text()));
