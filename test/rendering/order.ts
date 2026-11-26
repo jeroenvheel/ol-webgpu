@@ -31,6 +31,8 @@ const Layer = params.get('layer') === 'webgpu' ? WebGPUVectorLayer : WebGL2Vecto
 
 // for the frame times; fewer where drawing is slow (software rendering in CI)
 const POINTS = Number(params.get('points') ?? 300_000);
+// how many frames are timed: fewer where a frame takes a quarter of a second
+const FRAMES = Number(params.get('frames') ?? 60);
 const RED = [215, 25, 28];
 const GREEN = [26, 150, 65];
 const BLUE = [44, 123, 182];
@@ -218,7 +220,7 @@ const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [asThey
       const view = map.getView();
       const times: number[] = [];
       let last = performance.now();
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < FRAMES; i++) {
         view.setCenter([i % 2, 0]);
         await frame();
         const now = performance.now();
@@ -230,7 +232,7 @@ const map = new Map({target: 'map', pixelRatio: 1, controls: [], layers: [asThey
       many.dispose();
       await settle();
       times.sort((a, b) => a - b);
-      return {levels, median: Math.round(times[30] * 10) / 10, slowest: Math.round(times[59])};
+      return {levels, median: Math.round(times[times.length >> 1] * 10) / 10, slowest: Math.round(times[times.length - 1])};
     };
     results.times = {one: await frames(1), ten: await frames(10), sixty: await frames(60)};
 
