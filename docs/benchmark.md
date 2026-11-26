@@ -97,13 +97,15 @@ What this shows:
 | 20 000 (5 900 in view) | frame while panning | 20 | **0.9** |
 | | label layout after a zoom | (in the frame) | 34, over 3 frames |
 | 200 000 (59 000 in view) | frame while panning | 168 | **4.8** |
-| | label layout after a zoom | (in the frame) | 208, over 12 frames |
-| | worst frame while panning | 330 | 121 |
+| | label layout after a zoom | (in the frame) | 280, over 26 frames |
+| | worst frame while panning | 330 | 15 |
 
 The Canvas layer lays out and declutters all labels in every frame; GPU
 text measures them once per layout, gives glyphs to the 1 700 to 2 300 that
-can win a place, and declutters those per frame (0.4 ms). The worst frame
-is the one that starts a new layout (collecting and sorting the features in
-view), which is not sliced yet.
+can win a place, and declutters those per frame (0.4 ms). A layout is made
+in steps of at most 10 ms a frame (4 ms while the view moves): collecting
+the features of the area, measuring them, choosing the labels that can win a
+place, and laying those out. Up to 0.1.0-beta.12 the first and the third of
+those were done in one go each, and the worst frame was 121 ms.
 
 [Back to the README](../README.md)

@@ -71,7 +71,7 @@ Options and methods mirror `ol/layer/WebGLVector`: `source`, `style`,
 |---|---|---|
 | `text` | `'gpu'` | `'gpu'` draws `text-*` styles from a glyph atlas; `'canvas'` draws them with ol's text worker, exactly as `ol/layer/WebGLVector` does. See [Labels](#labels). |
 | `declutter` | `false` | `true`, or a group name shared by several layers: labels do not overlap. |
-| `renderOrder` | | A function that compares two features, as for ol's Canvas vector layer. A `z-index` in the style goes before it and orders the features too: with a `z-index` that is an expression, the fills, strokes and symbols of one number are drawn before those of the next, for up to 64 different numbers. |
+| `renderOrder` | | A function that compares two features, as for ol's Canvas vector layer. A `z-index` in the style goes before it and orders the features too: with a `z-index` that is an expression, the fills, strokes and symbols of one number are drawn before those of the next, for up to 64 different numbers; with more the layer says so in the console and draws them kind by kind. Without a `z-index`, a layer of up to 4096 features draws them feature by feature in the order of `renderOrder`, as a Canvas layer does, where that takes no more than 64 steps; else kind by kind (fills, strokes, symbols), each in that order. |
 | `antialias` | `false` | Multisampling. `false` matches ol pixel for pixel. |
 | `smoothFill` | `false` | Fills without a stroke fade out over one pixel outside the polygon instead of ending in stairs, at about the cost of a stroke ([bench/fixes-2026-11-24.md](bench/fixes-2026-11-24.md)). |
 | `updateWhileAnimating`, `updateWhileInteracting` | `false` | As for ol's vector layers: the source is asked for the features of the view also while the view moves. |
@@ -84,8 +84,11 @@ whose map is taken from the page (`map.setTarget(null)`, `map.dispose()`),
 gives up its GPU buffers, its part of the shared canvas and its hit index by
 itself, and builds them again when it is drawn again. A layer that is put
 back in the same task, to move it in the layers, and a map that gets another
-target in the same task keep them. Only a map that is dropped while it still
-has its target leaves its layers to be disposed.
+target in the same task keep them. The same goes for a map whose element is
+taken from the page without telling the map: its layers let go of what they
+hold on the GPU, and build it again when the element is back. (ol itself
+keeps such a map, with its layers and features, until `map.setTarget(null)`
+or `map.dispose()`.)
 
 ## Labels
 

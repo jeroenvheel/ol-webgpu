@@ -54,8 +54,12 @@ two backends and GPU-evaluated styles.
   screen stay until the new ones are ready. A new layout is made when the
   view leaves that area, and when the resolution (or, for text along lines
   and with decluttering, the rotation) has changed and the view has settled.
-  Text along a line that is kept upright has its glyphs for both directions,
-  so it is upright in every frame of a view that turns; a label that is
+  Text along a line that is kept upright has its glyphs for both directions
+  once the view has turned, so it is upright in every frame of a view that
+  turns. Until the view turns for the first time the second direction is
+  left out (it is half as much again to lay out: 475 against 840 ms for
+  20 000 labels); the layout that adds it takes a few frames, in which a
+  label that has to turn around is still as it was. A label that is
   loaded again as another feature object, with the same text at the same
   place, stays as it is instead of fading in.
 - **Drawing.** A glyph is an instanced quad, drawn after the layer's
@@ -78,11 +82,16 @@ two backends and GPU-evaluated styles.
   `circle-`, `shape-` or `icon-declutter-mode` set to `'declutter'` or
   `'obstacle'`: it takes space, a symbol that has no place is not drawn
   and not hit, and a symbol and its label are drawn together or not at all.
+  A symbol that loses or wins its place fades out or in, as a label does.
+  An icon takes the space of its box as it is turned (by its rotation, and
+  by the view when it turns with it), a circle or a shape that of its
+  radius.
   Without such a mode symbols are always drawn (in ol's Canvas layers
   `'declutter'` is the default).
 - **Long labels.** `'text-max-width'` in a text style (CSS pixels, a number or
   an expression; not a property of ol) breaks a label at spaces so that no
-  line is wider. For labels at points with a plain text.
+  line is wider, also in a text in parts with fonts of their own (parts
+  that touch without a space stay together). Not for text along a line.
 - **Hit detection.** A shown label is hit within its box (with
   `hitTolerance`), before the geometries below it.
 

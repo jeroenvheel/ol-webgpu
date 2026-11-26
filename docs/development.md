@@ -17,6 +17,7 @@ npm run test:rendering        # screenshots, hit detection, text, labels, export
 npm run test:memory           # leak checks: repeats what a layer does and counts what stays alive
 npm run test:memory -- --big  # one big layer step by step, from ol/Feature and from RenderFeatures
 npm run bench                 # benchmark, see bench/run.js for options
+node bench/gpu-matrix.js      # the benchmark of one data set in several browser setups (ANGLE backends, installed Chrome)
 npm run build                 # dist/ (ES module + worker + wasm + .d.ts)
 npm run test:dist             # production app build against dist/, checked in Chromium
 ```

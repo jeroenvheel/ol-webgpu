@@ -98,7 +98,11 @@ ol/source/Vector ──► FeatureBatch ──────► render instruction
 - **Workers.** One worker builds the buffers of all layers of the page. When
   it has a lot to do (4 MB of instructions or more are waiting) a second one
   starts, so a big layer does not hold up the others; it stops again after
-  10 seconds without builds.
+  10 seconds without builds. With five layers of 120 000 lines in a
+  production build, the second worker makes the first load 14% shorter on
+  WebGL2 (690 against 593 ms) and changes nothing on WebGPU (580 against
+  571 ms); building all five again is 30% shorter on both (335 against
+  235 ms).
 - **Fallbacks.** If WebAssembly cannot load, the worker uses ol's JS buffer
   code; if WebGPU is unavailable, `GpuVectorLayer` uses WebGL2. If the
   worker cannot start (its file is missing, or a Content Security Policy
