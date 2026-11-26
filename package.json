@@ -1,6 +1,6 @@
 {
   "name": "ol-webgpu",
-  "version": "0.1.0-beta.12",
+  "version": "0.1.0-beta.13",
   "description": "WebGL2 and WebGPU vector layers for OpenLayers, with a Rust/WebAssembly geometry core",
   "type": "module",
   "license": "BSD-2-Clause",
