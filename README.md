@@ -555,46 +555,82 @@ pick, and can be exported with `drawImage` in a `rendercomplete` listener.
 ## Benchmark
 
 `npm run bench -- --layers=ol,webgl2,webgpu` (examples/bench.html in
-Playwright Chromium, Intel Iris Xe laptop GPU, D3D11, 1100×900 map, all
-features in view, one layer). Milliseconds, lower is better. A frame is
-`renderSync()` plus a 1-pixel readback of the canvas, so it includes the
-GPU work. Runs on a laptop vary by 10–30%; compare columns of one run.
+Playwright Chromium, AMD Radeon R9 200, D3D11, 1100×900 map, all features in
+view, one layer). Milliseconds, lower is better. A frame is `renderSync()`
+plus a 1-pixel readback of the canvas, so it includes the GPU work. The
+numbers are those of 0.1.0-beta.12, the median of three runs (ol's layer:
+two).
 
 **End to end per layer**
 
 | Data set | | ol WebGLVector | WebGL2 | WebGPU |
 |---|---|---|---|---|
-| 1M points | ready (add layer → rendercomplete) | **920** | 1045 | 1015 |
-| | frame (pan, no rebuild) | 139 | 85 | **24** |
-| | pick (`forEachFeatureAtPixel`) | 0.01 | 0.09 | 0.11 |
-| 200k lines | ready | 2256 | 868 | **850** |
-| | frame | 389 | **32** | 37 |
-| | pick | 0.52 | 0.05 | 0.04 |
-| 100k polygons | ready | 1799 | 797 | **702** |
-| | frame | 307 | 39 | **21** |
-| | pick | 0.00 | 0.03 | 0.02 |
+| 1M points | ready (add layer → rendercomplete) | 847 | **593** | 601 |
+| | frame (pan, no rebuild) | 47.8 | 12.4 | **11.4** |
+| | pick (`forEachFeatureAtPixel`) | 0.00 | 0.09 | 0.09 |
+| 200k lines | ready | 1717 | **551** | 571 |
+| | frame | 359.8 | 15.3 | **15.1** |
+| | pick | 0.01 | 0.03 | 0.03 |
+| 100k polygons | ready | 1826 | **440** | 456 |
+| | frame | 237.9 | 11.9 | **11.7** |
+| | pick | 0.01 | 0.08 | 0.07 |
+
+**Per release**
+
+![Time to first render per release: 1M points, 200k lines and 100k polygons on WebGL2 and WebGPU, with ol's WebGLVector layer as a reference](bench/first-render.svg)
+
+Every release was built again and measured on the same machine on one day
+([bench/history-2026-11-26.md](bench/history-2026-11-26.md), numbers in
+`bench/history.json`, chart by `node bench/chart.js`). Time to first render,
+median of three runs:
+
+| Release | Points WebGL2 | Points WebGPU | Lines WebGL2 | Lines WebGPU | Polygons WebGL2 | Polygons WebGPU | What changed for speed |
+|---|---|---|---|---|---|---|---|
+| beta.0 | 901 | 1162 | 833 | 901 | 731 | 755 | |
+| beta.5 | 877 | 1093 | 838 | 870 | 733 | 767 | |
+| beta.6 | 670 | 893 | 784 | 824 | 672 | 700 | the layer's refs instead of ol's uid map; attributes kept per feature |
+| beta.10 | 653 | 909 | 776 | 838 | 670 | 699 | |
+| beta.11 | 609 | 708 | 555 | 578 | 436 | 440 | the first frame does not wait for the hit index; the layer's own batch of features |
+| beta.12 | 593 | 601 | 551 | 571 | 440 | 456 | shaders compiled and the device requested ahead |
+| beta.0 → beta.12 | −34% | −48% | −34% | −37% | −40% | −40% | |
+
+Frame times did not change over the releases (11–13 ms for points and
+polygons, 14–16 ms for lines, on both backends), nor did a pick.
+
+The heap a big layer adds (300 000 points, 200 000 lines, 50 000 polygons,
+`npm run test:memory -- --big`), in MB:
+
+| | WebGL2 | WebGPU | WebGL2, RenderFeatures | WebGPU, RenderFeatures |
+|---|---|---|---|---|
+| beta.5 | 528 | 364 | | |
+| beta.10 | 518 | 354 | 407 | 243 |
+| beta.11 and beta.12 | 398 | 233 | 280 | 116 |
+| the same, `keepBuffers: false` | 233 | – | | |
 
 **Buffer generation (worker), ol's JS vs Rust/WASM**
 
 | | ol JS | Rust/WASM |
 |---|---|---|
-| 1M points | 5 | 9 |
-| 200k lines | 1385 | **243** (5.7×) |
-| 100k polygons (earcut) | 372 | **40** (9×) |
-| hit index build, 1M points / 200k lines / 100k polygons | – | 150 / 95 / 26 |
+| 200k lines | 1003 | **270** (3.7×) |
+| 100k polygons (earcut) | 526 | **51** (10×) |
+| hit index build, 1M points / 200k lines / 100k polygons | – | 167 / 56 / 29 |
 
 What this shows:
 
-- **Frames** are 8–15× faster than ol's layer for lines and polygons, and
-  about 6× faster for points on WebGPU (1.6× on WebGL2), with the same
-  shaders and buffers. The gap is in how frames are drawn (ol renders into
-  an offscreen framebuffer and copies it, among other things); it has not
-  been profiled further.
-- **Time to first render** is about 2.5× shorter for lines and polygons,
-  where the tessellation is Rust's. For points it is on par: there the time
-  goes into ol's main-thread steps (`MixedGeometryBatch` ≈ 0.4 s and render
-  instructions ≈ 0.12 s for 1M points), which this package reuses and which
-  cannot move to WASM while the input is `ol/Feature` objects.
+- **Frames** are 20–24× faster than ol's layer for lines and polygons, and
+  about 4× for points, with the same shaders and buffers. The gap is in how
+  frames are drawn (ol renders into an offscreen framebuffer and copies it,
+  among other things); it has not been profiled further.
+- **Time to first render** is 3× shorter than ol's for lines, 4× for
+  polygons and 1.4× for points. The tessellation is Rust's, the features are
+  read into typed arrays of the layer's own instead of ol's
+  `MixedGeometryBatch`, and the first frame waits for neither the hit index
+  nor, on WebGPU, the shaders.
+- **WebGPU and WebGL2 are level** on this GPU since beta.12, for the first
+  frame and for the frames after it. On other GPUs they are not: on an Intel
+  Iris Xe a frame of a million points takes 87 ms on WebGL2 and 24 ms on
+  WebGPU, and on an NVIDIA T550 WebGPU draws lines and polygons faster
+  ([bench/beta12-2026-11-26.md](bench/beta12-2026-11-26.md)).
 - **Picking** costs about 0.1 ms or less, like ol's GPU readback, but works
   on WebGPU and is correct in the two cases where ol's is not. The first
   pick after a rebuild is slower (a few ms, up to about 50 ms for 1M
@@ -603,7 +639,8 @@ What this shows:
 - This benchmark has one layer. On maps with many layers, the shared
   canvases matter more: on a real map with 24 vector layers (660k
   features, Intel Iris Xe, 60 Hz), zooming with the whole map in view ran
-  at 16 fps with ol's layers, 18 fps with WebGL2 and 29 fps with WebGPU.
+  at 16 fps with ol's layers, 18 fps with WebGL2 and 29 fps with WebGPU
+  (measured with an early release).
 
 **Labels** (`examples/labels.html`: country names and random place names,
 1100×900 map, decluttered, AMD Radeon R9 200, Chromium). A frame is
