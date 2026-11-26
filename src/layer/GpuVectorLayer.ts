@@ -5,7 +5,7 @@ import {isWebGPUAvailable} from '../webgpu/device.js';
 import BaseGpuVectorLayer from './BaseGpuVectorLayer.js';
 import WebGL2VectorLayer from './WebGL2VectorLayer.js';
 import type {WebGPUVectorLayerOptions} from './WebGPUVectorLayer.js';
-import WebGPUVectorLayer from './WebGPUVectorLayer.js';
+import WebGPUVectorLayer, {prepareWebGPU} from './WebGPUVectorLayer.js';
 
 export interface GpuVectorLayerOptionsWithBackend<S extends VectorSource = VectorSource> extends WebGPUVectorLayerOptions<S> {
   /** 'auto' (default) uses WebGPU when available, else WebGL2. */
@@ -24,6 +24,9 @@ export default class GpuVectorLayer<S extends VectorSource = VectorSource> exten
     super(options);
     const wanted = options.backend ?? 'auto';
     this.backend = wanted === 'auto' ? (isWebGPUAvailable() ? 'webgpu' : 'webgl2') : wanted;
+    if (this.backend === 'webgpu') {
+      prepareWebGPU((options as WebGPUVectorLayerOptions<S>).shaderWasmUrl);
+    }
   }
 
   /** The backend currently in use. */

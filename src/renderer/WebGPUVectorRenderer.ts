@@ -299,6 +299,12 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
       symbol: pass.symbol && this.createPipeline(pass.symbol),
     }));
     this.blockSize = Math.max(16, ...this.pipelines.flatMap((p) => [p.fill, p.edge, p.stroke, p.symbol]).map((x) => x?.program.uniformBlockSize ?? 0));
+    // The browser keeps the commands above until something is submitted, so
+    // the GPU process would compile the shaders (over 100 ms for a style
+    // with fills, strokes and symbols) when the first frame is waiting for
+    // it. Asking about the queue sends them now: they are compiled while the
+    // buffers are built.
+    this.device.queue.onSubmittedWorkDone().catch(() => {});
   }
 
   private createPipeline(pass: SubPass): Pipeline {

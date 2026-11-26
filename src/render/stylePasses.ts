@@ -74,8 +74,38 @@ const EDGE_WIDTH = 1;
  *   rings come from the worker with the fill on their left (see
  *   `edgeInstructions`), so "outside" is to the right of the line.
  */
-export function buildStylePasses(style: FlatStyleLike, variables: Record<string, any>, smoothFill = false): StylePasses {
-  const styleShaders = convertStyleToShaders(style as any, variables);
+/**
+ * The style without its `text-*` properties, with as many styles in the
+ * same places. ol compiles those properties too, for its text worker: every
+ * property a text reads becomes an attribute of every vertex, and every
+ * text a feature has gets a number in a table that is never emptied
+ * (`getStringNumberEquivalent`). Labels drawn by the layer itself read the
+ * features, not the attributes.
+ */
+function withoutText(style: FlatStyleLike): FlatStyleLike {
+  const strip = (flat: any): any => {
+    if (!flat || typeof flat !== 'object' || !Object.keys(flat).some((key) => key.startsWith('text-'))) {
+      return flat;
+    }
+    return Object.fromEntries(Object.entries(flat).filter(([key]) => !key.startsWith('text-')));
+  };
+  const one = (item: any): any => {
+    if (!item || typeof item !== 'object' || 'builder' in item) {
+      return item;
+    }
+    if ('style' in item) {
+      return {...item, style: Array.isArray(item.style) ? item.style.map(strip) : strip(item.style)};
+    }
+    return strip(item);
+  };
+  return (Array.isArray(style) ? style.map(one) : one(style)) as FlatStyleLike;
+}
+
+/**
+ * @param textAttributes also the attributes of the `text-*` properties, which only ol's text worker reads
+ */
+export function buildStylePasses(style: FlatStyleLike, variables: Record<string, any>, smoothFill = false, textAttributes = true): StylePasses {
+  const styleShaders = convertStyleToShaders((textAttributes ? style : withoutText(style)) as any, variables);
 
   // the ref goes first so its offset is always 0
   const customAttributes: Record<string, AttributeDefinition> = {

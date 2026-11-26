@@ -336,13 +336,13 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.smoothFill = !!options.smoothFill;
     this.keepCpuCopies = backend === 'webgl2' && options.keepBuffers !== false;
     this.renderOrder = options.renderOrder ?? null;
-    this.passes = buildStylePasses(this.style, this.variables, this.smoothFill);
+    this.textMode = options.text ?? 'gpu';
+    this.passes = buildStylePasses(this.style, this.variables, this.smoothFill, this.textMode === 'canvas');
     this.instructions = new InstructionBuilder(this.passes.customAttributes);
     this.applyOrder();
     this.uniformState = new UniformState(this.passes.uniforms);
     this.uniformState.onPendingImage = (image) => this.awaitImage(image);
     this.worker = WorkerClient.shared(options);
-    this.textMode = options.text ?? 'gpu';
     this.declutter = options.declutter ? String(options.declutter) : null;
     this.updateTextMode();
     // Ready until the first rebuild starts, like ol's renderers: a layer outside its
@@ -558,7 +558,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
   setStyle(style: FlatStyleLike, variables: Record<string, any>) {
     this.style = style;
     this.variables = variables;
-    this.passes = buildStylePasses(style, variables, this.smoothFill);
+    this.passes = buildStylePasses(style, variables, this.smoothFill, this.textMode === 'canvas');
     this.uniformState.setStyleUniforms(this.passes.uniforms);
     this.pendingImages.clear();
     this.picker?.setStyle(style, variables);

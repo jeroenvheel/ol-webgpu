@@ -37,6 +37,19 @@ export function getDevice(): Promise<GPUDevice> {
 }
 
 /**
+ * Asks for the device ahead of the first frame of a layer. The first
+ * request of a page takes the browser 150 to 200 ms (it starts WebGPU in
+ * its GPU process), which a layer that is made before its features are
+ * loaded, or before its map is, does not wait for then. Failing is left to
+ * the request of the renderer, which reports it and tries again.
+ */
+export function prepareDevice(): void {
+  if (isWebGPUAvailable()) {
+    getDevice().catch(() => {});
+  }
+}
+
+/**
  * Command encoder shared by all layers for the current map frame. Each layer
  * records a render pass for its own canvas into it, and the frame is
  * submitted once. An encoder and a submit per layer per frame create many
