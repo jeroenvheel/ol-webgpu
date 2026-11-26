@@ -94,7 +94,13 @@ PANELS.forEach(([kind, title], p) => {
       out += `<text class="secondary num" x="-8" y="${r1(y(tick) + 4)}" text-anchor="end">${tick}</text>\n`;
     }
   }
-  for (let i = 0; i < n; i += 3) {
+  // every third release, and the last one (without one right before it)
+  const ticks = [];
+  for (let i = 0; i < n - 2; i += 3) {
+    ticks.push(i);
+  }
+  ticks.push(n - 1);
+  for (const i of ticks) {
     out += `<text class="secondary num" x="${r1(x(i))}" y="${H - BOTTOM + 18}" text-anchor="middle">${i}</text>\n`;
   }
   if (p === 0) {

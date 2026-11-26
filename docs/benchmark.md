@@ -4,22 +4,22 @@
 Playwright Chromium, AMD Radeon R9 200, D3D11, 1100×900 map, all features in
 view, one layer). Milliseconds, lower is better. A frame is `renderSync()`
 plus a 1-pixel readback of the canvas, so it includes the GPU work. The
-numbers are those of 0.1.0-beta.12, the median of three runs (ol's layer:
+numbers are those of 0.1.0-beta.13, the median of three runs (ol's layer:
 two).
 
 **End to end per layer**
 
 | Data set | | ol WebGLVector | WebGL2 | WebGPU |
 |---|---|---|---|---|
-| 1M points | ready (add layer → rendercomplete) | 847 | **593** | 601 |
+| 1M points | ready (add layer → rendercomplete) | 847 | **587** | 603 |
 | | frame (pan, no rebuild) | 47.8 | 12.4 | **11.4** |
 | | pick (`forEachFeatureAtPixel`) | 0.00 | 0.09 | 0.09 |
-| 200k lines | ready | 1717 | **551** | 571 |
-| | frame | 359.8 | 15.3 | **15.1** |
-| | pick | 0.01 | 0.03 | 0.03 |
-| 100k polygons | ready | 1826 | **440** | 456 |
-| | frame | 237.9 | 11.9 | **11.7** |
-| | pick | 0.01 | 0.08 | 0.07 |
+| 200k lines | ready | 1717 | **552** | 560 |
+| | frame | 359.8 | 15.3 | **14.4** |
+| | pick | 0.01 | 0.03 | 0.05 |
+| 100k polygons | ready | 1826 | **434** | 452 |
+| | frame | 237.9 | 11.8 | **11.6** |
+| | pick | 0.01 | 0.03 | 0.07 |
 
 **Per release**
 
@@ -38,7 +38,8 @@ median of three runs:
 | beta.10 | 653 | 909 | 776 | 838 | 670 | 699 | |
 | beta.11 | 609 | 708 | 555 | 578 | 436 | 440 | the first frame does not wait for the hit index; the layer's own batch of features |
 | beta.12 | 593 | 601 | 551 | 571 | 440 | 456 | shaders compiled and the device requested ahead |
-| beta.0 → beta.12 | −34% | −48% | −34% | −37% | −40% | −40% | |
+| beta.13 | 587 | 603 | 552 | 560 | 434 | 452 | |
+| beta.0 → beta.13 | −35% | −48% | −34% | −38% | −41% | −40% | |
 
 Frame times did not change over the releases (11–13 ms for points and
 polygons, 14–16 ms for lines, on both backends), nor did a pick.
@@ -50,7 +51,7 @@ The heap a big layer adds (300 000 points, 200 000 lines, 50 000 polygons,
 |---|---|---|---|---|
 | beta.5 | 528 | 364 | | |
 | beta.10 | 518 | 354 | 407 | 243 |
-| beta.11 and beta.12 | 398 | 233 | 280 | 116 |
+| beta.11 to beta.13 | 398 | 233 | 280 | 116 |
 | the same, `keepBuffers: false` | 233 | – | | |
 
 **Buffer generation (worker), ol's JS vs Rust/WASM**

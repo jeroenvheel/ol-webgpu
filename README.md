@@ -158,16 +158,16 @@ background and a build that fails, is in
 ## Benchmark
 
 1M points, 200k lines and 100k polygons, one layer, all features in view.
-Milliseconds, lower is better; 0.1.0-beta.12 on an AMD Radeon R9 200.
+Milliseconds, lower is better; 0.1.0-beta.13 on an AMD Radeon R9 200.
 
 | Data set | | ol WebGLVector | WebGL2 | WebGPU |
 |---|---|---|---|---|
-| 1M points | first render | 847 | **593** | 601 |
+| 1M points | first render | 847 | **587** | 603 |
 | | frame | 47.8 | 12.4 | **11.4** |
-| 200k lines | first render | 1717 | **551** | 571 |
-| | frame | 359.8 | 15.3 | **15.1** |
-| 100k polygons | first render | 1826 | **440** | 456 |
-| | frame | 237.9 | 11.9 | **11.7** |
+| 200k lines | first render | 1717 | **552** | 560 |
+| | frame | 359.8 | 15.3 | **14.4** |
+| 100k polygons | first render | 1826 | **434** | 452 |
+| | frame | 237.9 | 11.8 | **11.6** |
 
 ![Time to first render per release: 1M points, 200k lines and 100k polygons on WebGL2 and WebGPU, with ol's WebGLVector layer as a reference](bench/first-render.svg)
 
