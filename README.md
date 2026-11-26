@@ -191,6 +191,17 @@ ol/source/Vector ──► FeatureBatch ──────► render instruction
   sooner (the index of a million points takes about 0.15 s); until the index
   is in, hits come from the index of the build before, or there are none
   after the first build. `renderer.isPickingReady(frameState)` tells.
+- **The first WebGPU layer of a page.** The first device of a page takes the
+  browser 150 to 200 ms, and compiling the shaders of a style over 100 ms. A
+  layer asks for the device when it is made and has its shaders compiled as
+  soon as the device is there, so both run while the features are loaded and
+  the buffers are built. A page that makes its layers late can call
+  `prepareWebGPU()` when it starts.
+- **Text properties are not shader attributes.** ol compiles `text-*`
+  properties into attributes for its text worker, and gives every text a
+  number in a table that is never emptied. With labels on the GPU (the
+  default) the layer leaves them out: less in the buffers, and texts that
+  change do not add up. With `text: 'canvas'` they are there, as in ol.
 - **CPU hit detection.** WebGPU readback is asynchronous, but OpenLayers asks
   for hits synchronously, so picking uses a spatial index (built in Rust in the
   worker, queried by a main-thread wasm instance) plus the style's filter,
