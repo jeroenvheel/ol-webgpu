@@ -4,22 +4,22 @@
 Playwright Chromium, AMD Radeon R9 200, D3D11, 1100×900 map, all features in
 view, one layer). Milliseconds, lower is better. A frame is `renderSync()`
 plus a 1-pixel readback of the canvas, so it includes the GPU work. The
-numbers are those of 0.1.0-beta.13, the median of three runs (ol's layer:
+numbers are those of 0.1.0-beta.14, the median of three runs (ol's layer:
 two).
 
 **End to end per layer**
 
 | Data set | | ol WebGLVector | WebGL2 | WebGPU |
 |---|---|---|---|---|
-| 1M points | ready (add layer → rendercomplete) | 847 | **587** | 603 |
-| | frame (pan, no rebuild) | 47.8 | 12.4 | **11.4** |
-| | pick (`forEachFeatureAtPixel`) | 0.00 | 0.09 | 0.09 |
-| 200k lines | ready | 1717 | **552** | 560 |
-| | frame | 359.8 | 15.3 | **14.4** |
+| 1M points | ready (add layer → rendercomplete) | 847 | 625 | **594** |
+| | frame (pan, no rebuild) | 47.8 | 12.4 | **11.2** |
+| | pick (`forEachFeatureAtPixel`) | 0.00 | 0.09 | 0.08 |
+| 200k lines | ready | 1717 | **563** | 570 |
+| | frame | 359.8 | 15.1 | **14.4** |
+| | pick | 0.01 | 0.03 | 0.04 |
+| 100k polygons | ready | 1826 | **454** | 473 |
+| | frame | 237.9 | 11.6 | **11.3** |
 | | pick | 0.01 | 0.03 | 0.05 |
-| 100k polygons | ready | 1826 | **434** | 452 |
-| | frame | 237.9 | 11.8 | **11.6** |
-| | pick | 0.01 | 0.03 | 0.07 |
 
 **Per release**
 
@@ -39,7 +39,8 @@ median of three runs:
 | beta.11 | 609 | 708 | 555 | 578 | 436 | 440 | the first frame does not wait for the hit index; the layer's own batch of features |
 | beta.12 | 593 | 601 | 551 | 571 | 440 | 456 | shaders compiled and the device requested ahead |
 | beta.13 | 587 | 603 | 552 | 560 | 434 | 452 | |
-| beta.0 → beta.13 | −35% | −48% | −34% | −38% | −41% | −40% | |
+| beta.14 | 625 | 594 | 563 | 570 | 454 | 473 | 10–38 ms later, for a page that keeps moving: the features go into the layer in slices |
+| beta.0 → beta.14 | −31% | −49% | −32% | −37% | −38% | −37% | |
 
 Frame times did not change over the releases (11–13 ms for points and
 polygons, 14–16 ms for lines, on both backends), nor did a pick.
@@ -53,7 +54,7 @@ The heap a big layer adds (300 000 points, 200 000 lines, 50 000 polygons,
 | beta.10 | 518 | 354 | 407 | 243 |
 | beta.11 to beta.13 | 398 | 233 | 280 | 116 |
 | the same, `keepBuffers: false` | 233 | – | | |
-| after beta.13 (no copy of buffers over 32 MB by default) | 235 | 233 | | |
+| beta.14 (no copy of buffers over 32 MB by default) | 235 | 235 | 117 | 118 |
 
 **Buffer generation (worker), ol's JS vs Rust/WASM**
 

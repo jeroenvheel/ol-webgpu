@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 372" width="960" height="372" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
 <title id="t">Time to first render per release of ol-webgpu</title>
-<desc id="d">Milliseconds from adding a layer to rendercomplete, for 1M points, 200k lines and 100k polygons, on WebGL2 and WebGPU, for releases 0.1.0-beta.0 to beta.13, with ol's WebGLVector layer as a reference. The numbers are in bench/history.json.</desc>
+<desc id="d">Milliseconds from adding a layer to rendercomplete, for 1M points, 200k lines and 100k polygons, on WebGL2 and WebGPU, for releases 0.1.0-beta.0 to beta.14, with ol's WebGLVector layer as a reference. The numbers are in bench/history.json.</desc>
 <style>
   .surface { fill: #ffffff; }
   .primary { fill: #191919; }
@@ -45,47 +45,50 @@
 <line class="grid" x1="0" y1="96" x2="237.3" y2="96"/>
 <text class="secondary num" x="-8" y="100" text-anchor="end">2000</text>
 <text class="secondary num" x="0" y="346" text-anchor="middle">0</text>
-<text class="secondary num" x="54.8" y="346" text-anchor="middle">3</text>
-<text class="secondary num" x="109.5" y="346" text-anchor="middle">6</text>
-<text class="secondary num" x="164.3" y="346" text-anchor="middle">9</text>
-<text class="secondary num" x="237.3" y="346" text-anchor="middle">13</text>
+<text class="secondary num" x="50.9" y="346" text-anchor="middle">3</text>
+<text class="secondary num" x="101.7" y="346" text-anchor="middle">6</text>
+<text class="secondary num" x="152.6" y="346" text-anchor="middle">9</text>
+<text class="secondary num" x="203.4" y="346" text-anchor="middle">12</text>
+<text class="secondary num" x="237.3" y="346" text-anchor="middle">14</text>
 <text class="secondary" x="0" y="364">release 0.1.0-beta.N</text>
 <line class="ref" x1="0" y1="229.7" x2="237.3" y2="229.7"/>
 <text class="secondary num" x="258.3" y="233.7">847</text>
-<polyline class="line s1" points="0,223.5 18.3,225.3 36.5,227.2 54.8,226 73,227.2 91.3,226.3 109.5,250.3 127.8,251.4 146.1,252.6 164.3,252.6 182.6,252.3 200.8,257.4 219.1,259.2 237.3,259.9"/>
+<polyline class="line s1" points="0,223.5 17,225.3 33.9,227.2 50.9,226 67.8,227.2 84.8,226.3 101.7,250.3 118.7,251.4 135.6,252.6 152.6,252.6 169.5,252.3 186.5,257.4 203.4,259.2 220.4,259.9 237.3,255.5"/>
 <circle class="dot s1f" cx="0" cy="223.5" r="3.5"/>
-<circle class="dot s1f" cx="18.3" cy="225.3" r="3.5"/>
-<circle class="dot s1f" cx="36.5" cy="227.2" r="3.5"/>
-<circle class="dot s1f" cx="54.8" cy="226" r="3.5"/>
-<circle class="dot s1f" cx="73" cy="227.2" r="3.5"/>
-<circle class="dot s1f" cx="91.3" cy="226.3" r="3.5"/>
-<circle class="dot s1f" cx="109.5" cy="250.3" r="3.5"/>
-<circle class="dot s1f" cx="127.8" cy="251.4" r="3.5"/>
-<circle class="dot s1f" cx="146.1" cy="252.6" r="3.5"/>
-<circle class="dot s1f" cx="164.3" cy="252.6" r="3.5"/>
-<circle class="dot s1f" cx="182.6" cy="252.3" r="3.5"/>
-<circle class="dot s1f" cx="200.8" cy="257.4" r="3.5"/>
-<circle class="dot s1f" cx="219.1" cy="259.2" r="3.5"/>
-<circle class="dot s1f" cx="237.3" cy="259.9" r="3.5"/>
-<polyline class="line s2" points="0,193.2 18.3,198.1 36.5,199.1 54.8,194.9 73,199.7 91.3,201.2 109.5,224.4 127.8,220.8 146.1,224.1 164.3,221.6 182.6,222.6 200.8,245.9 219.1,258.3 237.3,258.1"/>
+<circle class="dot s1f" cx="17" cy="225.3" r="3.5"/>
+<circle class="dot s1f" cx="33.9" cy="227.2" r="3.5"/>
+<circle class="dot s1f" cx="50.9" cy="226" r="3.5"/>
+<circle class="dot s1f" cx="67.8" cy="227.2" r="3.5"/>
+<circle class="dot s1f" cx="84.8" cy="226.3" r="3.5"/>
+<circle class="dot s1f" cx="101.7" cy="250.3" r="3.5"/>
+<circle class="dot s1f" cx="118.7" cy="251.4" r="3.5"/>
+<circle class="dot s1f" cx="135.6" cy="252.6" r="3.5"/>
+<circle class="dot s1f" cx="152.6" cy="252.6" r="3.5"/>
+<circle class="dot s1f" cx="169.5" cy="252.3" r="3.5"/>
+<circle class="dot s1f" cx="186.5" cy="257.4" r="3.5"/>
+<circle class="dot s1f" cx="203.4" cy="259.2" r="3.5"/>
+<circle class="dot s1f" cx="220.4" cy="259.9" r="3.5"/>
+<circle class="dot s1f" cx="237.3" cy="255.5" r="3.5"/>
+<polyline class="line s2" points="0,193.2 17,198.1 33.9,199.1 50.9,194.9 67.8,199.7 84.8,201.2 101.7,224.4 118.7,220.8 135.6,224.1 152.6,221.6 169.5,222.6 186.5,245.9 203.4,258.3 220.4,258.1 237.3,259.1"/>
 <circle class="dot s2f" cx="0" cy="193.2" r="3.5"/>
-<circle class="dot s2f" cx="18.3" cy="198.1" r="3.5"/>
-<circle class="dot s2f" cx="36.5" cy="199.1" r="3.5"/>
-<circle class="dot s2f" cx="54.8" cy="194.9" r="3.5"/>
-<circle class="dot s2f" cx="73" cy="199.7" r="3.5"/>
-<circle class="dot s2f" cx="91.3" cy="201.2" r="3.5"/>
-<circle class="dot s2f" cx="109.5" cy="224.4" r="3.5"/>
-<circle class="dot s2f" cx="127.8" cy="220.8" r="3.5"/>
-<circle class="dot s2f" cx="146.1" cy="224.1" r="3.5"/>
-<circle class="dot s2f" cx="164.3" cy="221.6" r="3.5"/>
-<circle class="dot s2f" cx="182.6" cy="222.6" r="3.5"/>
-<circle class="dot s2f" cx="200.8" cy="245.9" r="3.5"/>
-<circle class="dot s2f" cx="219.1" cy="258.3" r="3.5"/>
-<circle class="dot s2f" cx="237.3" cy="258.1" r="3.5"/>
-<line class="line s2" x1="245.3" y1="252" x2="253.3" y2="252"/>
-<text class="primary num" x="258.3" y="256">603</text>
-<line class="line s1" x1="245.3" y1="266" x2="253.3" y2="266"/>
-<text class="primary num" x="258.3" y="270">587</text>
+<circle class="dot s2f" cx="17" cy="198.1" r="3.5"/>
+<circle class="dot s2f" cx="33.9" cy="199.1" r="3.5"/>
+<circle class="dot s2f" cx="50.9" cy="194.9" r="3.5"/>
+<circle class="dot s2f" cx="67.8" cy="199.7" r="3.5"/>
+<circle class="dot s2f" cx="84.8" cy="201.2" r="3.5"/>
+<circle class="dot s2f" cx="101.7" cy="224.4" r="3.5"/>
+<circle class="dot s2f" cx="118.7" cy="220.8" r="3.5"/>
+<circle class="dot s2f" cx="135.6" cy="224.1" r="3.5"/>
+<circle class="dot s2f" cx="152.6" cy="221.6" r="3.5"/>
+<circle class="dot s2f" cx="169.5" cy="222.6" r="3.5"/>
+<circle class="dot s2f" cx="186.5" cy="245.9" r="3.5"/>
+<circle class="dot s2f" cx="203.4" cy="258.3" r="3.5"/>
+<circle class="dot s2f" cx="220.4" cy="258.1" r="3.5"/>
+<circle class="dot s2f" cx="237.3" cy="259.1" r="3.5"/>
+<line class="line s1" x1="245.3" y1="250.3" x2="253.3" y2="250.3"/>
+<text class="primary num" x="258.3" y="254.3">625</text>
+<line class="line s2" x1="245.3" y1="264.3" x2="253.3" y2="264.3"/>
+<text class="primary num" x="258.3" y="268.3">594</text>
 </g>
 <g transform="translate(355.3 0)">
 <text class="panel primary" x="0" y="82">200k lines</text>
@@ -95,46 +98,49 @@
 <line class="grid" x1="0" y1="154" x2="237.3" y2="154"/>
 <line class="grid" x1="0" y1="96" x2="237.3" y2="96"/>
 <text class="secondary num" x="0" y="346" text-anchor="middle">0</text>
-<text class="secondary num" x="54.8" y="346" text-anchor="middle">3</text>
-<text class="secondary num" x="109.5" y="346" text-anchor="middle">6</text>
-<text class="secondary num" x="164.3" y="346" text-anchor="middle">9</text>
-<text class="secondary num" x="237.3" y="346" text-anchor="middle">13</text>
+<text class="secondary num" x="50.9" y="346" text-anchor="middle">3</text>
+<text class="secondary num" x="101.7" y="346" text-anchor="middle">6</text>
+<text class="secondary num" x="152.6" y="346" text-anchor="middle">9</text>
+<text class="secondary num" x="203.4" y="346" text-anchor="middle">12</text>
+<text class="secondary num" x="237.3" y="346" text-anchor="middle">14</text>
 <line class="ref" x1="0" y1="128.8" x2="237.3" y2="128.8"/>
 <text class="secondary num" x="258.3" y="132.8">1717</text>
-<polyline class="line s1" points="0,231.4 18.3,232.8 36.5,233.1 54.8,231.8 73,233.3 91.3,230.8 109.5,237.1 127.8,239.3 146.1,238.2 164.3,237.6 182.6,238 200.8,263.6 219.1,264.1 237.3,264"/>
+<polyline class="line s1" points="0,231.4 17,232.8 33.9,233.1 50.9,231.8 67.8,233.3 84.8,230.8 101.7,237.1 118.7,239.3 135.6,238.2 152.6,237.6 169.5,238 186.5,263.6 203.4,264.1 220.4,264 237.3,262.7"/>
 <circle class="dot s1f" cx="0" cy="231.4" r="3.5"/>
-<circle class="dot s1f" cx="18.3" cy="232.8" r="3.5"/>
-<circle class="dot s1f" cx="36.5" cy="233.1" r="3.5"/>
-<circle class="dot s1f" cx="54.8" cy="231.8" r="3.5"/>
-<circle class="dot s1f" cx="73" cy="233.3" r="3.5"/>
-<circle class="dot s1f" cx="91.3" cy="230.8" r="3.5"/>
-<circle class="dot s1f" cx="109.5" cy="237.1" r="3.5"/>
-<circle class="dot s1f" cx="127.8" cy="239.3" r="3.5"/>
-<circle class="dot s1f" cx="146.1" cy="238.2" r="3.5"/>
-<circle class="dot s1f" cx="164.3" cy="237.6" r="3.5"/>
-<circle class="dot s1f" cx="182.6" cy="238" r="3.5"/>
-<circle class="dot s1f" cx="200.8" cy="263.6" r="3.5"/>
-<circle class="dot s1f" cx="219.1" cy="264.1" r="3.5"/>
-<circle class="dot s1f" cx="237.3" cy="264" r="3.5"/>
-<polyline class="line s2" points="0,223.5 18.3,225.9 36.5,224.2 54.8,224.4 73,225.1 91.3,227.1 109.5,232.4 127.8,233.8 146.1,234.2 164.3,233.1 182.6,230.8 200.8,261 219.1,261.8 237.3,263"/>
+<circle class="dot s1f" cx="17" cy="232.8" r="3.5"/>
+<circle class="dot s1f" cx="33.9" cy="233.1" r="3.5"/>
+<circle class="dot s1f" cx="50.9" cy="231.8" r="3.5"/>
+<circle class="dot s1f" cx="67.8" cy="233.3" r="3.5"/>
+<circle class="dot s1f" cx="84.8" cy="230.8" r="3.5"/>
+<circle class="dot s1f" cx="101.7" cy="237.1" r="3.5"/>
+<circle class="dot s1f" cx="118.7" cy="239.3" r="3.5"/>
+<circle class="dot s1f" cx="135.6" cy="238.2" r="3.5"/>
+<circle class="dot s1f" cx="152.6" cy="237.6" r="3.5"/>
+<circle class="dot s1f" cx="169.5" cy="238" r="3.5"/>
+<circle class="dot s1f" cx="186.5" cy="263.6" r="3.5"/>
+<circle class="dot s1f" cx="203.4" cy="264.1" r="3.5"/>
+<circle class="dot s1f" cx="220.4" cy="264" r="3.5"/>
+<circle class="dot s1f" cx="237.3" cy="262.7" r="3.5"/>
+<polyline class="line s2" points="0,223.5 17,225.9 33.9,224.2 50.9,224.4 67.8,225.1 84.8,227.1 101.7,232.4 118.7,233.8 135.6,234.2 152.6,233.1 169.5,230.8 186.5,261 203.4,261.8 220.4,263 237.3,261.9"/>
 <circle class="dot s2f" cx="0" cy="223.5" r="3.5"/>
-<circle class="dot s2f" cx="18.3" cy="225.9" r="3.5"/>
-<circle class="dot s2f" cx="36.5" cy="224.2" r="3.5"/>
-<circle class="dot s2f" cx="54.8" cy="224.4" r="3.5"/>
-<circle class="dot s2f" cx="73" cy="225.1" r="3.5"/>
-<circle class="dot s2f" cx="91.3" cy="227.1" r="3.5"/>
-<circle class="dot s2f" cx="109.5" cy="232.4" r="3.5"/>
-<circle class="dot s2f" cx="127.8" cy="233.8" r="3.5"/>
-<circle class="dot s2f" cx="146.1" cy="234.2" r="3.5"/>
-<circle class="dot s2f" cx="164.3" cy="233.1" r="3.5"/>
-<circle class="dot s2f" cx="182.6" cy="230.8" r="3.5"/>
-<circle class="dot s2f" cx="200.8" cy="261" r="3.5"/>
-<circle class="dot s2f" cx="219.1" cy="261.8" r="3.5"/>
-<circle class="dot s2f" cx="237.3" cy="263" r="3.5"/>
-<line class="line s2" x1="245.3" y1="256.5" x2="253.3" y2="256.5"/>
-<text class="primary num" x="258.3" y="260.5">560</text>
-<line class="line s1" x1="245.3" y1="270.5" x2="253.3" y2="270.5"/>
-<text class="primary num" x="258.3" y="274.5">552</text>
+<circle class="dot s2f" cx="17" cy="225.9" r="3.5"/>
+<circle class="dot s2f" cx="33.9" cy="224.2" r="3.5"/>
+<circle class="dot s2f" cx="50.9" cy="224.4" r="3.5"/>
+<circle class="dot s2f" cx="67.8" cy="225.1" r="3.5"/>
+<circle class="dot s2f" cx="84.8" cy="227.1" r="3.5"/>
+<circle class="dot s2f" cx="101.7" cy="232.4" r="3.5"/>
+<circle class="dot s2f" cx="118.7" cy="233.8" r="3.5"/>
+<circle class="dot s2f" cx="135.6" cy="234.2" r="3.5"/>
+<circle class="dot s2f" cx="152.6" cy="233.1" r="3.5"/>
+<circle class="dot s2f" cx="169.5" cy="230.8" r="3.5"/>
+<circle class="dot s2f" cx="186.5" cy="261" r="3.5"/>
+<circle class="dot s2f" cx="203.4" cy="261.8" r="3.5"/>
+<circle class="dot s2f" cx="220.4" cy="263" r="3.5"/>
+<circle class="dot s2f" cx="237.3" cy="261.9" r="3.5"/>
+<line class="line s2" x1="245.3" y1="255.3" x2="253.3" y2="255.3"/>
+<text class="primary num" x="258.3" y="259.3">570</text>
+<line class="line s1" x1="245.3" y1="269.3" x2="253.3" y2="269.3"/>
+<text class="primary num" x="258.3" y="273.3">563</text>
 </g>
 <g transform="translate(662.7 0)">
 <text class="panel primary" x="0" y="82">100k polygons</text>
@@ -144,45 +150,48 @@
 <line class="grid" x1="0" y1="154" x2="237.3" y2="154"/>
 <line class="grid" x1="0" y1="96" x2="237.3" y2="96"/>
 <text class="secondary num" x="0" y="346" text-anchor="middle">0</text>
-<text class="secondary num" x="54.8" y="346" text-anchor="middle">3</text>
-<text class="secondary num" x="109.5" y="346" text-anchor="middle">6</text>
-<text class="secondary num" x="164.3" y="346" text-anchor="middle">9</text>
-<text class="secondary num" x="237.3" y="346" text-anchor="middle">13</text>
+<text class="secondary num" x="50.9" y="346" text-anchor="middle">3</text>
+<text class="secondary num" x="101.7" y="346" text-anchor="middle">6</text>
+<text class="secondary num" x="152.6" y="346" text-anchor="middle">9</text>
+<text class="secondary num" x="203.4" y="346" text-anchor="middle">12</text>
+<text class="secondary num" x="237.3" y="346" text-anchor="middle">14</text>
 <line class="ref" x1="0" y1="116.2" x2="237.3" y2="116.2"/>
 <text class="secondary num" x="258.3" y="120.2">1826</text>
-<polyline class="line s1" points="0,243.2 18.3,243.4 36.5,242.2 54.8,243.6 73,244.4 91.3,243 109.5,250 127.8,250.4 146.1,250.4 164.3,250.3 182.6,250.3 200.8,277.4 219.1,277 237.3,277.7"/>
+<polyline class="line s1" points="0,243.2 17,243.4 33.9,242.2 50.9,243.6 67.8,244.4 84.8,243 101.7,250 118.7,250.4 135.6,250.4 152.6,250.3 169.5,250.3 186.5,277.4 203.4,277 220.4,277.7 237.3,275.3"/>
 <circle class="dot s1f" cx="0" cy="243.2" r="3.5"/>
-<circle class="dot s1f" cx="18.3" cy="243.4" r="3.5"/>
-<circle class="dot s1f" cx="36.5" cy="242.2" r="3.5"/>
-<circle class="dot s1f" cx="54.8" cy="243.6" r="3.5"/>
-<circle class="dot s1f" cx="73" cy="244.4" r="3.5"/>
-<circle class="dot s1f" cx="91.3" cy="243" r="3.5"/>
-<circle class="dot s1f" cx="109.5" cy="250" r="3.5"/>
-<circle class="dot s1f" cx="127.8" cy="250.4" r="3.5"/>
-<circle class="dot s1f" cx="146.1" cy="250.4" r="3.5"/>
-<circle class="dot s1f" cx="164.3" cy="250.3" r="3.5"/>
-<circle class="dot s1f" cx="182.6" cy="250.3" r="3.5"/>
-<circle class="dot s1f" cx="200.8" cy="277.4" r="3.5"/>
-<circle class="dot s1f" cx="219.1" cy="277" r="3.5"/>
-<circle class="dot s1f" cx="237.3" cy="277.7" r="3.5"/>
-<polyline class="line s2" points="0,240.4 18.3,240.3 36.5,238.3 54.8,239.8 73,241 91.3,239 109.5,246.8 127.8,248.4 146.1,248 164.3,249.4 182.6,246.9 200.8,277 219.1,275.1 237.3,275.6"/>
+<circle class="dot s1f" cx="17" cy="243.4" r="3.5"/>
+<circle class="dot s1f" cx="33.9" cy="242.2" r="3.5"/>
+<circle class="dot s1f" cx="50.9" cy="243.6" r="3.5"/>
+<circle class="dot s1f" cx="67.8" cy="244.4" r="3.5"/>
+<circle class="dot s1f" cx="84.8" cy="243" r="3.5"/>
+<circle class="dot s1f" cx="101.7" cy="250" r="3.5"/>
+<circle class="dot s1f" cx="118.7" cy="250.4" r="3.5"/>
+<circle class="dot s1f" cx="135.6" cy="250.4" r="3.5"/>
+<circle class="dot s1f" cx="152.6" cy="250.3" r="3.5"/>
+<circle class="dot s1f" cx="169.5" cy="250.3" r="3.5"/>
+<circle class="dot s1f" cx="186.5" cy="277.4" r="3.5"/>
+<circle class="dot s1f" cx="203.4" cy="277" r="3.5"/>
+<circle class="dot s1f" cx="220.4" cy="277.7" r="3.5"/>
+<circle class="dot s1f" cx="237.3" cy="275.3" r="3.5"/>
+<polyline class="line s2" points="0,240.4 17,240.3 33.9,238.3 50.9,239.8 67.8,241 84.8,239 101.7,246.8 118.7,248.4 135.6,248 152.6,249.4 169.5,246.9 186.5,277 203.4,275.1 220.4,275.6 237.3,273.1"/>
 <circle class="dot s2f" cx="0" cy="240.4" r="3.5"/>
-<circle class="dot s2f" cx="18.3" cy="240.3" r="3.5"/>
-<circle class="dot s2f" cx="36.5" cy="238.3" r="3.5"/>
-<circle class="dot s2f" cx="54.8" cy="239.8" r="3.5"/>
-<circle class="dot s2f" cx="73" cy="241" r="3.5"/>
-<circle class="dot s2f" cx="91.3" cy="239" r="3.5"/>
-<circle class="dot s2f" cx="109.5" cy="246.8" r="3.5"/>
-<circle class="dot s2f" cx="127.8" cy="248.4" r="3.5"/>
-<circle class="dot s2f" cx="146.1" cy="248" r="3.5"/>
-<circle class="dot s2f" cx="164.3" cy="249.4" r="3.5"/>
-<circle class="dot s2f" cx="182.6" cy="246.9" r="3.5"/>
-<circle class="dot s2f" cx="200.8" cy="277" r="3.5"/>
-<circle class="dot s2f" cx="219.1" cy="275.1" r="3.5"/>
-<circle class="dot s2f" cx="237.3" cy="275.6" r="3.5"/>
-<line class="line s2" x1="245.3" y1="269.6" x2="253.3" y2="269.6"/>
-<text class="primary num" x="258.3" y="273.6">452</text>
-<line class="line s1" x1="245.3" y1="283.6" x2="253.3" y2="283.6"/>
-<text class="primary num" x="258.3" y="287.6">434</text>
+<circle class="dot s2f" cx="17" cy="240.3" r="3.5"/>
+<circle class="dot s2f" cx="33.9" cy="238.3" r="3.5"/>
+<circle class="dot s2f" cx="50.9" cy="239.8" r="3.5"/>
+<circle class="dot s2f" cx="67.8" cy="241" r="3.5"/>
+<circle class="dot s2f" cx="84.8" cy="239" r="3.5"/>
+<circle class="dot s2f" cx="101.7" cy="246.8" r="3.5"/>
+<circle class="dot s2f" cx="118.7" cy="248.4" r="3.5"/>
+<circle class="dot s2f" cx="135.6" cy="248" r="3.5"/>
+<circle class="dot s2f" cx="152.6" cy="249.4" r="3.5"/>
+<circle class="dot s2f" cx="169.5" cy="246.9" r="3.5"/>
+<circle class="dot s2f" cx="186.5" cy="277" r="3.5"/>
+<circle class="dot s2f" cx="203.4" cy="275.1" r="3.5"/>
+<circle class="dot s2f" cx="220.4" cy="275.6" r="3.5"/>
+<circle class="dot s2f" cx="237.3" cy="273.1" r="3.5"/>
+<line class="line s2" x1="245.3" y1="267.2" x2="253.3" y2="267.2"/>
+<text class="primary num" x="258.3" y="271.2">473</text>
+<line class="line s1" x1="245.3" y1="281.2" x2="253.3" y2="281.2"/>
+<text class="primary num" x="258.3" y="285.2">454</text>
 </g>
 </svg>

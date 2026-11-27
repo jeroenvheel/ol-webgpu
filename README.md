@@ -158,20 +158,20 @@ background and a build that fails, is in
 ## Benchmark
 
 1M points, 200k lines and 100k polygons, one layer, all features in view.
-Milliseconds, lower is better; 0.1.0-beta.13 on an AMD Radeon R9 200.
+Milliseconds, lower is better; 0.1.0-beta.14 on an AMD Radeon R9 200.
 
 | Data set | | ol WebGLVector | WebGL2 | WebGPU |
 |---|---|---|---|---|
-| 1M points | first render | 847 | **587** | 603 |
-| | frame | 47.8 | 12.4 | **11.4** |
-| 200k lines | first render | 1717 | **552** | 560 |
-| | frame | 359.8 | 15.3 | **14.4** |
-| 100k polygons | first render | 1826 | **434** | 452 |
-| | frame | 237.9 | 11.8 | **11.6** |
+| 1M points | first render | 847 | 625 | **594** |
+| | frame | 47.8 | 12.4 | **11.2** |
+| 200k lines | first render | 1717 | **563** | 570 |
+| | frame | 359.8 | 15.1 | **14.4** |
+| 100k polygons | first render | 1826 | **454** | 473 |
+| | frame | 237.9 | 11.6 | **11.3** |
 
 ![Time to first render per release: 1M points, 200k lines and 100k polygons on WebGL2 and WebGPU, with ol's WebGLVector layer as a reference](bench/first-render.svg)
 
-Since the first release the first render became 34–48% shorter. The numbers
+Since the first release the first render became 31–49% shorter. The numbers
 per release, memory, picking, labels, other GPUs and what it all shows are in
 [docs/benchmark.md](docs/benchmark.md).
 

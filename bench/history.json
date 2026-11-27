@@ -568,6 +568,53 @@
      "pick": [0.06, 0.07, 0.08]
     }
    }
+  },
+  {
+   "version": "0.1.0-beta.14",
+   "note": "features into the batch in slices, buffers over 256 MB, no copy of large buffers on WebGL2",
+   "measured": "2026-11-27, on the same machine",
+   "points": {
+    "webgl2": {
+     "ready": [634, 625, 612],
+     "frame": [12.3, 12.4, 12.4],
+     "pick": [0.09, 0.09, 0.09],
+     "stall": [78, 76, 76]
+    },
+    "webgpu": {
+     "ready": [594, 603, 580],
+     "frame": [11.3, 11.1, 11.2],
+     "pick": [0.09, 0.08, 0.08],
+     "stall": [167, 170, 162]
+    }
+   },
+   "lines": {
+    "webgl2": {
+     "ready": [559, 563, 564],
+     "frame": [15.4, 15.1, 15],
+     "pick": [0.03, 0.03, 0.03],
+     "stall": [85, 83, 73]
+    },
+    "webgpu": {
+     "ready": [562, 578, 570],
+     "frame": [14.2, 14.5, 14.4],
+     "pick": [0.05, 0.03, 0.04],
+     "stall": [96, 114, 101]
+    }
+   },
+   "polygons": {
+    "webgl2": {
+     "ready": [464, 454, 450],
+     "frame": [11.9, 11.3, 11.6],
+     "pick": [0.04, 0.03, 0.02],
+     "stall": [55, 64, 56]
+    },
+    "webgpu": {
+     "ready": [471, 483, 473],
+     "frame": [11.3, 11, 11.4],
+     "pick": [0.05, 0.02, 0.07],
+     "stall": [95, 81, 70]
+    }
+   }
   }
  ],
  "ol": {
