@@ -228,7 +228,7 @@ const scenarios: Record<string, () => Promise<void>> = {
       w.__big = {features: as([...makePoints(300000), ...makeLines(200000), ...makePolygons(50000)])};
     } else if (stepName === 'map') {
       // `&keep=false`: WebGL2 without its copy of the buffers (the `keepBuffers` option)
-      const layers = [new Layer({source: new VectorSource({features: w.__big.features, useSpatialIndex: false}), style: shapes, keepBuffers: params.get('keep') !== 'false'})];
+      const layers = [new Layer({source: new VectorSource({features: w.__big.features, useSpatialIndex: false}), style: shapes, keepBuffers: params.has('keep') ? params.get('keep') !== 'false' : undefined})];
       w.__big.layers = layers;
       w.__big.map = makeMap(layers);
       await settle(w.__big.map);

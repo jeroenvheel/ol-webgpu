@@ -303,7 +303,10 @@ export interface IndexState {
 
 /** What of the batch of a layer is used to measure sizes. */
 export interface MeasurableBatch {
-  featuresOf(kind: 'points' | 'lines'): FeatureLike[];
+  /** The refs of the features with a geometry of a kind. */
+  refsOf(kind: 'points' | 'lines'): Uint32Array;
+  /** The feature of a ref (undefined once it is gone). */
+  getFeatureFromRef(ref: number): FeatureLike | undefined;
 }
 
 export class Picker {
@@ -381,12 +384,14 @@ export class Picker {
     }
     const key = this.viewKey(frameState);
     this.measuring = key;
-    const lists: Array<[FeatureLike[], 'point' | 'line']> = [];
+    // The refs, not the features: a list of a million features takes 30 ms to make,
+    // right when the layer has just been drawn. (A copy: the batch changes its own.)
+    const lists: Array<[Uint32Array, 'point' | 'line']> = [];
     if (needPoints) {
-      lists.push([batch.featuresOf('points'), 'point']);
+      lists.push([batch.refsOf('points').slice(), 'point']);
     }
     if (needLines) {
-      lists.push([batch.featuresOf('lines'), 'line']);
+      lists.push([batch.refsOf('lines').slice(), 'line']);
     }
     const variables = this.frameVariables(frameState);
     const resolution = frameState.viewState.resolution;
@@ -403,7 +408,11 @@ export class Picker {
       while (list < lists.length && performance.now() < end) {
         const [features, kind] = lists[list];
         for (let k = 0; k < 4000 && index < features.length; k++, index++) {
-          const ctx = this.prepareContext(features[index], variables, resolution);
+          const feature = batch.getFeatureFromRef(features[index]);
+          if (!feature) {
+            continue; // removed meanwhile
+          }
+          const ctx = this.prepareContext(feature, variables, resolution);
           for (const s of styles) {
             if (kind === 'point' && s.symbol) {
               result.point = Math.max(result.point, symbolReach(s, ctx));

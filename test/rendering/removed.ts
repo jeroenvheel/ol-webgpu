@@ -13,6 +13,9 @@ import VectorSource from 'ol/source/Vector.js';
 import {frame, renderersSettled} from './settled.js';
 import WebGL2VectorLayer from '../../src/layer/WebGL2VectorLayer.js';
 import WebGPUVectorLayer from '../../src/layer/WebGPUVectorLayer.js';
+import GpuVectorLayer from '../../src/layer/GpuVectorLayer.js';
+import WebGPUVectorRenderer from '../../src/renderer/WebGPUVectorRenderer.js';
+import {getDevice} from '../../src/webgpu/device.js';
 import {liveRenderers} from '../../src/renderer/BaseGpuVectorRenderer.js';
 
 const params = new URLSearchParams(location.search);
@@ -231,6 +234,33 @@ const names = (x: number, y: number) => map.getFeaturesAtPixel([x, y]).map((f) =
     const waits = await loads({});
     const follows = await loads({updateWhileAnimating: true});
     check('features are loaded during an animation only with updateWhileAnimating', waits === 0 && follows >= 2, {without: waits, with: follows});
+    if (params.get('layer') === 'webgpu') {
+      // the device takes buffers as large as the adapter can make them, not the default of 256 MB
+      const device = await getDevice();
+      const adapter = await navigator.gpu.requestAdapter({powerPreference: 'high-performance'});
+      check('the device has the largest buffers the adapter can make', device.limits.maxBufferSize === adapter!.limits.maxBufferSize, {
+        device: device.limits.maxBufferSize,
+        adapter: adapter!.limits.maxBufferSize,
+      });
+      // a layer with a buffer that is still too large goes to WebGL2
+      WebGPUVectorRenderer.maxBufferSize = 16;
+      const large = new GpuVectorLayer({source: new VectorSource({features: [point(-100, -100, 'large')]}), style: circle('#404040')});
+      map.addLayer(large);
+      await settle();
+      for (let i = 0; i < 20 && large.getBackend() !== 'webgl2'; i++) {
+        await frame();
+      }
+      await settle();
+      WebGPUVectorRenderer.maxBufferSize = null;
+      check('a layer whose buffers are larger than the device takes goes to WebGL2', large.getBackend() === 'webgl2' && alphaAt(28, 228) === 255 && names(28, 228).join() === 'large', {
+        backend: large.getBackend(),
+        drawn: alphaAt(28, 228),
+        hit: names(28, 228),
+      });
+      map.removeLayer(large);
+      large.dispose();
+      await settle();
+    }
   } catch (e) {
     check('no error', false, String(e));
   }

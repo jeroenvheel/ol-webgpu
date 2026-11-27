@@ -34,9 +34,11 @@ export interface GpuVectorLayerOptions<S extends VectorSource = VectorSource> ex
    * WebGL2 only: keep a copy of the layer's buffers in memory, to upload
    * them again at once after a lost context or when the layer moves to
    * another canvas (other layers came between it and its neighbours).
-   * Default true. With false that memory is saved (about a third of what a
-   * big layer holds besides its features); the buffers are then built again
-   * in those cases, and the layer is not drawn until they are.
+   * By default for layers whose buffers are up to 32 MB together: a larger
+   * layer does without (that memory is about a third of what it holds
+   * besides its features), and is built again in those cases, which takes
+   * as long as the first time and leaves it undrawn meanwhile. True keeps
+   * the copy whatever the size, false never.
    */
   keepBuffers?: boolean;
   /**

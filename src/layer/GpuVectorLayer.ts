@@ -46,6 +46,17 @@ export default class GpuVectorLayer<S extends VectorSource = VectorSource> exten
         this.clearRenderer();
         this.changed();
       };
+      renderer.onTooLarge = (bytes, limit) => {
+        if (this.backend !== 'webgpu') {
+          return;
+        }
+        console.warn(
+          `ol-webgpu: a buffer of ${Math.round(bytes / 1048576)} MB is larger than the WebGPU device takes (${Math.round(limit / 1048576)} MB), falling back to WebGL2`,
+        );
+        this.backend = 'webgl2';
+        this.clearRenderer();
+        this.changed();
+      };
       return renderer;
     }
     return new WebGL2VectorRenderer(this as any, this.rendererOptions());

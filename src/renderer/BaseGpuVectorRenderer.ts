@@ -78,8 +78,9 @@ export interface GpuVectorRendererOptions extends WorkerOptions {
    */
   smoothFill?: boolean;
   /**
-   * WebGL2: whether the buffers are also kept in memory (default true), see
-   * `keepCpuCopies`. WebGPU never keeps them.
+   * WebGL2: whether the buffers are also kept in memory, see `keepCpuCopies`:
+   * true, false, or by default up to `KEEP_BUFFERS_UP_TO` bytes of them.
+   * WebGPU never keeps them.
    */
   keepBuffers?: boolean;
   /**
@@ -147,6 +148,13 @@ export interface RebuildStats {
  * some ten levels next to the centre of the build, to get there.
  */
 const MAX_DRIFT_PX = 2 ** 19;
+/**
+ * WebGL2 keeps a copy of the buffers of a build of up to this many bytes
+ * (unless `keepBuffers` says otherwise): after a lost context, or when the
+ * layer goes to another canvas, they are uploaded again at once. Larger
+ * builds are made again then, which takes as long as the first time.
+ */
+export const KEEP_BUFFERS_UP_TO = 32 * 1024 * 1024;
 /** Milliseconds the instructions of a build are worked on before the page gets a turn. */
 const INSTRUCTION_SLICE = 6;
 /** How often a build that failed is made again before the layer waits for other features. */
@@ -317,7 +325,10 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
    * without: a lost device is rare, and the canvas a layer draws on does not
    * matter to the device.
    */
-  protected readonly keepCpuCopies: boolean;
+  protected keepCpuCopies: boolean;
+  /** The `keepBuffers` option: undefined keeps the copies of a build that is not larger than `KEEP_BUFFERS_UP_TO`. */
+  private readonly keepBuffers: boolean | undefined;
+  private readonly webgl2: boolean;
   // `ready` (what `rendercomplete` waits for) follows from these, see `updateReady`
   /** Buffers are being built for the current view. */
   private building = false;
@@ -337,6 +348,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.preserveDrawingBuffer = this.spec.preserveDrawingBuffer;
     this.antialias = this.spec.antialias;
     this.smoothFill = !!options.smoothFill;
+    this.keepBuffers = options.keepBuffers;
+    this.webgl2 = backend === 'webgl2';
     this.keepCpuCopies = backend === 'webgl2' && options.keepBuffers !== false;
     this.renderOrder = options.renderOrder ?? null;
     this.textMode = options.text ?? 'gpu';
@@ -648,6 +661,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     this.sourceKeys = null;
     this.batchVersion++;
     this.olBatchOf = null;
+    this.filling = null;
     if (this.boundSource) {
       this.batch.clear();
       this.instructions.reset();
@@ -668,7 +682,30 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     const projectionTransform = userProjection
       ? (getTransformFromProjections(userProjection, frameState.viewState.projection) ?? undefined)
       : undefined;
-    this.batch.addFeatures(source.getFeatures(), projectionTransform);
+    // The features go into the batch in slices (see `fill`): a million of them take
+    // a sixth of a second, which the page would stand still for.
+    const features = source.getFeatures();
+    const filling = {features, at: 0, removed: null as Set<FeatureLike> | null, transform: projectionTransform};
+    this.filling = filling;
+    if (this.fill(filling, performance.now() + INSTRUCTION_SLICE)) {
+      this.filling = null;
+    } else {
+      void (async () => {
+        for (;;) {
+          await pause();
+          if (this.filling !== filling || this.disposed) {
+            return;
+          }
+          if (this.fill(filling, performance.now() + INSTRUCTION_SLICE)) {
+            break;
+          }
+        }
+        this.filling = null;
+        this.batchVersion++;
+        this.updateReady();
+        this.getLayer()?.changed(); // the next frame builds
+      })();
+    }
     this.sourceKeys = [
       listen(source, VectorEventType.ADDFEATURE, (e: any) => {
         if (e.feature) {
@@ -685,18 +722,45 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
       }),
       listen(source, VectorEventType.REMOVEFEATURE, (e: any) => {
         if (e.feature) {
+          // one that is still on its way into the batch does not get there
+          if (this.filling && !this.batch.refOf(e.feature)) {
+            (this.filling.removed ??= new Set()).add(e.feature);
+          }
           this.batchVersion++;
           this.instructions.forget(this.batch.refOf(e.feature));
           this.batch.removeFeature(e.feature);
         }
       }),
       listen(source, VectorEventType.CLEAR, () => {
+        this.filling = null;
         this.batchVersion++;
         this.olBatchOf = null;
         this.batch.clear();
         this.instructions.reset();
       }),
     ];
+  }
+
+  /** The features of a source that are on their way into the batch (see `bindSource`). */
+  private filling: {features: FeatureLike[]; at: number; removed: Set<FeatureLike> | null; transform: unknown} | null = null;
+
+  /** Puts features in the batch until `deadline` (`performance.now()`); true when all are in. */
+  private fill(filling: NonNullable<BaseGpuVectorRenderer<B>['filling']>, deadline: number): boolean {
+    const {features, transform} = filling;
+    const batch = this.batch;
+    for (let i = filling.at, n = features.length; i < n; i++) {
+      if (i % 256 === 0 && i > filling.at && performance.now() >= deadline) {
+        filling.at = i;
+        return false;
+      }
+      const feature = features[i];
+      // (one that was added again meanwhile is in the batch already)
+      if (!filling.removed?.has(feature)) {
+        batch.addFeature(feature, transform);
+      }
+    }
+    filling.at = features.length;
+    return true;
   }
 
   // --- frame -----------------------------------------------------------
@@ -729,7 +793,7 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
 
   /** Sets `ready` from the state it follows from; the only place that does. */
   protected updateReady() {
-    const ready = (!this.building || this.backendFailed) && !this.awaitingText && !this.backendPending && !this.gpuText?.pending && this.pendingImages.size === 0;
+    const ready = (!this.building || this.backendFailed) && !this.filling && !this.awaitingText && !this.backendPending && !this.gpuText?.pending && this.pendingImages.size === 0;
     if (ready && !this.ready) {
       this.framesSinceReady = 0;
     }
@@ -788,7 +852,8 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
     // that starts the next one when the source changed in the meantime.
     // While the view moves, only other features are a reason to build: a map
     // that follows what it shows would otherwise never show it moving.
-    if (!this.building && (viewNotMoving ? this.needsRebuild(frameState, source, extentChanged) : this.featuresChanged(source))) {
+    // (not while the features of the source are still going into the batch)
+    if (!this.building && !this.filling && (viewNotMoving ? this.needsRebuild(frameState, source, extentChanged) : this.featuresChanged(source))) {
       this.rebuild(frameState, source.getRevision());
     }
     this.gpuText?.prepare(frameState, source);
@@ -1037,6 +1102,15 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         // features change all the time is not without hits for a moment after every change
         if (old?.textKey) {
           this.textOverlay?.dispose(old.textKey);
+        }
+        if (this.webgl2 && this.keepBuffers === undefined) {
+          // Copies of what a small layer has cost little and bring it back at once; those of
+          // a big layer are a third of what it holds, for something that seldom happens.
+          let bytes = 0;
+          for (const set of [response.polygons, response.edges, response.lines, response.points]) {
+            bytes += set ? set.indices.byteLength + set.vertices.byteLength + set.instances.byteLength : 0;
+          }
+          this.keepCpuCopies = bytes <= KEEP_BUFFERS_UP_TO;
         }
         const up = (set: BufferSet | null, previous: UploadedSet<B> | null | undefined) => {
           if (!set) {

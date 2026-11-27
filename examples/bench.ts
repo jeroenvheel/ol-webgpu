@@ -163,8 +163,23 @@ async function layerBench(layerName: string, features: Feature[]) {
   await nextFrame();
 
   const t0 = performance.now();
+  // the longest time the page got no frame while the layer was made
+  let stall = 0;
+  let lastTick = t0;
+  let watching = true;
+  const tick = () => {
+    const now = performance.now();
+    stall = Math.max(stall, now - lastTick);
+    lastTick = now;
+    if (watching) {
+      requestAnimationFrame(tick);
+    }
+  };
+  requestAnimationFrame(tick);
   map.addLayer(layer);
   await new Promise<void>((resolve) => map.once('rendercomplete', () => resolve()));
+  watching = false;
+  stall = Math.max(stall, performance.now() - lastTick);
   gpuSync();
   const ready = performance.now() - t0;
 
@@ -214,7 +229,7 @@ async function layerBench(layerName: string, features: Feature[]) {
   layer.dispose();
   (window as any).gc?.();
   await nextFrame();
-  const out = {sourceAdd: addTime, ready, frame: frameTotal / frames, pickFirst, pickReady, pick: pickTotal / picks, pickHits: hits};
+  const out = {sourceAdd: addTime, ready, stall, frame: frameTotal / frames, pickFirst, pickReady, pick: pickTotal / picks, pickHits: hits};
   log(`  ${layerName}: ${Object.entries(out).map(([k, v]) => `${k}=${v.toFixed(2)}`).join('  ')}`);
   return out;
 }

@@ -19,7 +19,15 @@ export function getDevice(): Promise<GPUDevice> {
       if (!adapter) {
         throw new Error('ol-webgpu: no WebGPU adapter available');
       }
-      const d = await adapter.requestDevice({label: 'ol-webgpu'});
+      // A device has the default limits unless more is asked for: buffers of 256 MB at
+      // most, which a big layer needs more than (its lines, mostly). What the adapter
+      // can do is asked for; an adapter that refuses gives the default.
+      let d: GPUDevice;
+      try {
+        d = await adapter.requestDevice({label: 'ol-webgpu', requiredLimits: {maxBufferSize: adapter.limits.maxBufferSize}});
+      } catch {
+        d = await adapter.requestDevice({label: 'ol-webgpu'});
+      }
       d.lost.then((info) => {
         if (info.reason !== 'destroyed') {
           console.warn('ol-webgpu: WebGPU device lost:', info.message);

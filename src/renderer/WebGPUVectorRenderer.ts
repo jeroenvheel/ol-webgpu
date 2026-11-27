@@ -174,6 +174,15 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
    * Without it, the renderer tries again (see `retryInit`).
    */
   onInitError: ((error: unknown) => void) | null = null;
+  /**
+   * Called when a buffer of the layer is larger than the device takes
+   * (`GpuVectorLayer` goes to WebGL2 then). Without it an error is logged,
+   * once, and that kind of geometry is not drawn.
+   */
+  onTooLarge: ((bytes: number, limit: number) => void) | null = null;
+  private toldTooLarge = false;
+  /** The largest buffer to make, when not that of the device (for tests). */
+  static maxBufferSize: number | null = null;
   /** Failed attempts to initialize in a row. */
   private initFailures = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -365,6 +374,27 @@ export default class WebGPUVectorRenderer extends BaseGpuVectorRenderer<GPUBuffe
     const device = this.device;
     if (!device) {
       // device lost: the buffers are built again when there is a new one
+      return {index: null, vertex: null, instance: null, indexCount: 0, instanceFloats: 0};
+    }
+    // A buffer that is larger than the device takes is not made: the device would give
+    // an invalid one, and every frame with it fails with warnings in the console only.
+    const limit = WebGPUVectorRenderer.maxBufferSize ?? device.limits.maxBufferSize;
+    const largest = Math.max(set.indices.byteLength, set.vertices.byteLength, set.instances.byteLength);
+    if (largest > limit) {
+      if (reuse) {
+        this.release(reuse);
+      }
+      if (this.onTooLarge) {
+        const told = this.onTooLarge;
+        // not in the middle of an upload: the layer drops this renderer
+        queueMicrotask(() => told(largest, limit));
+      } else if (!this.toldTooLarge) {
+        this.toldTooLarge = true;
+        console.error(
+          `ol-webgpu: a buffer of ${Math.round(largest / 1048576)} MB is larger than the WebGPU device takes (${Math.round(limit / 1048576)} MB): ` +
+            'that part of the layer is not drawn. Use GpuVectorLayer (it goes to WebGL2 then), or fewer features per layer.',
+        );
+      }
       return {index: null, vertex: null, instance: null, indexCount: 0, instanceFloats: 0};
     }
     if (reuse) {
