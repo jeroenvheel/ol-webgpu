@@ -702,8 +702,13 @@ export default abstract class BaseGpuVectorRenderer<B, S extends Surface = Surfa
         }
         this.filling = null;
         this.batchVersion++;
+        // The build starts here, not with the next frame (which comes up to a
+        // frame later, and finds the build made for the view it has then).
+        if (!this.building && !this.backendFailed && this.boundSource === source) {
+          this.rebuild(frameState, source.getRevision());
+        }
         this.updateReady();
-        this.getLayer()?.changed(); // the next frame builds
+        this.getLayer()?.changed();
       })();
     }
     this.sourceKeys = [
