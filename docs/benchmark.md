@@ -53,6 +53,7 @@ The heap a big layer adds (300 000 points, 200 000 lines, 50 000 polygons,
 | beta.10 | 518 | 354 | 407 | 243 |
 | beta.11 to beta.13 | 398 | 233 | 280 | 116 |
 | the same, `keepBuffers: false` | 233 | – | | |
+| after beta.13 (no copy of buffers over 32 MB by default) | 235 | 233 | | |
 
 **Buffer generation (worker), ol's JS vs Rust/WASM**
 

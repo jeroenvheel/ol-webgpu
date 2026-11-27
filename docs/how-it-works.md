@@ -94,7 +94,17 @@ ol/source/Vector ──► FeatureBatch ──────► render instruction
   encoder that is submitted once per map frame.
 - **Instructions in slices.** The render instructions of a build are made
   on the main thread, 6 ms at a time with a turn for the page in between, so
-  a change in a layer of a million features costs no frame.
+  a change in a layer of a million features costs no frame. The features of
+  a source go into the layer's batch the same way: with a million points the
+  longest time without a frame while the layer is made went from 310 to 76
+  ms on WebGL2, and from 240 to 165 ms on WebGPU (where the rest is the GPU
+  taking the buffers in).
+- **Buffers as large as the GPU takes.** A WebGPU device makes buffers of
+  256 MB at most unless more is asked for; the layer asks for what the
+  adapter can do (2 GB, mostly). 600 000 lines of ten points need 324 MB and
+  were not drawn before. A buffer that is still too large is not made:
+  `GpuVectorLayer` goes to WebGL2 with a warning, `WebGPUVectorLayer` logs
+  an error and does not draw that kind of geometry.
 - **Workers.** One worker builds the buffers of all layers of the page. When
   it has a lot to do (4 MB of instructions or more are waiting) a second one
   starts, so a big layer does not hold up the others; it stops again after

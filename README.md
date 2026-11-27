@@ -75,7 +75,7 @@ Options and methods mirror `ol/layer/WebGLVector`: `source`, `style`,
 | `antialias` | `false` | Multisampling. `false` matches ol pixel for pixel. |
 | `smoothFill` | `false` | Fills without a stroke fade out over one pixel outside the polygon instead of ending in stairs, at about the cost of a stroke ([bench/fixes-2026-11-24.md](bench/fixes-2026-11-24.md)). |
 | `updateWhileAnimating`, `updateWhileInteracting` | `false` | As for ol's vector layers: the source is asked for the features of the view also while the view moves. |
-| `keepBuffers` | `true` | WebGL2 only. A copy of the buffers is kept in memory, to upload again at once after a lost context or when the layer moves to another canvas. With `false` that memory is saved and the buffers are built again in those cases. |
+| `keepBuffers` | up to 32 MB | WebGL2 only. A copy of the buffers is kept in memory, to upload again at once after a lost context or when the layer moves to another canvas. By default for layers with up to 32 MB of buffers; a larger layer is built again in those cases (as long as its first build, and not drawn meanwhile). `true` keeps the copy whatever the size, `false` never. |
 | `preserveDrawingBuffer` | `true` | Needed for map export. |
 | `wasmUrl`, `shaderWasmUrl` | | Where the wasm files are, if not next to the module. |
 
