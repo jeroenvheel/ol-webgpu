@@ -143,80 +143,102 @@ writeFileSync(join(dir, 'first-render.svg'), out);
 console.log(`bench/first-render.svg: ${n} releases`);
 
 // --- memory -------------------------------------------------------------
-// bench/memory.svg: the heap one big layer adds, per release.
+// bench/memory.svg: the heap one big layer adds, per release, from
+// `ol/Feature` and from RenderFeatures.
 if (history.memory) {
   const memory = history.memory;
-  const releases = history.releases.filter((release) => release.memory);
-  const count = releases.length;
-  const MW = 640;
-  const MH = 340;
-  const MTOP = 84;
+  const MPANELS = [
+    ['memory', 'From ol/Feature', memory.ol],
+    ['memoryRender', 'From RenderFeatures', memory.olRender],
+  ].filter(([key]) => history.releases.some((release) => release[key]));
+  const count = history.releases.length;
+  const MW = 960;
+  const MH = 372;
+  const MTOP = 96;
   const MBOTTOM = 44;
   const MLEFT = 48;
+  const MGAP = 40;
   const MEND = 52;
-  const mPlotW = MW - MLEFT - 12 - MEND;
+  const mPanelW = (MW - MLEFT - 12 - MGAP * (MPANELS.length - 1)) / MPANELS.length;
+  const mPlotW = mPanelW - MEND;
   const mPlotH = MH - MTOP - MBOTTOM;
-  const highest = Math.max(memory.ol, ...releases.flatMap((release) => [release.memory.webgl2, release.memory.webgpu]));
+  const highest = Math.max(
+    ...MPANELS.flatMap(([key, , ol]) => [ol ?? 0, ...history.releases.flatMap((release) => (release[key] ? [release[key].webgl2, release[key].webgpu] : []))]),
+  );
   const M_MAX = Math.ceil(highest / 200) * 200;
   const mx = (i) => (i / (count - 1)) * mPlotW;
   const my = (mb) => MTOP + mPlotH - (mb / M_MAX) * mPlotH;
 
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${MW} ${MH}" width="${MW}" height="${MH}" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
 <title id="t">Memory of a big layer per release of ol-webgpu</title>
-<desc id="d">Megabytes of JavaScript heap that a layer of 300 000 points, 200 000 lines and 50 000 polygons adds to its features, on WebGL2 and WebGPU, for releases 0.1.0-beta.0 to beta.${count - 1}, with ol's WebGLVector layer as a reference. The numbers are in bench/history.json.</desc>
+<desc id="d">Megabytes of JavaScript heap that a layer of 300 000 points, 200 000 lines and 50 000 polygons adds to its features, as ol/Feature and as RenderFeatures, on WebGL2 and WebGPU, for releases 0.1.0-beta.0 to beta.${count - 1}, with ol's WebGLVector layer as a reference. The numbers are in bench/history.json.</desc>
 ${STYLE}
 <rect class="surface" width="${MW}" height="${MH}" rx="8"/>
 <text class="title primary" x="16" y="28">Memory of a big layer, per release</text>
 <text class="secondary" x="16" y="48">MB of heap that 300k points, 200k lines and 50k polygons take on top of the features; lower is better.</text>
-<g transform="translate(${MLEFT} 0)">
 `;
-  for (let tick = 0; tick <= M_MAX; tick += 200) {
-    svg += `<line class="grid" x1="0" y1="${r1(my(tick))}" x2="${r1(mPlotW)}" y2="${r1(my(tick))}"/>\n`;
-    svg += `<text class="secondary num" x="-8" y="${r1(my(tick) + 4)}" text-anchor="end">${tick}</text>\n`;
-  }
-  const ticks = [];
-  for (let i = 0; i < count - 2; i += 3) {
-    ticks.push(i);
-  }
-  ticks.push(count - 1);
-  for (const i of ticks) {
-    svg += `<text class="secondary num" x="${r1(mx(i))}" y="${MH - MBOTTOM + 18}" text-anchor="middle">${i}</text>\n`;
-  }
-  svg += `<text class="secondary" x="0" y="${MH - 8}">release 0.1.0-beta.N</text>\n`;
-  // the reference: ol's own layer
-  svg += `<line class="ref" x1="0" y1="${r1(my(memory.ol))}" x2="${r1(mPlotW)}" y2="${r1(my(memory.ol))}"/>\n`;
-  svg += `<text class="secondary num" x="${r1(mPlotW + 21)}" y="${r1(my(memory.ol) + 4)}">${Math.round(memory.ol)}</text>\n`;
-  const ends = [];
-  for (const [name, , cls] of SERIES) {
-    const values = releases.map((release) => release.memory[name]);
-    svg += `<polyline class="line ${cls}" points="${values.map((v, i) => `${r1(mx(i))},${r1(my(v))}`).join(' ')}"/>\n`;
-    values.forEach((v, i) => {
-      svg += `<circle class="dot ${cls}f" cx="${r1(mx(i))}" cy="${r1(my(v))}" r="3.5"/>\n`;
-    });
-    ends.push({value: Math.round(values[count - 1]), at: my(values[count - 1]), cls});
-  }
-  ends.sort((a, b) => a.at - b.at);
-  if (ends[1].at - ends[0].at < 14) {
-    const middle = (ends[0].at + ends[1].at) / 2;
-    ends[0].at = middle - 7;
-    ends[1].at = middle + 7;
-  }
-  for (const end of ends) {
-    svg += `<line class="line ${end.cls}" x1="${r1(mPlotW + 8)}" y1="${r1(end.at)}" x2="${r1(mPlotW + 16)}" y2="${r1(end.at)}"/>\n`;
-    svg += `<text class="primary num" x="${r1(mPlotW + 21)}" y="${r1(end.at + 4)}">${end.value}</text>\n`;
-  }
-  svg += '</g>\n';
-  // legend, under the subtitle
-  let kx = 16;
+  let kx = MW - 16;
+  const keys = [];
   for (const [cls, label, width] of [
-    ['line s1', 'WebGL2', 74],
-    ['line s2', 'WebGPU', 78],
     ['ref', 'ol/layer/WebGLVector', 150],
+    ['line s2', 'WebGPU', 78],
+    ['line s1', 'WebGL2', 74],
   ]) {
-    svg += `<line class="${cls}" x1="${kx}" y1="64" x2="${kx + 18}" y2="64"/><text class="primary" x="${kx + 24}" y="68">${label}</text>\n`;
-    kx += width + 18;
+    kx -= width;
+    keys.push(`<line class="${cls}" x1="${kx}" y1="24" x2="${kx + 18}" y2="24"/><text class="primary" x="${kx + 24}" y="28">${label}</text>`);
+    kx -= 18;
   }
+  svg += keys.reverse().join('\n') + '\n';
+
+  MPANELS.forEach(([key, title, ol], p) => {
+    svg += `<g transform="translate(${r1(MLEFT + p * (mPanelW + MGAP))} 0)">\n`;
+    svg += `<text class="panel primary" x="0" y="${MTOP - 14}">${title}</text>\n`;
+    for (let tick = 0; tick <= M_MAX; tick += 200) {
+      svg += `<line class="grid" x1="0" y1="${r1(my(tick))}" x2="${r1(mPlotW)}" y2="${r1(my(tick))}"/>\n`;
+      if (p === 0) {
+        svg += `<text class="secondary num" x="-8" y="${r1(my(tick) + 4)}" text-anchor="end">${tick}</text>\n`;
+      }
+    }
+    const ticks = [];
+    for (let i = 0; i < count - 2; i += 3) {
+      ticks.push(i);
+    }
+    ticks.push(count - 1);
+    for (const i of ticks) {
+      svg += `<text class="secondary num" x="${r1(mx(i))}" y="${MH - MBOTTOM + 18}" text-anchor="middle">${i}</text>\n`;
+    }
+    if (p === 0) {
+      svg += `<text class="secondary" x="0" y="${MH - 8}">release 0.1.0-beta.N</text>\n`;
+    }
+    // the reference: ol's own layer
+    if (ol) {
+      svg += `<line class="ref" x1="0" y1="${r1(my(ol))}" x2="${r1(mPlotW)}" y2="${r1(my(ol))}"/>\n`;
+      svg += `<text class="secondary num" x="${r1(mPlotW + 21)}" y="${r1(my(ol) + 4)}">${Math.round(ol)}</text>\n`;
+    }
+    const ends = [];
+    for (const [name, , cls] of SERIES) {
+      // a release without a measurement has no point
+      const points = history.releases.map((release, i) => (release[key] ? [i, release[key][name]] : null)).filter(Boolean);
+      svg += `<polyline class="line ${cls}" points="${points.map(([i, v]) => `${r1(mx(i))},${r1(my(v))}`).join(' ')}"/>\n`;
+      for (const [i, v] of points) {
+        svg += `<circle class="dot ${cls}f" cx="${r1(mx(i))}" cy="${r1(my(v))}" r="3.5"/>\n`;
+      }
+      const last = points[points.length - 1][1];
+      ends.push({value: Math.round(last), at: my(last), cls});
+    }
+    ends.sort((a, b) => a.at - b.at);
+    if (ends[1].at - ends[0].at < 14) {
+      const middle = (ends[0].at + ends[1].at) / 2;
+      ends[0].at = middle - 7;
+      ends[1].at = middle + 7;
+    }
+    for (const end of ends) {
+      svg += `<line class="line ${end.cls}" x1="${r1(mPlotW + 8)}" y1="${r1(end.at)}" x2="${r1(mPlotW + 16)}" y2="${r1(end.at)}"/>\n`;
+      svg += `<text class="primary num" x="${r1(mPlotW + 21)}" y="${r1(end.at + 4)}">${end.value}</text>\n`;
+    }
+    svg += '</g>\n';
+  });
   svg += '</svg>\n';
   writeFileSync(join(dir, 'memory.svg'), svg);
-  console.log(`bench/memory.svg: ${count} releases`);
+  console.log(`bench/memory.svg: ${count} releases, ${MPANELS.length} panels`);
 }

@@ -50,6 +50,10 @@
    "memory": {
     "webgl2": 527.7,
     "webgpu": 527.9
+   },
+   "memoryRender": {
+    "webgl2": 416.7,
+    "webgpu": 417
    }
   },
   {
@@ -94,6 +98,10 @@
    "memory": {
     "webgl2": 527.7,
     "webgpu": 527.9
+   },
+   "memoryRender": {
+    "webgl2": 416.7,
+    "webgpu": 417
    }
   },
   {
@@ -138,6 +146,10 @@
    "memory": {
     "webgl2": 527.7,
     "webgpu": 528
+   },
+   "memoryRender": {
+    "webgl2": 416.7,
+    "webgpu": 417
    }
   },
   {
@@ -182,6 +194,10 @@
    "memory": {
     "webgl2": 527.7,
     "webgpu": 528
+   },
+   "memoryRender": {
+    "webgl2": 416.7,
+    "webgpu": 417
    }
   },
   {
@@ -226,6 +242,10 @@
    "memory": {
     "webgl2": 527.6,
     "webgpu": 527.9
+   },
+   "memoryRender": {
+    "webgl2": 416.7,
+    "webgpu": 417
    }
   },
   {
@@ -270,6 +290,10 @@
    "memory": {
     "webgl2": 527.6,
     "webgpu": 363.1
+   },
+   "memoryRender": {
+    "webgl2": 416.7,
+    "webgpu": 252.2
    }
   },
   {
@@ -314,6 +338,10 @@
    "memory": {
     "webgl2": 518.2,
     "webgpu": 353.7
+   },
+   "memoryRender": {
+    "webgl2": 407.2,
+    "webgpu": 242.7
    }
   },
   {
@@ -358,6 +386,10 @@
    "memory": {
     "webgl2": 518.2,
     "webgpu": 353.6
+   },
+   "memoryRender": {
+    "webgl2": 407.2,
+    "webgpu": 242.7
    }
   },
   {
@@ -402,6 +434,10 @@
    "memory": {
     "webgl2": 518.2,
     "webgpu": 353.6
+   },
+   "memoryRender": {
+    "webgl2": 407.2,
+    "webgpu": 242.7
    }
   },
   {
@@ -446,6 +482,10 @@
    "memory": {
     "webgl2": 518.2,
     "webgpu": 353.7
+   },
+   "memoryRender": {
+    "webgl2": 407.2,
+    "webgpu": 242.7
    }
   },
   {
@@ -490,6 +530,10 @@
    "memory": {
     "webgl2": 518.2,
     "webgpu": 353.7
+   },
+   "memoryRender": {
+    "webgl2": 407.2,
+    "webgpu": 242.7
    }
   },
   {
@@ -534,6 +578,10 @@
    "memory": {
     "webgl2": 397.6,
     "webgpu": 233
+   },
+   "memoryRender": {
+    "webgl2": 280.1,
+    "webgpu": 115.5
    }
   },
   {
@@ -578,6 +626,10 @@
    "memory": {
     "webgl2": 397.6,
     "webgpu": 233
+   },
+   "memoryRender": {
+    "webgl2": 280.1,
+    "webgpu": 115.6
    }
   },
   {
@@ -623,6 +675,10 @@
    "memory": {
     "webgl2": 397.5,
     "webgpu": 233
+   },
+   "memoryRender": {
+    "webgl2": 280.1,
+    "webgpu": 115.6
    }
   },
   {
@@ -674,6 +730,10 @@
    "memory": {
     "webgl2": 234.9,
     "webgpu": 235.1
+   },
+   "memoryRender": {
+    "webgl2": 117.4,
+    "webgpu": 117.7
    }
   }
  ],
@@ -695,10 +755,13 @@
   }
  },
  "memory": {
-  "what": "MB of JavaScript heap that a layer of 300 000 points, 200 000 lines and 50 000 polygons (ol/Feature) adds to its features, with its source; one run per release and backend",
+  "what": "MB of JavaScript heap that a layer of 300 000 points, 200 000 lines and 50 000 polygons adds to its features, with its source: from ol/Feature (memory) and from RenderFeatures (memoryRender); one run per release and backend",
   "measured": "2026-11-28, on the same machine",
   "features": 609,
   "source": 175,
-  "ol": 540.6
+  "ol": 540.6,
+  "featuresRender": 174,
+  "sourceRender": 57,
+  "olRender": 429.6
  }
 }

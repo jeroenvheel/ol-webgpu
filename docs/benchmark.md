@@ -47,47 +47,46 @@ polygons, 14–16 ms for lines, on both backends), nor did a pick.
 
 **Memory per release**
 
-![Memory of a big layer per release: the heap that 300 000 points, 200 000 lines and 50 000 polygons take on top of the features, on WebGL2 and WebGPU, with ol's WebGLVector layer as a reference](../bench/memory.svg)
+![Memory of a big layer per release: the heap that 300 000 points, 200 000 lines and 50 000 polygons take on top of the features, as ol/Feature and as RenderFeatures, on WebGL2 and WebGPU, with ol's WebGLVector layer as a reference](../bench/memory.svg)
 
 The JavaScript heap that a layer of 300 000 points, 200 000 lines and 50 000
-polygons adds to its features (609 MB as `ol/Feature`), in MB. Every release
-was built again and measured on the same machine, one run each; the heap
-differs by 0.1 MB between runs. 175 MB of every number is ol's vector
-source, which listens to each feature: the layer itself went from 353 MB
-to 60 MB.
+polygons adds to its features, in MB: once with the features as `ol/Feature`
+(609 MB themselves) and once as RenderFeatures (`ol/render/Feature`, 174 MB
+themselves, what vector tile formats read and what a GeoJSON format can
+make). Every release was built again and measured on the same machine, one
+run each; the heap differs by 0.1 MB between runs.
 
-| Release | WebGL2 | WebGPU | What changed for memory |
-|---|---|---|---|
-| beta.0 | 528 | 528 |  |
-| beta.1 | 528 | 528 |  |
-| beta.2 | 528 | 528 |  |
-| beta.3 | 528 | 528 |  |
-| beta.4 | 528 | 528 |  |
-| beta.5 | 528 | 363 | WebGPU keeps no copy of its buffers |
-| beta.6 | 518 | 354 | the refs of the features without ol's map of uids |
-| beta.7 | 518 | 354 |  |
-| beta.8 | 518 | 354 |  |
-| beta.9 | 518 | 354 |  |
-| beta.10 | 518 | 354 |  |
-| beta.11 | 398 | 233 | the layer's own batch of features instead of ol's |
-| beta.12 | 398 | 233 |  |
-| beta.13 | 398 | 233 |  |
-| beta.14 | 235 | 235 | WebGL2 keeps no copy of buffers over 32 MB |
-| ol/layer/WebGLVector | 541 | | |
+| Release | WebGL2, ol/Feature | WebGPU, ol/Feature | WebGL2, RenderFeatures | WebGPU, RenderFeatures | What changed for memory |
+|---|---|---|---|---|---|
+| beta.0 | 528 | 528 | 417 | 417 |  |
+| beta.1 | 528 | 528 | 417 | 417 |  |
+| beta.2 | 528 | 528 | 417 | 417 |  |
+| beta.3 | 528 | 528 | 417 | 417 |  |
+| beta.4 | 528 | 528 | 417 | 417 |  |
+| beta.5 | 528 | 363 | 417 | 252 | WebGPU keeps no copy of its buffers |
+| beta.6 | 518 | 354 | 407 | 243 | the refs of the features without ol's map of uids |
+| beta.7 | 518 | 354 | 407 | 243 |  |
+| beta.8 | 518 | 354 | 407 | 243 |  |
+| beta.9 | 518 | 354 | 407 | 243 |  |
+| beta.10 | 518 | 354 | 407 | 243 |  |
+| beta.11 | 398 | 233 | 280 | 116 | the layer's own batch of features instead of ol's |
+| beta.12 | 398 | 233 | 280 | 116 |  |
+| beta.13 | 398 | 233 | 280 | 116 |  |
+| beta.14 | 235 | 235 | 117 | 118 | WebGL2 keeps no copy of buffers over 32 MB |
+| ol/layer/WebGLVector | 541 | | 430 | | |
 
-From beta.0 to beta.14 the layer takes 55% less on both backends, and less
-than half of what ol's own layer takes.
-
-The same from the memory test (`npm run test:memory -- --big`), which also
-measures RenderFeatures, in MB:
-
-| | WebGL2 | WebGPU | WebGL2, RenderFeatures | WebGPU, RenderFeatures |
-|---|---|---|---|---|
-| beta.5 | 528 | 364 | | |
-| beta.10 | 518 | 354 | 407 | 243 |
-| beta.11 to beta.13 | 398 | 233 | 280 | 116 |
-| the same, `keepBuffers: false` | 233 | – | | |
-| beta.14 (no copy of buffers over 32 MB by default) | 235 | 235 | 117 | 118 |
+- From beta.0 to beta.14 the layer takes 55% less with `ol/Feature` and 72%
+  less with RenderFeatures, on both backends: less than half, and close to a
+  quarter, of what ol's own layer takes.
+- Part of every number is ol's vector source, the same in every release:
+  175 MB with `ol/Feature` (it listens to each of them) and 57 MB with
+  RenderFeatures. Without it the layer went from about 355 MB to 60 MB with
+  either kind.
+- With RenderFeatures the features and the layer together are 292 MB where
+  they are 844 MB with `ol/Feature`: for layers that are only shown and
+  picked, that is the largest saving there is.
+- `keepBuffers: true` on WebGL2 brings back the copy of the buffers that
+  beta.14 leaves out for large layers: 398 and 280 MB.
 
 **Buffer generation (worker), ol's JS vs Rust/WASM**
 
