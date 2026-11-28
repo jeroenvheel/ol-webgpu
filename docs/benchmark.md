@@ -45,8 +45,41 @@ median of three runs:
 Frame times did not change over the releases (11–13 ms for points and
 polygons, 14–16 ms for lines, on both backends), nor did a pick.
 
-The heap a big layer adds (300 000 points, 200 000 lines, 50 000 polygons,
-`npm run test:memory -- --big`), in MB:
+**Memory per release**
+
+![Memory of a big layer per release: the heap that 300 000 points, 200 000 lines and 50 000 polygons take on top of the features, on WebGL2 and WebGPU, with ol's WebGLVector layer as a reference](../bench/memory.svg)
+
+The JavaScript heap that a layer of 300 000 points, 200 000 lines and 50 000
+polygons adds to its features (609 MB as `ol/Feature`), in MB. Every release
+was built again and measured on the same machine, one run each; the heap
+differs by 0.1 MB between runs. 175 MB of every number is ol's vector
+source, which listens to each feature: the layer itself went from 353 MB
+to 60 MB.
+
+| Release | WebGL2 | WebGPU | What changed for memory |
+|---|---|---|---|
+| beta.0 | 528 | 528 |  |
+| beta.1 | 528 | 528 |  |
+| beta.2 | 528 | 528 |  |
+| beta.3 | 528 | 528 |  |
+| beta.4 | 528 | 528 |  |
+| beta.5 | 528 | 363 | WebGPU keeps no copy of its buffers |
+| beta.6 | 518 | 354 | the refs of the features without ol's map of uids |
+| beta.7 | 518 | 354 |  |
+| beta.8 | 518 | 354 |  |
+| beta.9 | 518 | 354 |  |
+| beta.10 | 518 | 354 |  |
+| beta.11 | 398 | 233 | the layer's own batch of features instead of ol's |
+| beta.12 | 398 | 233 |  |
+| beta.13 | 398 | 233 |  |
+| beta.14 | 235 | 235 | WebGL2 keeps no copy of buffers over 32 MB |
+| ol/layer/WebGLVector | 541 | | |
+
+From beta.0 to beta.14 the layer takes 55% less on both backends, and less
+than half of what ol's own layer takes.
+
+The same from the memory test (`npm run test:memory -- --big`), which also
+measures RenderFeatures, in MB:
 
 | | WebGL2 | WebGPU | WebGL2, RenderFeatures | WebGPU, RenderFeatures |
 |---|---|---|---|---|

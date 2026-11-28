@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 340" width="640" height="340" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+<title id="t">Memory of a big layer per release of ol-webgpu</title>
+<desc id="d">Megabytes of JavaScript heap that a layer of 300 000 points, 200 000 lines and 50 000 polygons adds to its features, on WebGL2 and WebGPU, for releases 0.1.0-beta.0 to beta.14, with ol's WebGLVector layer as a reference. The numbers are in bench/history.json.</desc>
+<style>
+  .surface { fill: #ffffff; }
+  .primary { fill: #191919; }
+  .secondary { fill: #666666; }
+  .grid { stroke: #e8e8e8; stroke-width: 1; }
+  .ref { stroke: #9c9c9c; stroke-width: 1; }
+  .s1 { stroke: #257de0; } .s1f { fill: #257de0; }
+  .s2 { stroke: #f47230; } .s2f { fill: #f47230; }
+  .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .dot { stroke: #ffffff; stroke-width: 2; }
+  text { font-size: 12px; }
+  .title { font-size: 16px; font-weight: 600; }
+  .panel { font-size: 13px; font-weight: 600; }
+  .num { font-variant-numeric: tabular-nums; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #191919; }
+    .primary { fill: #efefef; }
+    .secondary { fill: #9c9c9c; }
+    .grid { stroke: #2e2e2e; }
+    .ref { stroke: #6e6e6e; }
+    .s1 { stroke: #338ced; } .s1f { fill: #338ced; }
+    .s2 { stroke: #e76624; } .s2f { fill: #e76624; }
+    .dot { stroke: #191919; }
+  }
+</style>
+<rect class="surface" width="640" height="340" rx="8"/>
+<text class="title primary" x="16" y="28">Memory of a big layer, per release</text>
+<text class="secondary" x="16" y="48">MB of heap that 300k points, 200k lines and 50k polygons take on top of the features; lower is better.</text>
+<g transform="translate(48 0)">
+<line class="grid" x1="0" y1="296" x2="528" y2="296"/>
+<text class="secondary num" x="-8" y="300" text-anchor="end">0</text>
+<line class="grid" x1="0" y1="225.3" x2="528" y2="225.3"/>
+<text class="secondary num" x="-8" y="229.3" text-anchor="end">200</text>
+<line class="grid" x1="0" y1="154.7" x2="528" y2="154.7"/>
+<text class="secondary num" x="-8" y="158.7" text-anchor="end">400</text>
+<line class="grid" x1="0" y1="84" x2="528" y2="84"/>
+<text class="secondary num" x="-8" y="88" text-anchor="end">600</text>
+<text class="secondary num" x="0" y="314" text-anchor="middle">0</text>
+<text class="secondary num" x="113.1" y="314" text-anchor="middle">3</text>
+<text class="secondary num" x="226.3" y="314" text-anchor="middle">6</text>
+<text class="secondary num" x="339.4" y="314" text-anchor="middle">9</text>
+<text class="secondary num" x="452.6" y="314" text-anchor="middle">12</text>
+<text class="secondary num" x="528" y="314" text-anchor="middle">14</text>
+<text class="secondary" x="0" y="332">release 0.1.0-beta.N</text>
+<line class="ref" x1="0" y1="105" x2="528" y2="105"/>
+<text class="secondary num" x="549" y="109">541</text>
+<polyline class="line s1" points="0,109.5 37.7,109.5 75.4,109.5 113.1,109.5 150.9,109.6 188.6,109.6 226.3,112.9 264,112.9 301.7,112.9 339.4,112.9 377.1,112.9 414.9,155.5 452.6,155.5 490.3,155.6 528,213"/>
+<circle class="dot s1f" cx="0" cy="109.5" r="3.5"/>
+<circle class="dot s1f" cx="37.7" cy="109.5" r="3.5"/>
+<circle class="dot s1f" cx="75.4" cy="109.5" r="3.5"/>
+<circle class="dot s1f" cx="113.1" cy="109.5" r="3.5"/>
+<circle class="dot s1f" cx="150.9" cy="109.6" r="3.5"/>
+<circle class="dot s1f" cx="188.6" cy="109.6" r="3.5"/>
+<circle class="dot s1f" cx="226.3" cy="112.9" r="3.5"/>
+<circle class="dot s1f" cx="264" cy="112.9" r="3.5"/>
+<circle class="dot s1f" cx="301.7" cy="112.9" r="3.5"/>
+<circle class="dot s1f" cx="339.4" cy="112.9" r="3.5"/>
+<circle class="dot s1f" cx="377.1" cy="112.9" r="3.5"/>
+<circle class="dot s1f" cx="414.9" cy="155.5" r="3.5"/>
+<circle class="dot s1f" cx="452.6" cy="155.5" r="3.5"/>
+<circle class="dot s1f" cx="490.3" cy="155.6" r="3.5"/>
+<circle class="dot s1f" cx="528" cy="213" r="3.5"/>
+<polyline class="line s2" points="0,109.5 37.7,109.5 75.4,109.4 113.1,109.4 150.9,109.5 188.6,167.7 226.3,171 264,171.1 301.7,171.1 339.4,171 377.1,171 414.9,213.7 452.6,213.7 490.3,213.7 528,212.9"/>
+<circle class="dot s2f" cx="0" cy="109.5" r="3.5"/>
+<circle class="dot s2f" cx="37.7" cy="109.5" r="3.5"/>
+<circle class="dot s2f" cx="75.4" cy="109.4" r="3.5"/>
+<circle class="dot s2f" cx="113.1" cy="109.4" r="3.5"/>
+<circle class="dot s2f" cx="150.9" cy="109.5" r="3.5"/>
+<circle class="dot s2f" cx="188.6" cy="167.7" r="3.5"/>
+<circle class="dot s2f" cx="226.3" cy="171" r="3.5"/>
+<circle class="dot s2f" cx="264" cy="171.1" r="3.5"/>
+<circle class="dot s2f" cx="301.7" cy="171.1" r="3.5"/>
+<circle class="dot s2f" cx="339.4" cy="171" r="3.5"/>
+<circle class="dot s2f" cx="377.1" cy="171" r="3.5"/>
+<circle class="dot s2f" cx="414.9" cy="213.7" r="3.5"/>
+<circle class="dot s2f" cx="452.6" cy="213.7" r="3.5"/>
+<circle class="dot s2f" cx="490.3" cy="213.7" r="3.5"/>
+<circle class="dot s2f" cx="528" cy="212.9" r="3.5"/>
+<line class="line s2" x1="536" y1="206" x2="544" y2="206"/>
+<text class="primary num" x="549" y="210">235</text>
+<line class="line s1" x1="536" y1="220" x2="544" y2="220"/>
+<text class="primary num" x="549" y="224">235</text>
+</g>
+<line class="line s1" x1="16" y1="64" x2="34" y2="64"/><text class="primary" x="40" y="68">WebGL2</text>
+<line class="line s2" x1="108" y1="64" x2="126" y2="64"/><text class="primary" x="132" y="68">WebGPU</text>
+<line class="ref" x1="204" y1="64" x2="222" y2="64"/><text class="primary" x="228" y="68">ol/layer/WebGLVector</text>
+</svg>
